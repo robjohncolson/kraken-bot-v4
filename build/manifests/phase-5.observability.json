@@ -1,0 +1,152 @@
+{
+  "schema_version": "build-manifest/v1",
+  "project": "kraken-bot-v4",
+  "phase": {
+    "id": "5",
+    "name": "Observability",
+    "spec_ref": "SPEC.md#9. Dashboard (web/) and Phase 5: Observability",
+    "created_at": "2026-03-24T16:00:00-04:00",
+    "created_by": "claude-code"
+  },
+  "global_constraints": {
+    "max_attempts_per_task": 3,
+    "max_files_changed_per_task": 10,
+    "module_line_cap": 500,
+    "typed_exceptions_only": true,
+    "frozen_dataclasses_preferred": true,
+    "no_git_push": true
+  },
+  "tasks": [
+    {
+      "id": "5.1",
+      "description": "Create FastAPI app shell with SSE broadcaster in web/app.py and web/sse.py.",
+      "acceptance_criteria": [
+        "FastAPI app exists in web/app.py with CORS middleware and a health endpoint (GET /api/health).",
+        "SSE broadcaster exists in web/sse.py with publish() and subscribe() functions for real-time event streaming.",
+        "GET /sse/updates endpoint streams Server-Sent Events to connected clients.",
+        "Health endpoint returns JSON with version, phase status, and uptime.",
+        "Tests cover health endpoint response and SSE subscription/publish round-trip."
+      ],
+      "owned_paths": [
+        "web/app.py",
+        "web/sse.py",
+        "tests/web/test_app.py"
+      ],
+      "dependencies": [],
+      "status": "pending",
+      "test_targets": [
+        "tests/web/test_app.py"
+      ]
+    },
+    {
+      "id": "5.2",
+      "description": "Create read-only API routes in web/routes.py for portfolio, positions, grid, beliefs, stats, and reconciliation.",
+      "acceptance_criteria": [
+        "GET /api/portfolio returns current portfolio state as JSON.",
+        "GET /api/positions returns open positions with P&L as JSON.",
+        "GET /api/grid/{pair} returns grid status for a pair (active slots, phase distribution, cycle history).",
+        "GET /api/beliefs returns latest beliefs per source per pair.",
+        "GET /api/stats returns strategy statistics (placeholder structure).",
+        "GET /api/reconciliation returns last reconciliation result.",
+        "All endpoints are GET-only. No POST, PUT, or DELETE endpoints exist.",
+        "Routes accept injected state (dependency injection pattern) rather than importing global state.",
+        "Tests cover each endpoint with mock state data."
+      ],
+      "owned_paths": [
+        "web/routes.py",
+        "tests/web/test_routes.py"
+      ],
+      "dependencies": ["5.1"],
+      "status": "pending",
+      "test_targets": [
+        "tests/web/test_routes.py"
+      ]
+    },
+    {
+      "id": "5.3",
+      "description": "Create static frontend shell: index.html, app.js (SSE connection), and styles.css.",
+      "acceptance_criteria": [
+        "web/static/index.html provides the dashboard layout with placeholder sections for portfolio, grid, beliefs, stats, and reconciliation.",
+        "web/static/app.js connects to /sse/updates and dispatches events to placeholder update functions.",
+        "web/static/styles.css provides basic responsive styling.",
+        "FastAPI serves static files from web/static/ at the root path.",
+        "HTML references app.js and styles.css correctly.",
+        "No D3.js in this task -- just the shell that D3 modules will plug into."
+      ],
+      "owned_paths": [
+        "web/static/index.html",
+        "web/static/app.js",
+        "web/static/styles.css",
+        "tests/web/test_static.py"
+      ],
+      "dependencies": ["5.1"],
+      "status": "pending",
+      "test_targets": [
+        "tests/web/test_static.py"
+      ]
+    },
+    {
+      "id": "5.4",
+      "description": "Create D3.js grid status visualization in web/static/d3-grid.js.",
+      "acceptance_criteria": [
+        "d3-grid.js exports a renderGridStatus() function that takes grid state JSON and a DOM container ID.",
+        "Visualizes: active slot count per phase (S0/S1a/S1b/S2) as a stacked bar or heatmap.",
+        "Visualizes: recent grid cycle P&L as a mini bar chart (green for profit, red for loss).",
+        "Updates incrementally via SSE events without full re-render.",
+        "File is under 300 lines (leaves room for future additions within 500 cap).",
+        "Tests verify the module exports the expected function and handles empty/null data gracefully."
+      ],
+      "owned_paths": [
+        "web/static/d3-grid.js",
+        "tests/web/test_d3_grid.py"
+      ],
+      "dependencies": ["5.3"],
+      "status": "pending",
+      "test_targets": [
+        "tests/web/test_d3_grid.py"
+      ]
+    },
+    {
+      "id": "5.5",
+      "description": "Create D3.js belief agreement visualization in web/static/d3-beliefs.js.",
+      "acceptance_criteria": [
+        "d3-beliefs.js exports a renderBeliefMatrix() function that takes belief data JSON and a DOM container ID.",
+        "Visualizes a source x pair matrix showing agreement/disagreement with color coding.",
+        "Shows consensus direction and strength for each pair.",
+        "Updates incrementally via SSE events.",
+        "File is under 300 lines.",
+        "Tests verify the module exports the expected function and handles empty/null data gracefully."
+      ],
+      "owned_paths": [
+        "web/static/d3-beliefs.js",
+        "tests/web/test_d3_beliefs.py"
+      ],
+      "dependencies": ["5.3"],
+      "status": "pending",
+      "test_targets": [
+        "tests/web/test_d3_beliefs.py"
+      ]
+    },
+    {
+      "id": "5.6",
+      "description": "Create Telegram alert module in alerts/telegram.py and alerts/formatter.py.",
+      "acceptance_criteria": [
+        "TelegramAlerter class sends messages to a configured chat via bot token.",
+        "MessageFormatter formats alert types: position_opened, position_closed, stop_triggered, reconciliation_mismatch, belief_stale, guardian_action.",
+        "Each alert type has a distinct format with key details (pair, price, P&L where relevant).",
+        "If TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is not set, alerter logs a warning and no-ops (does not crash).",
+        "Tests mock the HTTP call and verify message formatting for each alert type."
+      ],
+      "owned_paths": [
+        "alerts/telegram.py",
+        "alerts/formatter.py",
+        "tests/alerts/test_telegram.py"
+      ],
+      "dependencies": [],
+      "status": "pending",
+      "test_targets": [
+        "tests/alerts/test_telegram.py"
+      ]
+    }
+  ]
+}
