@@ -33,6 +33,9 @@ DEFAULT_RECONCILE_INTERVAL_SEC = 300
 DEFAULT_STATS_MIN_SAMPLE_SIZE = 30
 DEFAULT_STATS_NORMALITY_CHECK = True
 DEFAULT_STATS_FAIL_CLOSED = True
+DEFAULT_READ_ONLY_EXCHANGE = True
+DEFAULT_DISABLE_ORDER_MUTATIONS = True
+DEFAULT_STARTUP_RECONCILE_ONLY = True
 
 ALLOWED_KRAKEN_TIERS = frozenset({"starter", "intermediate", "pro"})
 TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
@@ -79,6 +82,9 @@ class Settings:
     stats_min_sample_size: int
     stats_normality_check: bool
     stats_fail_closed: bool
+    read_only_exchange: bool
+    disable_order_mutations: bool
+    startup_reconcile_only: bool
 
 
 def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
@@ -142,6 +148,15 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
             env, "STATS_NORMALITY_CHECK", DEFAULT_STATS_NORMALITY_CHECK
         ),
         stats_fail_closed=_read_bool(env, "STATS_FAIL_CLOSED", DEFAULT_STATS_FAIL_CLOSED),
+        read_only_exchange=_read_bool(
+            env, "READ_ONLY_EXCHANGE", DEFAULT_READ_ONLY_EXCHANGE
+        ),
+        disable_order_mutations=_read_bool(
+            env, "DISABLE_ORDER_MUTATIONS", DEFAULT_DISABLE_ORDER_MUTATIONS
+        ),
+        startup_reconcile_only=_read_bool(
+            env, "STARTUP_RECONCILE_ONLY", DEFAULT_STARTUP_RECONCILE_ONLY
+        ),
     )
 
 

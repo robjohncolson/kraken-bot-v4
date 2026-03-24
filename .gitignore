@@ -1,4 +1,5 @@
 .gitnexus
+.env
 
 # Build system runtime state
 build/state/
