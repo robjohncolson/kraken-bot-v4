@@ -1,0 +1,172 @@
+{
+  "schema_version": "build-manifest/v1",
+  "project": "kraken-bot-v4",
+  "phase": {
+    "id": "4",
+    "name": "Trading",
+    "spec_ref": "SPEC.md#Phase 4: Trading",
+    "created_at": "2026-03-24T14:00:00-04:00",
+    "created_by": "claude-code"
+  },
+  "global_constraints": {
+    "max_attempts_per_task": 3,
+    "max_files_changed_per_task": 10,
+    "module_line_cap": 500,
+    "typed_exceptions_only": true,
+    "frozen_dataclasses_preferred": true,
+    "no_git_push": true
+  },
+  "tasks": [
+    {
+      "id": "4.1",
+      "description": "Implement position lifecycle management in trading/position.py.",
+      "acceptance_criteria": [
+        "PositionLifecycle provides pure functions: open_position(), close_position(), update_stop(), update_target().",
+        "Each function takes a Position (from core.types) and returns a new frozen Position plus a list of Actions.",
+        "open_position() requires a BeliefSnapshot and computes initial stop/target from config defaults.",
+        "close_position() records the close reason and produces a ClosePosition action.",
+        "No I/O in any function — pure state transitions only.",
+        "Tests cover open, close, stop update, target update, and rejection of invalid transitions."
+      ],
+      "owned_paths": [
+        "trading/position.py",
+        "tests/trading/test_position.py"
+      ],
+      "dependencies": [],
+      "status": "pending",
+      "test_targets": [
+        "tests/trading/test_position.py"
+      ]
+    },
+    {
+      "id": "4.2",
+      "description": "Implement position sizing via Kelly criterion with CI bounds in trading/sizing.py.",
+      "acceptance_criteria": [
+        "kelly_fraction() computes the Kelly fraction from win probability and payoff ratio.",
+        "bounded_kelly() constrains the Kelly result using the lower bound of a configurable confidence interval (default 95%).",
+        "size_position_usd() returns the USD amount to allocate given portfolio value, Kelly fraction, and MIN/MAX_POSITION_USD bounds.",
+        "All calculations use Decimal arithmetic.",
+        "Tests cover: normal Kelly, edge cases (0% win rate, 100% win rate, zero payoff), CI bounding, and min/max clamping."
+      ],
+      "owned_paths": [
+        "trading/sizing.py",
+        "tests/trading/test_sizing.py"
+      ],
+      "dependencies": [],
+      "status": "pending",
+      "test_targets": [
+        "tests/trading/test_sizing.py"
+      ]
+    },
+    {
+      "id": "4.3",
+      "description": "Implement portfolio management in trading/portfolio.py with USD accounting and DOGE accumulation logic.",
+      "acceptance_criteria": [
+        "PortfolioManager provides pure functions: apply_fill(), apply_close(), compute_concentration(), compute_directional_exposure().",
+        "apply_fill() updates Portfolio (from core.types) with a new or modified position, returning a new frozen Portfolio.",
+        "apply_close() removes a position, updates cash_usd, and optionally queues a DOGE accumulation action if DOGE is bullish.",
+        "compute_concentration() returns per-pair allocation percentages.",
+        "compute_directional_exposure() returns net long minus net short as a percentage of total value.",
+        "All functions are pure — take state in, return new state out.",
+        "Tests cover fills, closes, concentration math, directional exposure, and DOGE accumulation path."
+      ],
+      "owned_paths": [
+        "trading/portfolio.py",
+        "tests/trading/test_portfolio.py"
+      ],
+      "dependencies": ["4.1"],
+      "status": "pending",
+      "test_targets": [
+        "tests/trading/test_portfolio.py"
+      ]
+    },
+    {
+      "id": "4.4",
+      "description": "Implement risk rules enforcement in trading/risk_rules.py.",
+      "acceptance_criteria": [
+        "check_position_rules() validates: stop-loss is set, position size is within Kelly bounds, re-entry cooldown is respected.",
+        "check_portfolio_rules() validates: max positions, max same-side concentration (60%), max single-pair allocation (15%), max drawdown soft (10%) and hard (15%) limits.",
+        "RiskCheckResult is a frozen dataclass containing: passed (bool), violations (list of typed violation objects), and recommended_action.",
+        "Soft drawdown (10%) blocks new entries. Hard drawdown (15%) produces ClosePosition actions for all positions.",
+        "All functions are pure — no I/O.",
+        "Tests cover: clean portfolio (all pass), each violation type individually, soft vs hard drawdown, and combined violations."
+      ],
+      "owned_paths": [
+        "trading/risk_rules.py",
+        "tests/trading/test_risk_rules.py"
+      ],
+      "dependencies": ["4.2", "4.3"],
+      "status": "pending",
+      "test_targets": [
+        "tests/trading/test_risk_rules.py"
+      ]
+    },
+    {
+      "id": "4.5",
+      "description": "Implement Kraken state reconciler in trading/reconciler.py.",
+      "acceptance_criteria": [
+        "reconcile() takes Kraken state (balances, open orders, trade history) and Supabase state (positions, orders) and returns a ReconciliationReport.",
+        "ReconciliationReport is a frozen dataclass listing: ghost_positions, foreign_orders, fee_drift, untracked_assets, and severity per discrepancy.",
+        "Ghost position detection: positions in Supabase with no matching Kraken open orders or recent fills.",
+        "Foreign order detection: Kraken orders without matching cl_ord_id prefix.",
+        "Foreign order classification: new, acked, stale (age-based), with recommended actions.",
+        "Auto-fix rules: LOW severity discrepancies get an auto_fix action. HIGH severity produces an alert action.",
+        "All functions are pure — take state snapshots in, return report out.",
+        "Tests cover: clean state (no discrepancies), ghost position, foreign order lifecycle, fee drift detection, and severity classification."
+      ],
+      "owned_paths": [
+        "trading/reconciler.py",
+        "tests/trading/test_reconciler.py"
+      ],
+      "dependencies": ["4.1", "4.3"],
+      "status": "pending",
+      "test_targets": [
+        "tests/trading/test_reconciler.py"
+      ]
+    },
+    {
+      "id": "4.6",
+      "description": "Implement the guardian autonomous position monitor in guardian.py.",
+      "acceptance_criteria": [
+        "Guardian provides check_positions() that takes current prices, portfolio, and config, and returns a list of GuardianActions.",
+        "Stop monitoring: flags positions where price has reached or breached the stop level.",
+        "Target monitoring: flags positions where price has reached or breached the target level.",
+        "Belief staleness: flags positions whose belief is older than BELIEF_STALE_HOURS.",
+        "Risk enforcement: delegates to trading/risk_rules.py for portfolio-level checks.",
+        "GuardianAction is a frozen dataclass with action type (limit_exit_attempt, stop_triggered, target_hit, belief_stale, risk_violation) and details.",
+        "Guardian is under 500 lines. It does exactly three things per SPEC.md: stop/target monitoring, risk rule enforcement, belief staleness.",
+        "Tests cover: stop hit, target hit, stale belief, clean portfolio, multiple simultaneous triggers."
+      ],
+      "owned_paths": [
+        "guardian.py",
+        "tests/test_guardian.py"
+      ],
+      "dependencies": ["4.1", "4.3", "4.4"],
+      "status": "pending",
+      "test_targets": [
+        "tests/test_guardian.py"
+      ]
+    },
+    {
+      "id": "4.7",
+      "description": "Implement the main loop scheduler in scheduler.py.",
+      "acceptance_criteria": [
+        "Scheduler class provides run_cycle() that orchestrates one iteration of the main loop.",
+        "Cycle steps: (1) check guardian, (2) check belief staleness, (3) run reconciliation, (4) process any pending belief signals, (5) process grid cycles, (6) emit state update for dashboard SSE.",
+        "run_cycle() is a pure orchestration function that takes current state and returns (new_state, actions_to_execute).",
+        "SchedulerConfig is a frozen dataclass with cycle_interval_sec, reconcile_interval_sec, and guardian_interval_sec.",
+        "Scheduler is under 500 lines.",
+        "Tests cover: a clean cycle with no actions needed, a cycle that triggers guardian stop, a cycle that triggers reconciliation, and a cycle that processes a belief update."
+      ],
+      "owned_paths": [
+        "scheduler.py",
+        "tests/test_scheduler.py"
+      ],
+      "dependencies": ["4.1", "4.3", "4.4", "4.5", "4.6"],
+      "status": "pending",
+      "test_targets": [
+        "tests/test_scheduler.py"
+      ]
+    }
+  ]
+}
