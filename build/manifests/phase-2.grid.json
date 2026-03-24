@@ -1,0 +1,127 @@
+{
+  "schema_version": "build-manifest/v1",
+  "project": "kraken-bot-v4",
+  "phase": {
+    "id": "2",
+    "name": "Grid Engine",
+    "spec_ref": "SPEC.md#3. Grid Trading Engine (grid/)",
+    "created_at": "2026-03-24T08:00:00-04:00",
+    "created_by": "claude-code"
+  },
+  "global_constraints": {
+    "max_attempts_per_task": 3,
+    "max_files_changed_per_task": 10,
+    "module_line_cap": 500,
+    "typed_exceptions_only": true,
+    "frozen_dataclasses_preferred": true,
+    "no_git_push": true
+  },
+  "tasks": [
+    {
+      "id": "2.1",
+      "description": "Create grid-internal models in grid/states.py: GridSlot, GridLeg, GridCycleRecord, and derive_phase().",
+      "acceptance_criteria": [
+        "GridSlot is a frozen dataclass representing one grid position with A and B legs.",
+        "GridLeg is a frozen dataclass for a single managed grid order (entry or exit), distinct from core OrderRequest/OrderSnapshot.",
+        "GridCycleRecord is a frozen dataclass for a completed round-trip (entry+exit) with gross/net P&L and fees.",
+        "derive_phase() returns the correct GridPhase (from core/types.py) given a GridSlot's current legs.",
+        "No GridPhase redefinition — imports from core.types.",
+        "Tests cover derive_phase() for all four phases and edge cases (no legs, partial legs)."
+      ],
+      "owned_paths": [
+        "grid/__init__.py",
+        "grid/states.py",
+        "tests/grid/__init__.py",
+        "tests/grid/test_states.py"
+      ],
+      "dependencies": [],
+      "status": "pending",
+      "test_targets": [
+        "tests/grid/test_states.py"
+      ]
+    },
+    {
+      "id": "2.2",
+      "description": "Implement pure grid lifecycle transitions in grid/states.py: S0->S1a/S1b->S2->S0 via entry fills and exit fills.",
+      "acceptance_criteria": [
+        "apply_entry_fill() transitions S0->S1a (buy filled) or S0->S1b (sell filled), creating the matching exit leg.",
+        "apply_exit_fill() transitions S1a->S0 or S1b->S0 (single-leg cycle complete) or S2->S1a/S1b (one exit fills).",
+        "apply_entry_fill() on S1a/S1b transitions to S2 (both legs filled, both exits pending).",
+        "All transitions return a new frozen GridSlot plus a list of GridCycleRecord for any completed cycles.",
+        "No orphaning logic — that belongs in grid/engine.py.",
+        "Tests cover every valid transition path and reject invalid ones."
+      ],
+      "owned_paths": [
+        "grid/states.py",
+        "tests/grid/test_states.py"
+      ],
+      "dependencies": ["2.1"],
+      "status": "pending",
+      "test_targets": [
+        "tests/grid/test_states.py"
+      ]
+    },
+    {
+      "id": "2.3",
+      "description": "Implement grid slot sizing in grid/sizing.py: minimum trade size calculation, slot count from capital, remainder handling.",
+      "acceptance_criteria": [
+        "min_slot_size_usd() returns the minimum trade size for a given pair based on Kraken minimums.",
+        "calculate_slot_count() divides available capital into the maximum number of minimum-sized slots.",
+        "Remainder capital that doesn't fill a full slot is reported but not lost.",
+        "All calculations use Decimal, not float.",
+        "Tests cover normal cases, edge cases (capital < minimum), and multiple pair minimums."
+      ],
+      "owned_paths": [
+        "grid/sizing.py",
+        "tests/grid/test_sizing.py"
+      ],
+      "dependencies": ["2.1"],
+      "status": "pending",
+      "test_targets": [
+        "tests/grid/test_sizing.py"
+      ]
+    },
+    {
+      "id": "2.4",
+      "description": "Implement grid accounting in grid/accounting.py: cycle P&L booking, cumulative tracking, parent position risk linkage.",
+      "acceptance_criteria": [
+        "book_cycle() takes a GridCycleRecord and updates cumulative P&L (frozen dataclass, returns new instance).",
+        "GridAccountingSummary tracks total_cycles, total_profit_usd, total_fees_usd, and net_pnl_usd.",
+        "risk_adjustment() returns a Decimal representing how grid P&L should adjust the parent position's risk score (positive P&L reduces risk, negative increases it).",
+        "All calculations use Decimal.",
+        "Tests cover profitable cycles, losing cycles, fee handling, and the risk adjustment formula."
+      ],
+      "owned_paths": [
+        "grid/accounting.py",
+        "tests/grid/test_accounting.py"
+      ],
+      "dependencies": ["2.1", "2.2"],
+      "status": "pending",
+      "test_targets": [
+        "tests/grid/test_accounting.py"
+      ]
+    },
+    {
+      "id": "2.5",
+      "description": "Implement grid engine orchestration in grid/engine.py: activation, deactivation, profit redistribution, capacity headroom, and orphan detection hooks.",
+      "acceptance_criteria": [
+        "activate_grid() creates initial grid slots from sizing and places entry orders via action list.",
+        "deactivate_grid() stops new entries and returns actions to let existing orders fill naturally.",
+        "redistribute_profits() redistributes accumulated profit across active slots (compounding).",
+        "headroom_budget() calculates how many grid orders can be placed given remaining Kraken order capacity and the configurable GRID_HEADROOM_PCT.",
+        "detect_orphans() identifies grid legs that have been stuck beyond a configurable timeout and returns them for engine-level repair.",
+        "All functions are pure (take state in, return new state + actions out) where possible.",
+        "Tests cover activation, deactivation, redistribution math, headroom calculation, and orphan detection."
+      ],
+      "owned_paths": [
+        "grid/engine.py",
+        "tests/grid/test_engine.py"
+      ],
+      "dependencies": ["2.1", "2.2", "2.3", "2.4"],
+      "status": "pending",
+      "test_targets": [
+        "tests/grid/test_engine.py"
+      ]
+    }
+  ]
+}
