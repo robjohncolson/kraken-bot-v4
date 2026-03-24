@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Kraken Bot V4 Dashboard</title>
+    <link rel="stylesheet" href="./styles.css">
+    <script src="./app.js" defer></script>
+  </head>
+  <body>
+    <div id="app">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">Railway Observability Shell</p>
+          <h1>Kraken Bot V4 Dashboard</h1>
+          <p class="hero-copy">
+            Read-only portfolio and system visibility. D3 visualizations plug into the
+            sections below in later tasks.
+          </p>
+        </div>
+        <dl class="status-strip" aria-label="Dashboard status">
+          <div>
+            <dt>Connection</dt>
+            <dd id="connection-status">Connecting...</dd>
+          </div>
+          <div>
+            <dt>Last Event</dt>
+            <dd id="last-event">Waiting for updates</dd>
+          </div>
+        </dl>
+      </header>
+
+      <main class="panel-grid">
+        <section class="panel panel-wide" id="portfolio-section" aria-labelledby="portfolio-title">
+          <div class="panel-header">
+            <h2 id="portfolio-title">Portfolio</h2>
+            <span class="panel-tag">Realtime</span>
+          </div>
+          <div class="placeholder" id="portfolio-content">
+            Portfolio totals and open position cards will render here.
+          </div>
+          <div class="placeholder subtle" id="positions-content">
+            Position-level belief summaries will render here.
+          </div>
+        </section>
+
+        <section class="panel" id="grid-section" aria-labelledby="grid-title">
+          <div class="panel-header">
+            <h2 id="grid-title">Grid</h2>
+            <span class="panel-tag">Placeholder</span>
+          </div>
+          <div class="placeholder" id="grid-content">
+            Grid status modules will attach to this container.
+          </div>
+        </section>
+
+        <section class="panel" id="beliefs-section" aria-labelledby="beliefs-title">
+          <div class="panel-header">
+            <h2 id="beliefs-title">Beliefs</h2>
+            <span class="panel-tag">Placeholder</span>
+          </div>
+          <div class="placeholder" id="beliefs-content">
+            Latest source agreement and confidence summaries will render here.
+          </div>
+        </section>
+
+        <section class="panel" id="stats-section" aria-labelledby="stats-title">
+          <div class="panel-header">
+            <h2 id="stats-title">Stats</h2>
+            <span class="panel-tag">Placeholder</span>
+          </div>
+          <div class="placeholder" id="stats-content">
+            Strategy metrics and confidence intervals will render here.
+          </div>
+        </section>
+
+        <section
+          class="panel"
+          id="reconciliation-section"
+          aria-labelledby="reconciliation-title"
+        >
+          <div class="panel-header">
+            <h2 id="reconciliation-title">Reconciliation</h2>
+            <span class="panel-tag">Safety</span>
+          </div>
+          <div class="placeholder" id="reconciliation-content">
+            Last reconciliation status and discrepancy details will render here.
+          </div>
+        </section>
+
+        <section class="panel panel-wide" id="alerts-section" aria-labelledby="alerts-title">
+          <div class="panel-header">
+            <h2 id="alerts-title">Alert Log</h2>
+            <span class="panel-tag">Events</span>
+          </div>
+          <ul class="event-log" id="alerts-content">
+            <li>No alerts received yet.</li>
+          </ul>
+        </section>
+      </main>
+    </div>
+  </body>
+</html>
