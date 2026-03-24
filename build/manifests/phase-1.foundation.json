@@ -1,0 +1,167 @@
+{
+  "schema_version": "build-manifest/v1",
+  "project": "kraken-bot-v4",
+  "phase": {
+    "id": "1",
+    "name": "Foundation",
+    "spec_ref": "SPEC.md#Implementation Phases > Phase 1: Foundation",
+    "created_at": "2026-03-23T22:00:00-04:00",
+    "created_by": "codex"
+  },
+  "global_constraints": {
+    "max_attempts_per_task": 3,
+    "max_files_changed_per_task": 10,
+    "module_line_cap": 500,
+    "typed_exceptions_only": true,
+    "frozen_dataclasses_preferred": true,
+    "no_git_push": true
+  },
+  "tasks": [
+    {
+      "id": "1.1",
+      "description": "Create env-driven config scaffolding and typed error base classes.",
+      "acceptance_criteria": [
+        "Settings load from environment with explicit defaults.",
+        "Typed error hierarchy exists for config and exchange failures.",
+        "Tests cover missing required env and default loading."
+      ],
+      "owned_paths": [
+        "core/config.py",
+        "core/errors.py",
+        "tests/core/test_config.py"
+      ],
+      "dependencies": [],
+      "status": "pending",
+      "test_targets": [
+        "tests/core/test_config.py"
+      ]
+    },
+    {
+      "id": "1.2",
+      "description": "Create frozen dataclasses and enums in core/types.py for the reducer and exchange interfaces.",
+      "acceptance_criteria": [
+        "Core state/value models are frozen dataclasses.",
+        "Shared enums and type aliases live in core/types.py.",
+        "Tests cover immutability for representative dataclasses."
+      ],
+      "owned_paths": [
+        "core/types.py",
+        "tests/core/test_types.py"
+      ],
+      "dependencies": [
+        "1.1"
+      ],
+      "status": "pending",
+      "test_targets": [
+        "tests/core/test_types.py"
+      ]
+    },
+    {
+      "id": "1.3",
+      "description": "Implement a pure reducer skeleton in core/state_machine.py.",
+      "acceptance_criteria": [
+        "Reducer has no I/O and returns (state, actions).",
+        "Reducer handles an initial no-op transition deterministically.",
+        "Tests prove the reducer is pure on repeated identical inputs."
+      ],
+      "owned_paths": [
+        "core/state_machine.py",
+        "tests/core/test_state_machine.py"
+      ],
+      "dependencies": [
+        "1.1",
+        "1.2"
+      ],
+      "status": "pending",
+      "test_targets": [
+        "tests/core/test_state_machine.py"
+      ]
+    },
+    {
+      "id": "1.4",
+      "description": "Implement AP Stats normality gate utilities and initial validation tests.",
+      "acceptance_criteria": [
+        "normality.py exposes a reusable normality gate function.",
+        "Outputs are deterministic for known sample datasets.",
+        "Tests cover pass and fail cases."
+      ],
+      "owned_paths": [
+        "stats/normality.py",
+        "tests/stats/test_normality.py"
+      ],
+      "dependencies": [
+        "1.1"
+      ],
+      "status": "pending",
+      "test_targets": [
+        "tests/stats/test_normality.py"
+      ]
+    },
+    {
+      "id": "1.5",
+      "description": "Create exchange/client.py with Starter-tier rate limiting scaffolding and shared symbol normalization hooks.",
+      "acceptance_criteria": [
+        "Kraken client skeleton exists in exchange/client.py.",
+        "Starter-tier rate limiting rules are encoded in the client layer.",
+        "Tests cover representative rate limit and symbol normalization cases."
+      ],
+      "owned_paths": [
+        "exchange/client.py",
+        "exchange/symbols.py",
+        "tests/exchange/test_client.py",
+        "tests/exchange/test_symbols.py"
+      ],
+      "dependencies": [
+        "1.1"
+      ],
+      "status": "pending",
+      "test_targets": [
+        "tests/exchange/test_client.py",
+        "tests/exchange/test_symbols.py"
+      ]
+    },
+    {
+      "id": "1.6",
+      "description": "Implement OrderGate scaffolding with cl_ord_id generation and a circuit breaker shell.",
+      "acceptance_criteria": [
+        "OrderGate is the only module that constructs order payloads.",
+        "Every emitted order payload includes cl_ord_id.",
+        "Circuit breaker shell blocks mutations after repeated failures.",
+        "Tests cover cl_ord_id generation and breaker trip behavior."
+      ],
+      "owned_paths": [
+        "exchange/order_gate.py",
+        "tests/exchange/test_order_gate.py"
+      ],
+      "dependencies": [
+        "1.2",
+        "1.5"
+      ],
+      "status": "pending",
+      "test_targets": [
+        "tests/exchange/test_order_gate.py"
+      ]
+    },
+    {
+      "id": "1.7",
+      "description": "Create persistence/supabase.py with offline queue scaffolding for deferred writes.",
+      "acceptance_criteria": [
+        "Supabase client interface exists without embedding secrets.",
+        "Offline queue behavior lives in persistence/supabase.py.",
+        "Tests cover enqueue, dequeue, and replay-ready serialization."
+      ],
+      "owned_paths": [
+        "persistence/supabase.py",
+        "tests/persistence/test_supabase.py"
+      ],
+      "dependencies": [
+        "1.1",
+        "1.2"
+      ],
+      "status": "pending",
+      "test_targets": [
+        "tests/persistence/test_supabase.py"
+      ]
+    }
+  ]
+}

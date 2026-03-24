@@ -1,0 +1,7 @@
+.gitnexus
+
+# Build system runtime state
+build/state/
+build/logs/
+state/
+__pycache__/
