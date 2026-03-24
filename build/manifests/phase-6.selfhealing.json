@@ -1,0 +1,125 @@
+{
+  "schema_version": "build-manifest/v1",
+  "project": "kraken-bot-v4",
+  "phase": {
+    "id": "6",
+    "name": "Self-Healing Skeleton",
+    "spec_ref": "SPEC.md#Self-Healing Architecture (Implementation Phase 6)",
+    "created_at": "2026-03-24T18:00:00-04:00",
+    "created_by": "claude-code"
+  },
+  "global_constraints": {
+    "max_attempts_per_task": 3,
+    "max_files_changed_per_task": 10,
+    "module_line_cap": 500,
+    "typed_exceptions_only": true,
+    "frozen_dataclasses_preferred": true,
+    "no_git_push": true
+  },
+  "tasks": [
+    {
+      "id": "6.1",
+      "description": "Create heartbeat schema and writer in healing/heartbeat.py.",
+      "acceptance_criteria": [
+        "HeartbeatSnapshot is a frozen dataclass with: timestamp, bot_status (healthy/degraded/stopped), active_positions_count, open_orders_count, last_reconciliation_age_sec, last_belief_age_sec, websocket_connected, supabase_connected.",
+        "write_heartbeat() writes a HeartbeatSnapshot to state/bot-heartbeat.json atomically.",
+        "read_heartbeat() reads and validates the heartbeat file, returning None if missing or stale.",
+        "Heartbeat is considered stale after a configurable threshold (default 120 seconds).",
+        "Tests cover write/read round-trip, staleness detection, missing file, and corrupted file handling."
+      ],
+      "owned_paths": [
+        "healing/heartbeat.py",
+        "tests/healing/test_heartbeat.py"
+      ],
+      "dependencies": [],
+      "status": "pending",
+      "test_targets": [
+        "tests/healing/test_heartbeat.py"
+      ]
+    },
+    {
+      "id": "6.2",
+      "description": "Create incident schema and registry in healing/incidents.py.",
+      "acceptance_criteria": [
+        "Incident is a frozen dataclass with: incident_id (uuid), timestamp, severity (low/medium/high/critical), category (reconciliation_mismatch/order_failure/websocket_drop/belief_stale/supabase_unavailable/unknown), description, context (dict of relevant state), recommended_action (from allowlisted set).",
+        "AllowedAction is a StrEnum with: noop, retry, pause_component, run_reconcile, escalate, restart_nontrading_component.",
+        "IncidentRegistry provides: record_incident(), get_recent(n), get_unresolved(), resolve_incident().",
+        "Incidents are written to state/incidents/ as individual JSON files (append-only pattern).",
+        "Tests cover incident creation, registry CRUD, severity filtering, and resolution."
+      ],
+      "owned_paths": [
+        "healing/incidents.py",
+        "tests/healing/test_incidents.py"
+      ],
+      "dependencies": [],
+      "status": "pending",
+      "test_targets": [
+        "tests/healing/test_incidents.py"
+      ]
+    },
+    {
+      "id": "6.3",
+      "description": "Create WatchdogAnalyzer interface and deterministic fallback in healing/analyzer.py.",
+      "acceptance_criteria": [
+        "WatchdogAnalyzer is a Protocol class with analyze(heartbeat, recent_incidents, recent_log_lines) -> WatchdogAdvice.",
+        "WatchdogAdvice is a frozen dataclass with: recommended_action (AllowedAction), confidence (float 0-1), reasoning (str), raw_output (str for audit).",
+        "DeterministicAnalyzer implements the Protocol using pure rule-based logic: stale heartbeat -> escalate, repeated order failures -> pause_component, websocket_drop -> retry, etc.",
+        "DeterministicAnalyzer is the default and always-available fallback.",
+        "Tests cover each deterministic rule and verify the Protocol contract."
+      ],
+      "owned_paths": [
+        "healing/analyzer.py",
+        "tests/healing/test_analyzer.py"
+      ],
+      "dependencies": ["6.1", "6.2"],
+      "status": "pending",
+      "test_targets": [
+        "tests/healing/test_analyzer.py"
+      ]
+    },
+    {
+      "id": "6.4",
+      "description": "Create optional Ollama-backed analyzer in healing/ollama_analyzer.py.",
+      "acceptance_criteria": [
+        "OllamaAnalyzer implements the WatchdogAnalyzer Protocol.",
+        "Connects to localhost:11434 (configurable OLLAMA_URL env var).",
+        "Uses Ollama's structured output / JSON mode with a fixed response schema matching WatchdogAdvice fields.",
+        "Prompt is narrow: heartbeat snapshot + last 20 log lines + incident summary + allowed actions list. No free-form reasoning requested.",
+        "If Ollama is unavailable or times out (default 10s), returns a WatchdogAdvice with action=escalate and confidence=0.",
+        "OllamaAnalyzer is OPTIONAL. The system never requires it.",
+        "AuditRecord frozen dataclass stores: prompt_hash, model_name, timestamp, raw_json_output, validation_passed, final_action.",
+        "Tests mock the HTTP call and verify: successful structured response, timeout fallback, malformed response fallback, schema validation."
+      ],
+      "owned_paths": [
+        "healing/ollama_analyzer.py",
+        "tests/healing/test_ollama_analyzer.py"
+      ],
+      "dependencies": ["6.3"],
+      "status": "pending",
+      "test_targets": [
+        "tests/healing/test_ollama_analyzer.py"
+      ]
+    },
+    {
+      "id": "6.5",
+      "description": "Create watchdog orchestrator in healing/watchdog.py that ties heartbeat, incidents, and analyzer together.",
+      "acceptance_criteria": [
+        "Watchdog class reads heartbeat, queries recent incidents, runs the configured analyzer, and records the result.",
+        "Watchdog selects analyzer: OllamaAnalyzer if OLLAMA_URL is set and reachable, otherwise DeterministicAnalyzer.",
+        "check() method returns a WatchdogResult frozen dataclass with: heartbeat_status, analyzer_used, advice, new_incident (if created).",
+        "Watchdog is advisory only in v1. It does NOT execute recommended actions. It records them as incidents with recommended_action field.",
+        "Audit trail: every check() call appends to state/watchdog-audit.ndjson with prompt hash, model, timestamp, raw output, validation, final decision.",
+        "Tests cover: healthy state (noop), degraded state (triggers incident), Ollama available, Ollama unavailable (fallback), audit trail writing."
+      ],
+      "owned_paths": [
+        "healing/watchdog.py",
+        "tests/healing/test_watchdog.py"
+      ],
+      "dependencies": ["6.1", "6.2", "6.3", "6.4"],
+      "status": "pending",
+      "test_targets": [
+        "tests/healing/test_watchdog.py"
+      ]
+    }
+  ]
+}
