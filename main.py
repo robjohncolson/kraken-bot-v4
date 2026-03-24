@@ -2,11 +2,10 @@
 
 Startup sequence (SPEC.md section 8):
   1. Load .env and validate config (fail fast on missing vars)
-  2. Connect to Supabase
-  3. Connect to Kraken
-  4. Reconcile Supabase state vs. Kraken state
-  5. If STARTUP_RECONCILE_ONLY=true, print report and exit
-  6. Start main scheduler loop
+  2. Health-check Kraken + Supabase connectivity
+  3. Run startup reconciliation (stub until exchange client is wired)
+  4. If STARTUP_RECONCILE_ONLY=true, print report and exit
+  5. Start main scheduler loop (stub until exchange client is wired)
 """
 
 from __future__ import annotations
@@ -87,8 +86,8 @@ def _startup_healthcheck(settings: Settings) -> bool:
         logger.info("Kraken API status: %s", status)
         if status != "online":
             logger.warning("Kraken API is not 'online' — status: %s", status)
-    except Exception:
-        logger.exception("Kraken API health check failed")
+    except (OSError, ValueError, KeyError) as exc:
+        logger.error("Kraken API health check failed: %s", exc)
         ok = False
 
     # Supabase connectivity check
@@ -104,8 +103,8 @@ def _startup_healthcheck(settings: Settings) -> bool:
         )
         urlopen(req, timeout=10)  # noqa: S310
         logger.info("Supabase connection: OK (%s)", settings.supabase_url)
-    except Exception:
-        logger.exception("Supabase health check failed")
+    except (OSError, ValueError) as exc:
+        logger.error("Supabase health check failed: %s", exc)
         ok = False
 
     # Telegram (optional)
