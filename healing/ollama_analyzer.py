@@ -14,7 +14,6 @@ from core.errors import KrakenBotError
 from healing.analyzer import (
     InvalidWatchdogAdviceError,
     WatchdogAdvice,
-    WatchdogAnalyzer,
 )
 from healing.heartbeat import HeartbeatSnapshot
 from healing.incidents import AllowedAction, Incident, IncidentCategory
