@@ -497,6 +497,121 @@ def write_review_example(path: Path) -> None:
         atomic_write_json(example_path, example)
 
 
+def invoke_codex_review(
+    review_prompt: str,
+    timeout: int = 120,
+) -> dict[str, Any]:
+    """Invoke Codex as a read-only reviewer via cross-agent.py."""
+    ensure_cross_agent_runner()
+    command = [
+        current_python(),
+        str(AGENT_RUNNER),
+        "--direction",
+        "cc-to-codex",
+        "--task-type",
+        "review",
+        "--read-only",
+        "--prompt",
+        review_prompt,
+        "--working-dir",
+        str(REPO_ROOT),
+        "--timeout",
+        str(timeout),
+    ]
+    result = run_command(command, cwd=REPO_ROOT, check=False, timeout=timeout + 30)
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return {
+            "status": "failed",
+            "result": {
+                "summary": "Codex review returned non-JSON",
+                "answer": result.stdout[:500],
+                "confidence": 0.0,
+                "follow_up_needed": True,
+                "notes": result.stderr[:500],
+                "files_changed": [],
+            },
+        }
+    return normalize_cross_agent_result(payload)
+
+
+def build_review_prompt(
+    manifest: dict[str, Any],
+    task: dict[str, Any],
+    changed_files: list[str],
+    pytest_exit: int,
+    pytest_output: str,
+) -> str:
+    """Build a prompt for Codex to review a task implementation."""
+    line_info = []
+    cap = manifest["global_constraints"]["module_line_cap"]
+    for path in changed_files:
+        count = line_count_for_repo_file(path)
+        if count is not None:
+            flag = " OVER CAP" if count > cap else ""
+            line_info.append(f"  - {path}: {count} lines{flag}")
+        else:
+            line_info.append(f"  - {path}: (new/unreadable)")
+
+    lines = [
+        f"Review task {task['id']} in phase {manifest['phase']['id']} {manifest['phase']['name']}.",
+        "",
+        f"Description: {task['description']}",
+        "",
+        "Acceptance criteria:",
+        *[f"- {c}" for c in task["acceptance_criteria"]],
+        "",
+        "Changed files and line counts:",
+        *line_info,
+        "",
+        f"Module line cap: {cap}",
+        f"Pytest exit code: {pytest_exit}",
+        "Pytest output (truncated to 2000 chars):",
+        pytest_output[:2000],
+        "",
+        "Read each changed file. Check:",
+        "1. Do the changes satisfy ALL acceptance criteria?",
+        "2. Are there any broad except clauses (must be typed exceptions only)?",
+        "3. Are frozen dataclasses used for state/value types?",
+        "4. Is there dead code, obvious bugs, or missing edge cases?",
+        "5. Does any file exceed the line cap?",
+        "",
+        "Respond with a JSON object in your answer field:",
+        '{"verdict": "approve"} or {"verdict": "correct", "issues": ["issue1", "issue2"]}',
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def parse_codex_review_verdict(review_result: dict[str, Any]) -> tuple[str, list[str]]:
+    """Parse Codex review result into (verdict, issues). Returns ('approve', []) or ('correct', [...])."""
+    answer = review_result.get("result", {}).get("answer", "")
+    if not answer:
+        return "approve", []
+
+    # Try to extract JSON verdict from the answer
+    import re
+    json_match = re.search(r'\{[^}]*"verdict"[^}]*\}', answer)
+    if json_match:
+        try:
+            parsed = json.loads(json_match.group())
+            verdict = parsed.get("verdict", "approve")
+            issues = parsed.get("issues", [])
+            if verdict in ("correct", "fail") and issues:
+                return "correct", [str(i) for i in issues]
+            if verdict == "approve":
+                return "approve", []
+        except json.JSONDecodeError:
+            pass
+
+    # Heuristic fallback: look for negative signals
+    lower = answer.lower()
+    if any(word in lower for word in ("fail", "reject", "critical", "broken", "missing")):
+        return "correct", [f"Codex review flagged issues: {answer[:300]}"]
+
+    return "approve", []
+
+
 def load_review_decision(path: Path) -> dict[str, Any] | None:
     if not path.exists():
         return None

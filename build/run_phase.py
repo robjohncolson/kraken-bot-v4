@@ -14,6 +14,7 @@ from common import (
     atomic_write_json,
     atomic_write_text,
     build_review_packet,
+    build_review_prompt,
     changed_paths_for_owned_paths,
     commit_message,
     copy_cross_agent_artifacts,
@@ -23,6 +24,8 @@ from common import (
     git_diff,
     git_stage,
     invoke_codex,
+    invoke_codex_review,
+    line_count_for_repo_file,
     load_manifest,
     load_or_init_phase_state,
     load_review_decision,
@@ -30,6 +33,7 @@ from common import (
     natural_task_key,
     now_iso,
     normalize_cross_agent_result,
+    parse_codex_review_verdict,
     phase_summary_path,
     prompt_for_task,
     read_json,
@@ -57,6 +61,11 @@ def parse_args() -> argparse.Namespace:
         "--dry-run",
         action="store_true",
         help="Print the next action instead of invoking Codex or running tests.",
+    )
+    parser.add_argument(
+        "--manual-review",
+        action="store_true",
+        help="Stop at review boundary instead of auto-reviewing via Codex.",
     )
     return parser.parse_args()
 
@@ -152,6 +161,50 @@ def latest_attempt(entry: dict[str, Any]) -> dict[str, Any]:
     return entry["attempts"][-1]
 
 
+def auto_review_decision(
+    manifest: dict[str, Any],
+    task: dict[str, Any],
+    pytest_exit: int,
+    changed_files: list[str],
+    codex_verdict: str,
+    codex_issues: list[str],
+) -> dict[str, Any]:
+    """Produce a review decision from deterministic checks + Codex review."""
+    issues: list[str] = []
+    cap = manifest["global_constraints"]["module_line_cap"]
+
+    # Check 1: pytest must pass
+    if pytest_exit != 0:
+        issues.append(f"Targeted pytest failed with exit code {pytest_exit}.")
+
+    # Check 2: line cap
+    for path in changed_files:
+        count = line_count_for_repo_file(path)
+        if count is not None and count > cap:
+            issues.append(f"{path} is {count} lines, exceeding the {cap}-line cap.")
+
+    # Check 3: scope — files outside owned_paths
+    owned = set(task["owned_paths"])
+    for path in changed_files:
+        if path not in owned:
+            issues.append(f"{path} was changed but is not in owned_paths.")
+
+    # Check 4: Codex review findings
+    if codex_verdict == "correct" and codex_issues:
+        issues.extend(codex_issues)
+
+    if issues:
+        return {
+            "decision": "correct",
+            "reason": "; ".join(issues[:3]),
+            "must_fix": issues,
+        }
+    return {
+        "decision": "approve",
+        "reason": "Pytest passed, all files under line cap, scope clean, Codex review approved.",
+    }
+
+
 def finish_verification(
     manifest_path: Path,
     manifest: dict[str, Any],
@@ -161,6 +214,7 @@ def finish_verification(
     attempt_dir: Path,
     runner_result: dict[str, Any],
     changed: list[str],
+    manual_review: bool = False,
 ) -> int:
     entry = task_state(state, task["id"])
     entry["status"] = "verifying"
@@ -170,17 +224,42 @@ def finish_verification(
     pytest_exit, pytest_output = run_targeted_pytest(task["test_targets"])
     attempt["pytest_exit_code"] = pytest_exit
     atomic_write_text(attempt_dir / "pytest.txt", pytest_output)
-    entry["status"] = "verifying"
-    entry["resume_from"] = "cc-review"
-    state["phase_status"] = "awaiting-review"
-    save_phase_state(manifest_path, state)
 
     review_text = build_review_packet(manifest, task, runner_result, changed, pytest_exit, pytest_output)
     atomic_write_text(attempt_dir / "review.md", review_text)
-    write_review_example(review_decision_path(attempt_dir))
-    log_event("task_awaiting_review", phase=manifest["phase"]["id"], task_id=task["id"], attempt=attempt["attempt"])
-    print(f"Review required for task {task['id']}: {attempt_dir / 'review.md'}")
-    return 2
+
+    if manual_review:
+        entry["status"] = "verifying"
+        entry["resume_from"] = "cc-review"
+        state["phase_status"] = "awaiting-review"
+        save_phase_state(manifest_path, state)
+        write_review_example(review_decision_path(attempt_dir))
+        log_event("task_awaiting_review", phase=manifest["phase"]["id"], task_id=task["id"], attempt=attempt["attempt"])
+        print(f"Review required for task {task['id']}: {attempt_dir / 'review.md'}")
+        return 2
+
+    # Auto-review: invoke Codex as independent reviewer
+    print(f"Auto-reviewing task {task['id']} via Codex...")
+    review_prompt = build_review_prompt(manifest, task, changed, pytest_exit, pytest_output)
+    codex_review = invoke_codex_review(review_prompt)
+    atomic_write_json(attempt_dir / "codex-review.json", codex_review)
+    codex_verdict, codex_issues = parse_codex_review_verdict(codex_review)
+
+    decision = auto_review_decision(manifest, task, pytest_exit, changed, codex_verdict, codex_issues)
+    atomic_write_json(review_decision_path(attempt_dir), decision)
+    log_event(
+        "auto_review",
+        phase=manifest["phase"]["id"],
+        task_id=task["id"],
+        attempt=attempt["attempt"],
+        decision=decision["decision"],
+        codex_verdict=codex_verdict,
+    )
+    print(f"Auto-review for {task['id']}: {decision['decision']} - {decision['reason'][:100]}")
+
+    entry["resume_from"] = "cc-review"
+    save_phase_state(manifest_path, state)
+    return process_review_decision(manifest_path, manifest, state, task)
 
 
 def resume_incomplete_attempt(
@@ -189,6 +268,7 @@ def resume_incomplete_attempt(
     state: dict[str, Any],
     task: dict[str, Any],
     timeout: int,
+    manual_review: bool = False,
 ) -> int:
     entry = task_state(state, task["id"])
     attempt = latest_attempt(entry)
@@ -201,7 +281,7 @@ def resume_incomplete_attempt(
         changed = changed_paths_for_owned_paths(task["owned_paths"])
         attempt["changed_files"] = changed
         atomic_write_text(attempt_dir / "diff.patch", git_diff(task["owned_paths"]))
-        return finish_verification(manifest_path, manifest, state, task, attempt, attempt_dir, runner_result, changed)
+        return finish_verification(manifest_path, manifest, state, task, attempt, attempt_dir, runner_result, changed, manual_review)
 
     if entry["resume_from"] != "invoke-subagent":
         raise BuildError(f"Cannot resume task {task['id']} from {entry['resume_from']}")
@@ -214,7 +294,7 @@ def resume_incomplete_attempt(
             changed = changed_paths_for_owned_paths(task["owned_paths"])
             attempt["changed_files"] = changed
             atomic_write_text(attempt_dir / "diff.patch", git_diff(task["owned_paths"]))
-            return finish_verification(manifest_path, manifest, state, task, attempt, attempt_dir, runner_result, changed)
+            return finish_verification(manifest_path, manifest, state, task, attempt, attempt_dir, runner_result, changed, manual_review)
 
     dirty = changed_paths_for_owned_paths(task["owned_paths"])
     if dirty:
@@ -249,7 +329,7 @@ def resume_incomplete_attempt(
     changed = changed_paths_for_owned_paths(task["owned_paths"])
     attempt["changed_files"] = changed
     atomic_write_text(attempt_dir / "diff.patch", git_diff(task["owned_paths"]))
-    return finish_verification(manifest_path, manifest, state, task, attempt, attempt_dir, runner_result, changed)
+    return finish_verification(manifest_path, manifest, state, task, attempt, attempt_dir, runner_result, changed, manual_review)
 
 
 def process_review_decision(
@@ -389,6 +469,7 @@ def run_task_attempt(
     task: dict[str, Any],
     timeout: int,
     dry_run: bool,
+    manual_review: bool = False,
 ) -> int:
     entry = task_state(state, task["id"])
     if entry["status"] == "pending":
@@ -440,10 +521,10 @@ def run_task_attempt(
         )
     attempt["changed_files"] = changed
     atomic_write_text(attempt_dir / "diff.patch", git_diff(task["owned_paths"]))
-    return finish_verification(manifest_path, manifest, state, task, attempt, attempt_dir, runner_result, changed)
+    return finish_verification(manifest_path, manifest, state, task, attempt, attempt_dir, runner_result, changed, manual_review)
 
 
-def controller(manifest_path: Path, timeout: int, dry_run: bool) -> int:
+def controller(manifest_path: Path, timeout: int, dry_run: bool, manual_review: bool = False) -> int:
     manifest = load_manifest(manifest_path)
     state = load_or_init_phase_state(manifest, manifest_path)
     while True:
@@ -461,13 +542,13 @@ def controller(manifest_path: Path, timeout: int, dry_run: bool) -> int:
             continue
 
         if entry["resume_from"] in {"invoke-subagent", "pytest"}:
-            result = resume_incomplete_attempt(manifest_path, manifest, state, task, timeout)
+            result = resume_incomplete_attempt(manifest_path, manifest, state, task, timeout, manual_review)
             if result != 0:
                 return result
             continue
 
         if entry["status"] in {"pending", "correcting"}:
-            result = run_task_attempt(manifest_path, manifest, state, task, timeout, dry_run)
+            result = run_task_attempt(manifest_path, manifest, state, task, timeout, dry_run, manual_review)
             if result == 3:
                 return 0
             if result != 0:
@@ -500,7 +581,7 @@ def main() -> int:
     ensure_dir(BUILD_STATE_DIR)
     ensure_dir(CROSS_AGENT_STATE_DIR)
     try:
-        return controller(manifest_path, args.timeout, args.dry_run)
+        return controller(manifest_path, args.timeout, args.dry_run, args.manual_review)
     except (BuildError, CommandError, ValidationError) as exc:
         print(f"ERROR: {exc}")
         log_event("controller_error", manifest=rel_repo_path(manifest_path), error=str(exc))
