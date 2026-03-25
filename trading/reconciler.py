@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
+from typing import TYPE_CHECKING
 
 from core.types import Balance, ClientOrderId, OrderId, Pair, PositionId, ZERO_DECIMAL
 from exchange.models import KrakenOrder, KrakenState, KrakenTrade
+
+if TYPE_CHECKING:
+    from persistence.sqlite import SqliteWriter
 
 DEFAULT_CLIENT_ORDER_ID_PREFIX = "kbv4"
 DEFAULT_RECENT_FILL_WINDOW = timedelta(minutes=15)
@@ -14,6 +19,7 @@ DEFAULT_STALE_ORDER_AGE = timedelta(minutes=30)
 DEFAULT_FEE_DRIFT_TOLERANCE = Decimal("0.01")
 DEFAULT_HIGH_FEE_DRIFT_MULTIPLIER = Decimal("5")
 EPOCH = datetime(1970, 1, 1)
+logger = logging.getLogger(__name__)
 
 
 class ReconciliationSeverity(StrEnum):
@@ -34,8 +40,7 @@ class ForeignOrderClassification(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class RecordedPosition:
-    position_id: PositionId
-    pair: Pair
+    position_id: PositionId; pair: Pair
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,44 +61,32 @@ class RecordedState:
 
 @dataclass(frozen=True, slots=True)
 class GhostPosition:
-    position_id: PositionId
-    pair: Pair
-    severity: ReconciliationSeverity
-    recommended_action: ReconciliationAction
+    position_id: PositionId; pair: Pair
+    severity: ReconciliationSeverity; recommended_action: ReconciliationAction
     recommended_step: str = "close_recorded_position"
 
 
 @dataclass(frozen=True, slots=True)
 class ForeignOrder:
-    order_id: OrderId
-    pair: Pair
+    order_id: OrderId; pair: Pair
     client_order_id: ClientOrderId | None
-    classification: ForeignOrderClassification
-    age: timedelta
-    severity: ReconciliationSeverity
-    recommended_action: ReconciliationAction
+    classification: ForeignOrderClassification; age: timedelta
+    severity: ReconciliationSeverity; recommended_action: ReconciliationAction
     recommended_step: str
 
 
 @dataclass(frozen=True, slots=True)
 class FeeDrift:
-    order_id: str
-    pair: Pair
-    kraken_fee: Decimal
-    recorded_fee: Decimal
-    delta: Decimal
-    severity: ReconciliationSeverity
-    recommended_action: ReconciliationAction
+    order_id: str; pair: Pair
+    kraken_fee: Decimal; recorded_fee: Decimal; delta: Decimal
+    severity: ReconciliationSeverity; recommended_action: ReconciliationAction
     recommended_step: str
 
 
 @dataclass(frozen=True, slots=True)
 class UntrackedAsset:
-    asset: str
-    available: Decimal
-    held: Decimal
-    severity: ReconciliationSeverity
-    recommended_action: ReconciliationAction
+    asset: str; available: Decimal; held: Decimal
+    severity: ReconciliationSeverity; recommended_action: ReconciliationAction
     recommended_step: str = "import_asset_balance"
 
 
@@ -106,20 +99,14 @@ class ReconciliationReport:
 
     @property
     def discrepancy_detected(self) -> bool:
-        return any(
-            (
-                self.ghost_positions,
-                self.foreign_orders,
-                self.fee_drift,
-                self.untracked_assets,
-            )
-        )
+        return any((self.ghost_positions, self.foreign_orders, self.fee_drift, self.untracked_assets))
 
 
 def reconcile(
     kraken_state: KrakenState,
     recorded_state: RecordedState,
     *,
+    sqlite_writer: SqliteWriter | None = None,
     cl_ord_id_prefix: str = DEFAULT_CLIENT_ORDER_ID_PREFIX,
     recent_fill_window: timedelta = DEFAULT_RECENT_FILL_WINDOW,
     stale_order_age: timedelta = DEFAULT_STALE_ORDER_AGE,
@@ -127,35 +114,129 @@ def reconcile(
     high_fee_drift_tolerance: Decimal | None = None,
     as_of: datetime | None = None,
 ) -> ReconciliationReport:
+    effective_recorded_state = recorded_state
+    if sqlite_writer is not None:
+        effective_recorded_state = _seed_missing_sqlite_records(
+            kraken_state, recorded_state, sqlite_writer=sqlite_writer, cl_ord_id_prefix=cl_ord_id_prefix
+        )
     effective_as_of = _resolve_as_of(kraken_state, as_of=as_of)
-    high_fee_limit = (
-        fee_drift_tolerance * DEFAULT_HIGH_FEE_DRIFT_MULTIPLIER
-        if high_fee_drift_tolerance is None
-        else high_fee_drift_tolerance
-    )
+    high_fee_limit = fee_drift_tolerance * DEFAULT_HIGH_FEE_DRIFT_MULTIPLIER
+    if high_fee_drift_tolerance is not None:
+        high_fee_limit = high_fee_drift_tolerance
     return ReconciliationReport(
         ghost_positions=_detect_ghost_positions(
             kraken_state,
-            recorded_state,
+            effective_recorded_state,
             as_of=effective_as_of,
             recent_fill_window=recent_fill_window,
             cl_ord_id_prefix=cl_ord_id_prefix,
         ),
         foreign_orders=_detect_foreign_orders(
             kraken_state,
-            recorded_state,
+            effective_recorded_state,
             as_of=effective_as_of,
             stale_order_age=stale_order_age,
             cl_ord_id_prefix=cl_ord_id_prefix,
         ),
         fee_drift=_detect_fee_drift(
             kraken_state,
-            recorded_state,
+            effective_recorded_state,
             fee_drift_tolerance=fee_drift_tolerance,
             high_fee_drift_tolerance=high_fee_limit,
         ),
-        untracked_assets=_detect_untracked_assets(kraken_state, recorded_state),
+        untracked_assets=_detect_untracked_assets(kraken_state, effective_recorded_state),
     )
+
+
+def _seed_missing_sqlite_records(
+    kraken_state: KrakenState,
+    recorded_state: RecordedState,
+    *,
+    sqlite_writer: SqliteWriter,
+    cl_ord_id_prefix: str,
+) -> RecordedState:
+    position_pairs, position_by_exchange_order, position_by_client_order = _tracked_position_maps(
+        kraken_state, cl_ord_id_prefix=cl_ord_id_prefix
+    )
+    positions = list(recorded_state.positions)
+    orders = list(recorded_state.orders)
+    known_position_ids = {position.position_id for position in positions}
+    known_exchange_order_ids = {_exchange_order_id(order) for order in orders if _exchange_order_id(order)}
+    known_client_order_ids = {_client_order_id(order) for order in orders if _client_order_id(order)}
+
+    def seed_position(position_id: PositionId, pair: Pair) -> None:
+        if position_id in known_position_ids:
+            return
+        logger.info("Seeding tracked Kraken position into SQLite: %s (%s)", position_id, pair)
+        sqlite_writer.insert_position(position_id, pair)
+        positions.append(RecordedPosition(position_id=position_id, pair=pair))
+        known_position_ids.add(position_id)
+
+    for position_id in sorted(position_pairs):
+        seed_position(position_id, position_pairs[position_id])
+
+    for order in sorted(kraken_state.open_orders, key=lambda item: item.order_id):
+        client_order_id = _client_order_id(order)
+        if not _is_tracked_client_order_id(client_order_id, cl_ord_id_prefix):
+            logger.info(
+                "Leaving foreign Kraken order unseeded in SQLite: %s (%s)",
+                order.order_id,
+                client_order_id or "no-client-id",
+            )
+            continue
+        if order.order_id in known_exchange_order_ids or client_order_id in known_client_order_ids:
+            continue
+        position_id = position_by_exchange_order.get(order.order_id) or position_by_client_order.get(
+            client_order_id
+        )
+        if position_id is not None:
+            seed_position(position_id, position_pairs.get(position_id, order.pair))
+        logger.info("Seeding tracked Kraken order into SQLite: %s (%s)", order.order_id, client_order_id)
+        sqlite_writer.insert_order(
+            order.order_id,
+            order.pair,
+            client_order_id,
+            position_id=position_id,
+            exchange_order_id=order.order_id,
+        )
+        orders.append(
+            RecordedOrder(
+                order_id=order.order_id,
+                pair=order.pair,
+                position_id=position_id,
+                exchange_order_id=order.order_id,
+                client_order_id=client_order_id,
+            )
+        )
+        known_exchange_order_ids.add(order.order_id)
+        known_client_order_ids.add(client_order_id)
+
+    return RecordedState(
+        positions=tuple(sorted(positions, key=lambda item: item.position_id)),
+        orders=tuple(sorted(orders, key=lambda item: item.order_id)),
+    )
+
+
+def _tracked_position_maps(
+    kraken_state: KrakenState,
+    *,
+    cl_ord_id_prefix: str,
+) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
+    position_pairs: dict[str, str] = {}
+    position_by_exchange_order: dict[str, str] = {}
+    position_by_client_order: dict[str, str] = {}
+    for trade in sorted(kraken_state.trade_history, key=lambda item: item.trade_id):
+        client_order_id = _client_order_id(trade)
+        position_id = _position_id(trade)
+        if position_id is None or not _is_tracked_client_order_id(client_order_id, cl_ord_id_prefix):
+            continue
+        position_pairs.setdefault(position_id, trade.pair)
+        exchange_order_id = _order_id(trade)
+        if exchange_order_id:
+            position_by_exchange_order.setdefault(exchange_order_id, position_id)
+        if client_order_id:
+            position_by_client_order.setdefault(client_order_id, position_id)
+    return position_pairs, position_by_exchange_order, position_by_client_order
 
 
 def _detect_ghost_positions(
@@ -167,12 +248,9 @@ def _detect_ghost_positions(
     cl_ord_id_prefix: str,
 ) -> tuple[GhostPosition, ...]:
     ghost_positions: list[GhostPosition] = []
+    window_start = as_of - recent_fill_window
     for position in sorted(recorded_state.positions, key=lambda item: item.position_id):
-        related_orders = tuple(
-            order
-            for order in recorded_state.orders
-            if _position_id(order) == position.position_id
-        )
+        related_orders = tuple(order for order in recorded_state.orders if _position_id(order) == position.position_id)
         exchange_ids = {_exchange_order_id(order) for order in related_orders if _exchange_order_id(order)}
         client_ids = {_client_order_id(order) for order in related_orders if _client_order_id(order)}
         has_open_order = any(
@@ -191,7 +269,7 @@ def _detect_ghost_positions(
                 trade,
                 exchange_ids=exchange_ids,
                 client_ids=client_ids,
-                window_start=as_of - recent_fill_window,
+                window_start=window_start,
             )
             for trade in kraken_state.trade_history
         )
@@ -216,12 +294,8 @@ def _detect_foreign_orders(
     cl_ord_id_prefix: str,
 ) -> tuple[ForeignOrder, ...]:
     foreign_orders: list[ForeignOrder] = []
-    acknowledged_exchange_ids = {
-        _exchange_order_id(order) for order in recorded_state.orders if _exchange_order_id(order)
-    }
-    acknowledged_client_ids = {
-        _client_order_id(order) for order in recorded_state.orders if _client_order_id(order)
-    }
+    acknowledged_exchange_ids = {_exchange_order_id(order) for order in recorded_state.orders if _exchange_order_id(order)}
+    acknowledged_client_ids = {_client_order_id(order) for order in recorded_state.orders if _client_order_id(order)}
     for order in sorted(kraken_state.open_orders, key=lambda item: item.order_id):
         client_order_id = _client_order_id(order)
         if _is_tracked_client_order_id(client_order_id, cl_ord_id_prefix):
@@ -310,8 +384,7 @@ def _detect_untracked_assets(
         tracked_assets.update(_pair_assets(position.pair))
     for order in recorded_state.orders:
         tracked_assets.update(_pair_assets(order.pair))
-
-    untracked_assets = [
+    return tuple(
         UntrackedAsset(
             asset=balance.asset,
             available=balance.available,
@@ -321,17 +394,14 @@ def _detect_untracked_assets(
         )
         for balance in sorted(kraken_state.balances, key=lambda item: item.asset)
         if balance.available + balance.held > ZERO_DECIMAL and balance.asset not in tracked_assets
-    ]
-    return tuple(untracked_assets)
+    )
 
 
 def _resolve_as_of(kraken_state: KrakenState, *, as_of: datetime | None) -> datetime:
     if as_of is not None:
         return as_of
-    timestamps = [
-        *_non_null(_opened_at(order) for order in kraken_state.open_orders),
-        *_non_null(_filled_at(trade) for trade in kraken_state.trade_history),
-    ]
+    timestamps = [opened_at for order in kraken_state.open_orders if (opened_at := _opened_at(order)) is not None]
+    timestamps.extend(filled_at for trade in kraken_state.trade_history if (filled_at := _filled_at(trade)) is not None)
     return max(timestamps, default=EPOCH)
 
 
@@ -344,15 +414,11 @@ def _matches_position_order(
     cl_ord_id_prefix: str,
 ) -> bool:
     client_order_id = _client_order_id(order)
-    return (
-        order.order_id in exchange_ids
-        or client_order_id in client_ids
-        or (
-            not exchange_ids
-            and not client_ids
-            and order.pair == position.pair
-            and _is_tracked_client_order_id(client_order_id, cl_ord_id_prefix)
-        )
+    return order.order_id in exchange_ids or client_order_id in client_ids or (
+        not exchange_ids
+        and not client_ids
+        and order.pair == position.pair
+        and _is_tracked_client_order_id(client_order_id, cl_ord_id_prefix)
     )
 
 
@@ -376,77 +442,33 @@ def _is_recent_fill(
 
 
 def _trade_matches_order(trade: KrakenTrade, order: RecordedOrder) -> bool:
-    exchange_order_id = _exchange_order_id(order)
-    client_order_id = _client_order_id(order)
-    return _order_id(trade) == exchange_order_id or _client_order_id(trade) == client_order_id
+    return _order_id(trade) == _exchange_order_id(order) or _client_order_id(trade) == _client_order_id(order)
 
 
 def _is_tracked_client_order_id(client_order_id: str | None, prefix: str) -> bool:
-    if not client_order_id:
-        return False
-    return client_order_id.lower().startswith(prefix.lower())
+    return bool(client_order_id and client_order_id.lower().startswith(prefix.lower()))
 
 
 def _pair_assets(pair: str) -> tuple[str, ...]:
     base, separator, quote = pair.partition("/")
-    if not separator:
-        return (pair,)
-    return base, quote
+    return (pair,) if not separator else (base, quote)
 
 
 def _age(opened_at: datetime | None, as_of: datetime) -> timedelta:
-    if opened_at is None:
-        return timedelta(0)
-    return as_of - opened_at
+    return timedelta(0) if opened_at is None else as_of - opened_at
 
 
-def _client_order_id(record: object) -> str | None:
-    return getattr(record, "client_order_id", None)
-
-
-def _exchange_order_id(record: object) -> str | None:
-    return getattr(record, "exchange_order_id", None)
-
-
-def _order_id(record: object) -> str | None:
-    return getattr(record, "order_id", None)
-
-
-def _position_id(record: object) -> str | None:
-    return getattr(record, "position_id", None)
-
-
-def _opened_at(record: object) -> datetime | None:
-    return getattr(record, "opened_at", None)
-
-
-def _filled_at(record: object) -> datetime | None:
-    return getattr(record, "filled_at", None)
-
-
-def _non_null(values: object) -> list[datetime]:
-    return [value for value in values if value is not None]
+def _client_order_id(record: object) -> str | None: return getattr(record, "client_order_id", None)
+def _exchange_order_id(record: object) -> str | None: return getattr(record, "exchange_order_id", None)
+def _order_id(record: object) -> str | None: return getattr(record, "order_id", None)
+def _position_id(record: object) -> str | None: return getattr(record, "position_id", None)
+def _opened_at(record: object) -> datetime | None: return getattr(record, "opened_at", None)
+def _filled_at(record: object) -> datetime | None: return getattr(record, "filled_at", None)
 
 
 __all__ = [
-    "Balance",
-    "DEFAULT_CLIENT_ORDER_ID_PREFIX",
-    "DEFAULT_FEE_DRIFT_TOLERANCE",
-    "DEFAULT_RECENT_FILL_WINDOW",
-    "DEFAULT_STALE_ORDER_AGE",
-    "FeeDrift",
-    "ForeignOrder",
-    "ForeignOrderClassification",
-    "GhostPosition",
-    "KrakenOrder",
-    "KrakenState",
-    "KrakenTrade",
-    "ReconciliationAction",
-    "ReconciliationReport",
-    "ReconciliationSeverity",
-    "RecordedOrder",
-    "RecordedPosition",
-    "RecordedState",
-    "UntrackedAsset",
-    "reconcile",
+    "Balance", "DEFAULT_CLIENT_ORDER_ID_PREFIX", "DEFAULT_FEE_DRIFT_TOLERANCE", "DEFAULT_RECENT_FILL_WINDOW",
+    "DEFAULT_STALE_ORDER_AGE", "FeeDrift", "ForeignOrder", "ForeignOrderClassification", "GhostPosition",
+    "KrakenOrder", "KrakenState", "KrakenTrade", "ReconciliationAction", "ReconciliationReport",
+    "ReconciliationSeverity", "RecordedOrder", "RecordedPosition", "RecordedState", "UntrackedAsset", "reconcile",
 ]
