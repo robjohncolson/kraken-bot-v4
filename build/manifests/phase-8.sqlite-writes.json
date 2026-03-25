@@ -1,0 +1,81 @@
+{
+  "schema_version": "build-manifest/v1",
+  "project": "kraken-bot-v4",
+  "phase": {
+    "id": "8",
+    "name": "SQLite Writes",
+    "spec_ref": "SPEC.md#Persistence Layer",
+    "created_at": "2026-03-24T23:30:00-04:00",
+    "created_by": "claude-code"
+  },
+  "global_constraints": {
+    "max_attempts_per_task": 3,
+    "max_files_changed_per_task": 10,
+    "module_line_cap": 500,
+    "typed_exceptions_only": true,
+    "frozen_dataclasses_preferred": true,
+    "no_git_push": true
+  },
+  "tasks": [
+    {
+      "id": "8.1",
+      "description": "Add SqliteWriter class to persistence/sqlite.py with insert_position() and update_position_closed() methods using INSERT OR IGNORE upsert semantics.",
+      "acceptance_criteria": [
+        "SqliteWriter class exists in persistence/sqlite.py and accepts a sqlite3.Connection.",
+        "insert_position(position_id, pair) creates a new position record; duplicate position_id is silently ignored (idempotent).",
+        "update_position_closed(position_id) sets closed_at to current UTC timestamp; raises a typed error if position_id does not exist.",
+        "Both methods operate within the existing WAL-mode connection and schema from SqliteAdapter.",
+        "Tests create a real in-memory SQLite DB, call ensure_schema(), and verify insert/update/idempotency behavior."
+      ],
+      "owned_paths": [
+        "persistence/sqlite.py",
+        "tests/persistence/test_sqlite_writer.py"
+      ],
+      "dependencies": [],
+      "status": "pending",
+      "test_targets": [
+        "tests/persistence/test_sqlite_writer.py"
+      ]
+    },
+    {
+      "id": "8.2",
+      "description": "Add insert_order() and insert_ledger_entry() to SqliteWriter, including the ledger table DDL in ensure_schema().",
+      "acceptance_criteria": [
+        "insert_order(order_id, pair, client_order_id, position_id=None, exchange_order_id=None, recorded_fee=None) creates an order record with proper foreign key to positions.",
+        "Duplicate order_id is silently ignored (idempotent upsert).",
+        "A ledger table is added to ensure_schema() with columns: id INTEGER PRIMARY KEY, pair TEXT, side TEXT, quantity TEXT, price TEXT, fee TEXT, filled_at TEXT, created_at TEXT DEFAULT current_timestamp.",
+        "insert_ledger_entry(pair, side, quantity, price, fee, filled_at) appends a row to the ledger table (append-only, no upsert).",
+        "Tests verify order insertion with and without position_id, duplicate handling, ledger append, and foreign key constraint enforcement."
+      ],
+      "owned_paths": [
+        "persistence/sqlite.py",
+        "tests/persistence/test_sqlite_orders.py"
+      ],
+      "dependencies": ["8.1"],
+      "status": "pending",
+      "test_targets": [
+        "tests/persistence/test_sqlite_orders.py"
+      ]
+    },
+    {
+      "id": "8.3",
+      "description": "Wire the reconciler in trading/reconciler.py to use SqliteWriter to seed the database when Kraken state contains positions/orders not yet recorded in SQLite.",
+      "acceptance_criteria": [
+        "Reconciler accepts an optional SqliteWriter parameter (or gets it from the adapter).",
+        "When reconciliation finds Kraken orders not in SQLite (untracked), it calls SqliteWriter.insert_order() to seed them.",
+        "When reconciliation finds Kraken positions not in SQLite, it calls SqliteWriter.insert_position() to seed them.",
+        "Seeding only happens for orders with a cl_ord_id matching the kbv4- prefix (foreign orders are logged but not seeded).",
+        "Tests mock Kraken state with both tracked and foreign orders and verify only kbv4-prefixed orders are seeded to SQLite."
+      ],
+      "owned_paths": [
+        "trading/reconciler.py",
+        "tests/trading/test_reconciler_write.py"
+      ],
+      "dependencies": ["8.2"],
+      "status": "pending",
+      "test_targets": [
+        "tests/trading/test_reconciler_write.py"
+      ]
+    }
+  ]
+}

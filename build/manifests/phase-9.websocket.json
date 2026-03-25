@@ -1,0 +1,105 @@
+{
+  "schema_version": "build-manifest/v1",
+  "project": "kraken-bot-v4",
+  "phase": {
+    "id": "9",
+    "name": "WebSocket",
+    "spec_ref": "SPEC.md#Exchange Adapter",
+    "created_at": "2026-03-24T23:30:00-04:00",
+    "created_by": "claude-code"
+  },
+  "global_constraints": {
+    "max_attempts_per_task": 3,
+    "max_files_changed_per_task": 10,
+    "module_line_cap": 500,
+    "typed_exceptions_only": true,
+    "frozen_dataclasses_preferred": true,
+    "no_git_push": true
+  },
+  "tasks": [
+    {
+      "id": "9.1",
+      "description": "Create exchange/websocket.py with KrakenWebSocketV2 connection manager: async connect, disconnect, auto-reconnect with exponential backoff (2s-30s), and ping/pong keepalive.",
+      "acceptance_criteria": [
+        "KrakenWebSocketV2 class exists in exchange/websocket.py.",
+        "connect() establishes an async WebSocket connection to wss://ws.kraken.com/v2.",
+        "disconnect() cleanly closes the connection.",
+        "Auto-reconnect on disconnect with exponential backoff: 2s, 4s, 8s, 16s, 30s max.",
+        "Ping/pong keepalive responds to Kraken server pings.",
+        "Connection state is tracked (DISCONNECTED, CONNECTING, CONNECTED, RECONNECTING).",
+        "Tests mock the WebSocket and verify connect, disconnect, reconnect backoff timing, and state transitions."
+      ],
+      "owned_paths": [
+        "exchange/websocket.py",
+        "tests/exchange/test_websocket_conn.py"
+      ],
+      "dependencies": [],
+      "status": "pending",
+      "test_targets": [
+        "tests/exchange/test_websocket_conn.py"
+      ]
+    },
+    {
+      "id": "9.2",
+      "description": "Add public ticker subscription to KrakenWebSocketV2 that emits PriceTick events, with symbol normalization via exchange/symbols.py.",
+      "acceptance_criteria": [
+        "subscribe_ticker(pairs) sends a Kraken WS v2 subscribe message for the ticker channel.",
+        "Incoming ticker updates are parsed into PriceTick(pair, bid, ask, last, timestamp) frozen dataclasses.",
+        "Symbol normalization converts Kraken WS format (e.g. BTC/USD) to internal pair format via symbols module.",
+        "A callback or async queue mechanism delivers PriceTick events to consumers.",
+        "Tests mock WS messages and verify correct PriceTick emission with normalized symbols."
+      ],
+      "owned_paths": [
+        "exchange/websocket.py",
+        "tests/exchange/test_websocket_ticker.py"
+      ],
+      "dependencies": ["9.1"],
+      "status": "pending",
+      "test_targets": [
+        "tests/exchange/test_websocket_ticker.py"
+      ]
+    },
+    {
+      "id": "9.3",
+      "description": "Add private execution feed subscription to KrakenWebSocketV2 with WebSocket token authentication and FillConfirmed event emission.",
+      "acceptance_criteria": [
+        "get_ws_token() calls Kraken REST /0/private/GetWebSocketsToken via transport to obtain a WS auth token.",
+        "subscribe_executions(token) sends a Kraken WS v2 subscribe message for the executions channel with auth.",
+        "Incoming execution updates are parsed into FillConfirmed(order_id, client_order_id, pair, side, quantity, price, fee, timestamp) frozen dataclasses.",
+        "A callback or async queue mechanism delivers FillConfirmed events to consumers.",
+        "Tests mock the token fetch and WS execution messages, verifying correct FillConfirmed emission."
+      ],
+      "owned_paths": [
+        "exchange/websocket.py",
+        "exchange/executor.py",
+        "tests/exchange/test_websocket_executions.py"
+      ],
+      "dependencies": ["9.2"],
+      "status": "pending",
+      "test_targets": [
+        "tests/exchange/test_websocket_executions.py"
+      ]
+    },
+    {
+      "id": "9.4",
+      "description": "Add REST polling fallback manager that activates when WebSocket is disconnected, polling GetOpenOrders and ticker at configurable intervals.",
+      "acceptance_criteria": [
+        "A FallbackPoller class or method exists that polls Kraken REST for prices and order status when WebSocket is down.",
+        "FallbackPoller activates automatically when KrakenWebSocketV2 enters DISCONNECTED or RECONNECTING state.",
+        "FallbackPoller deactivates when WebSocket reconnects and resumes feeds.",
+        "Polling interval is configurable (default 15 seconds for prices, 30 seconds for orders).",
+        "FallbackPoller emits the same PriceTick and FillConfirmed events as the WebSocket feed for consumer transparency.",
+        "Tests verify activation on disconnect, deactivation on reconnect, and correct event emission from polled data."
+      ],
+      "owned_paths": [
+        "exchange/websocket.py",
+        "tests/exchange/test_ws_fallback.py"
+      ],
+      "dependencies": ["9.3"],
+      "status": "pending",
+      "test_targets": [
+        "tests/exchange/test_ws_fallback.py"
+      ]
+    }
+  ]
+}

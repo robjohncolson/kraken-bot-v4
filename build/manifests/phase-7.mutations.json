@@ -1,0 +1,89 @@
+{
+  "schema_version": "build-manifest/v1",
+  "project": "kraken-bot-v4",
+  "phase": {
+    "id": "7",
+    "name": "Kraken Mutations",
+    "spec_ref": "SPEC.md#Order Gate",
+    "created_at": "2026-03-24T23:30:00-04:00",
+    "created_by": "claude-code"
+  },
+  "global_constraints": {
+    "max_attempts_per_task": 3,
+    "max_files_changed_per_task": 10,
+    "module_line_cap": 500,
+    "typed_exceptions_only": true,
+    "frozen_dataclasses_preferred": true,
+    "no_git_push": true
+  },
+  "tasks": [
+    {
+      "id": "7.1",
+      "description": "Add SafeModeBlockedError and mutation error types to core/errors.py, and add mutation response parsers (parse_add_order_response, parse_cancel_order_response) to exchange/parsers.py.",
+      "acceptance_criteria": [
+        "SafeModeBlockedError exists in core/errors.py and inherits from the project error hierarchy.",
+        "InsufficientFundsError and OrderRejectedError exist in core/errors.py.",
+        "parse_add_order_response() in exchange/parsers.py extracts txid list from Kraken AddOrder response JSON and raises typed errors on Kraken error strings.",
+        "parse_cancel_order_response() in exchange/parsers.py extracts cancel count from Kraken CancelOrder response JSON.",
+        "Tests cover success and all error paths for both parsers.",
+        "Tests verify SafeModeBlockedError can be raised and caught distinctly."
+      ],
+      "owned_paths": [
+        "core/errors.py",
+        "exchange/parsers.py",
+        "tests/exchange/test_mutation_parsers.py"
+      ],
+      "dependencies": [],
+      "status": "pending",
+      "test_targets": [
+        "tests/exchange/test_mutation_parsers.py"
+      ]
+    },
+    {
+      "id": "7.2",
+      "description": "Implement execute_order() on KrakenExecutor in exchange/executor.py with safe mode enforcement, cl_ord_id integration via OrderGate, and post-placement verification via GetOpenOrders.",
+      "acceptance_criteria": [
+        "execute_order() exists on KrakenExecutor and accepts an OrderRequest.",
+        "If DISABLE_ORDER_MUTATIONS or READ_ONLY_EXCHANGE is true, execute_order() raises SafeModeBlockedError before any network call.",
+        "execute_order() uses OrderGate to generate cl_ord_id and build the Kraken AddOrder payload.",
+        "execute_order() calls transport to POST /0/private/AddOrder with HMAC signing.",
+        "execute_order() uses parse_add_order_response() to extract the txid.",
+        "Post-placement: execute_order() queries GetOpenOrders and verifies the new order appears (by txid or cl_ord_id).",
+        "On timeout or ambiguous response, execute_order() queries by cl_ord_id to detect ghost orders instead of blindly retrying.",
+        "Tests mock transport responses and verify the full happy path, safe mode blocking, and cl_ord_id ghost detection."
+      ],
+      "owned_paths": [
+        "exchange/executor.py",
+        "tests/exchange/test_execute_order.py"
+      ],
+      "dependencies": ["7.1"],
+      "status": "pending",
+      "test_targets": [
+        "tests/exchange/test_execute_order.py"
+      ]
+    },
+    {
+      "id": "7.3",
+      "description": "Implement execute_cancel() on KrakenExecutor in exchange/executor.py with circuit breaker integration and 5-second cancel penalty awareness for Kraken Starter tier.",
+      "acceptance_criteria": [
+        "execute_cancel() exists on KrakenExecutor and accepts an order_id string.",
+        "If DISABLE_ORDER_MUTATIONS or READ_ONLY_EXCHANGE is true, execute_cancel() raises SafeModeBlockedError.",
+        "execute_cancel() checks OrderGate circuit breaker before attempting the cancel.",
+        "execute_cancel() calls transport to POST /0/private/CancelOrder.",
+        "execute_cancel() uses parse_cancel_order_response() to verify the cancel count.",
+        "If the order is less than 5 seconds old, execute_cancel() logs a warning about the Starter-tier 8-point penalty.",
+        "Circuit breaker trips after 3 consecutive failures within 120 seconds, blocking further mutations for 300 seconds.",
+        "Tests mock transport and verify happy path, safe mode blocking, circuit breaker trip, and penalty warning logging."
+      ],
+      "owned_paths": [
+        "exchange/executor.py",
+        "tests/exchange/test_execute_cancel.py"
+      ],
+      "dependencies": ["7.2"],
+      "status": "pending",
+      "test_targets": [
+        "tests/exchange/test_execute_cancel.py"
+      ]
+    }
+  ]
+}
