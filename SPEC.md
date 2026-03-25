@@ -25,7 +25,7 @@ The bot is **bearish USD, bullish DOGE**. USD-denominated accounting (V3's lesso
 | V2 | SSE-based real-time dashboard | Critical for observability |
 | V3 | Frozen dataclasses everywhere | Eliminated an entire class of mutation bugs |
 | V3 | Multi-source belief formation (Claude + Codex) | Core alpha generator, now CLI-based |
-| V3 | Supabase as durable coordination store | Resilient cross-environment persistence |
+| V3 | Durable coordination store (now SQLite, was Supabase) | Resilient persistence with single runtime authority |
 | V3 | FastAPI web dashboard | Lightweight, Python-native |
 | V3 | Session-based workflow with continuation prompts | Effective AI-assisted development pattern |
 | Auto-research | 6-signal backtested ensemble | Independent quantitative vote alongside LLM beliefs |
@@ -42,12 +42,12 @@ The bot is **bearish USD, bullish DOGE**. USD-denominated accounting (V3's lesso
 | V2 | Multiple uncoordinated reseed/shed code paths | Root cause of worst operational bugs |
 | V3 | R Shiny + Haskell companion processes | Over-engineered, later abandoned for FastAPI |
 | V3 | DOGE denomination (portfolio P&L in DOGE) | Created cumulative conversion drag; USD accounting from day 1 |
-| V3 | Local-first state with Railway sync | Took many sessions to stabilize; define authority boundaries from day 1 |
+| V3 | Local-first state with Railway sync | Split-authority state sync was painful; V4 uses single local authority |
 | V3 | `guardian.py` at ~100KB, `main_belief.py` at ~134KB | God objects; max 500 lines per module |
 | V3 | Broad `except` clauses | Silently hid critical failures (NIGHTUSD margin bug) |
 | V3 | Range Harvest Overlay | Massive complexity for limited live validation; V4 makes grid trading first-class instead |
 | V3 | LangGraph agent debate system | Replaced by CLI-based beliefs at $0 marginal cost via subscriptions |
-| V3 | Vector + BM25 hybrid memory | Replaced by database-as-memory; LLMs query Supabase directly |
+| V3 | Vector + BM25 hybrid memory | Replaced by database-as-memory; LLMs query local DB directly |
 
 ---
 
@@ -56,7 +56,7 @@ The bot is **bearish USD, bullish DOGE**. USD-denominated accounting (V3's lesso
 ### Design Constraints
 
 1. **No module exceeds 500 lines.** If it grows past 500, split it.
-2. **Explicit authority per domain.** Kraken is truth for live orders/balances. Supabase is the durable coordination store. Local state is a read-through cache plus offline queue.
+2. **Explicit authority per domain.** Kraken is truth for live orders/balances. SQLite is the durable coordination store. Local JSONL files are the audit/recovery trail.
 3. **All order operations flow through one gate.** No scattered reseed/shed paths. One `OrderGate` module controls all Kraken order placement and cancellation.
 4. **Typed exceptions only.** No bare `except:`. Every handler names the exception class.
 5. **USD accounting, DOGE accumulation.** All P&L, risk calculations, and position sizing in USD. DOGE is the strategic accumulation target, not the accounting unit.
@@ -109,14 +109,15 @@ kraken-bot-v4/
 │   ├── position.py                # Individual position lifecycle
 │   ├── sizing.py                  # Position sizing via Kelly + CI bounds
 │   ├── risk_rules.py              # Stop-loss, take-profit, concentration limits
-│   └── reconciler.py              # Kraken <-> Supabase state reconciliation
+│   └── reconciler.py              # Kraken <-> recorded state reconciliation
 │
 ├── persistence/                   # Storage layer
-│   ├── supabase.py                # Supabase client with offline queue
-│   ├── ledger.py                  # Trade ledger (JSONL local + Supabase)
+│   ├── sqlite.py                  # SQLite coordination store (WAL mode)
+│   ├── supabase.py                # Legacy Supabase client (unused, retained for reference)
+│   ├── ledger.py                  # Trade ledger (JSONL local)
 │   └── snapshots.py               # State snapshots for crash recovery
 │
-├── web/                           # Read-only dashboard (deployed to Railway)
+├── web/                           # Read-only dashboard (local, access via Tailscale)
 │   ├── app.py                     # FastAPI app with SSE
 │   ├── routes.py                  # GET-only API endpoints
 │   ├── static/
@@ -199,7 +200,7 @@ Instead of a separate vector/BM25 memory system, belief prompts include a direct
 
 > "Before forming a belief about {pair}, review the last {N} closed positions on this pair from the trades table. Note where predictions diverged from outcomes."
 
-The LLMs running on the laptop have full database access. The "memory" is just Supabase. No embedding model, no retrieval pipeline, no memory subsystem to build and debug.
+The LLMs running on the laptop have full database access. The "memory" is just the local SQLite DB. No embedding model, no retrieval pipeline, no memory subsystem to build and debug.
 
 **Belief cadence:** Daily for full belief cycles. The auto-research ensemble can run more frequently (hourly) since it's pure Python with no LLM cost.
 
@@ -317,16 +318,16 @@ class OrderGate:
 Every 5 minutes:
 1. Fetch Kraken open orders + balances + trade history
 2. Normalize symbols (XXRP → XRP, handle all Kraken naming quirks)
-3. Compare Kraken state to Supabase state
+3. Compare Kraken state to recorded state (SQLite)
 4. Detect: ghost positions, untracked assets, fee drift, foreign orders
 5. For each discrepancy: log it, categorize severity, auto-fix if LOW, alert if HIGH
 6. Reconciliation result feeds back into state machine as ReconciliationResult event
 ```
 
 **On restart (kill switch recovery):**
-1. Connect to Supabase, pull last known state
+1. Open SQLite, pull last known state
 2. Connect to Kraken, fetch live orders + balances + recent trade history
-3. Reconcile: match Supabase positions to Kraken reality
+3. Reconcile: match recorded positions to Kraken reality
 4. Best-effort import for unrecognized Kraken positions + Telegram alert
 5. Resolve discrepancies before entering main loop
 
@@ -406,7 +407,7 @@ Local files (audit + recovery)
 **Read-only D3.js dashboard, served locally on the bot host.** Access via Tailscale. No action endpoints. No `POST /api/override`.
 
 ```
-FastAPI backend (Railway):
+FastAPI backend (local):
   GET /api/portfolio     → current portfolio state
   GET /api/positions     → open positions with P&L
   GET /api/grid/{pair}   → grid status, slot distribution, cycle history
@@ -431,10 +432,7 @@ Frontend:
     - Confidence interval bands on strategy metrics
 ```
 
-**Authentication is an open question.** The dashboard is read-only, which reduces risk, but portfolio P&L on a public Railway URL is still exposure. Options to evaluate:
-- Basic auth (simple, sufficient for single user)
-- Railway private networking (only accessible via Tailscale)
-- No auth (acceptable if Railway URL is treated as semi-private)
+**Authentication:** The dashboard is local-only (bound to 127.0.0.1 by default). Remote access via Tailscale. No public exposure.
 
 This decision should be made before Phase 5 (Observability).
 
@@ -493,14 +491,14 @@ Layer 6: Order Gate
   └─ 5-second cancel penalty awareness
 
 Layer 7: Reconciliation
-  └─ Every 5 minutes: Kraken ↔ Supabase consistency check
+  └─ Every 5 minutes: Kraken ↔ SQLite consistency check
   └─ Auto-fix LOW severity, alert on HIGH
   └─ Foreign order detection via cl_ord_id prefix
   └─ Ghost position prevention via post-placement verification
 
 Layer 8: Crash Recovery
   └─ Kill switch = Ctrl+C; Kraken native stops persist on exchange
-  └─ On restart: Supabase + Kraken reconciliation before trading resumes
+  └─ On restart: SQLite + Kraken reconciliation before trading resumes
   └─ Best-effort import of unrecognized positions + Telegram alert
   └─ No "stale state causes wrong behavior" scenarios
 ```
@@ -509,7 +507,7 @@ Layer 8: Crash Recovery
 
 | Failure | New Entries | Open Position Mgmt | Persistence | Alert |
 |---------|-------------|---------------------|-------------|-------|
-| Supabase unavailable | Blocked | Kraken + local cache | Queue writes locally | Telegram |
+| SQLite unavailable | Blocked | Kraken + local cache | Queue writes locally | Telegram |
 | Kraken WebSocket down | Allowed (tighter limits) | REST polling fallback | Normal | Telegram |
 | Kraken private API down | Blocked | Monitoring only, no order mutations | Normal | Telegram |
 | All LLM sources down | Blocked | Stops/targets/reconciliation continue | Normal | Telegram |
@@ -594,7 +592,7 @@ This decision means reconciliation, foreign order handling, and ghost position p
 
 - Bot writes `state/bot-status.json` with current positions, P&L, errors, health status
 - When issues arise: operator opens Claude Code / Codex session on the laptop
-- LLMs read bot state, logs, Supabase data to diagnose and fix
+- LLMs read bot state, logs, SQLite data to diagnose and fix
 - Telegram alerts ensure the operator knows something needs attention
 
 ### Future (Phase 6): Autonomous Self-Healing
@@ -697,7 +695,7 @@ STATS_FAIL_CLOSED=true
 | `beliefs/` | Integration (mock CLI) | Consensus logic, 2/3 agreement, staleness expiry |
 | `exchange/` | Unit + integration | Order gate circuit breaker; symbol normalization; rate limiting; cl_ord_id generation |
 | `trading/` | Unit | Portfolio math; sizing bounds; reconciler discrepancy detection; DOGE accumulation logic |
-| `persistence/` | Integration | Supabase round-trip; offline queue drain; snapshot restore |
+| `persistence/` | Integration | SQLite round-trip; offline queue drain; snapshot restore |
 | `web/` | Integration | API endpoints return correct data; SSE stream delivers events |
 | End-to-end | Simulation | Full pipeline with mock exchange: beliefs → grid activation → fill → profit redistribution |
 
@@ -718,7 +716,7 @@ STATS_FAIL_CLOSED=true
 - AP Stats toolkit with normality gate, tests against scipy
 - Kraken client with Starter tier rate limiting
 - Order gate with circuit breaker and cl_ord_id
-- Supabase integration with offline queue
+- SQLite integration with offline queue
 - Symbol normalization (centralized)
 - Env-driven config
 
@@ -742,14 +740,14 @@ STATS_FAIL_CLOSED=true
 - Position sizing (Kelly + CI bounds)
 - Risk rules enforcement
 - Guardian (stops, targets, staleness)
-- Reconciler (Kraken ↔ Supabase, foreign orders, ghost prevention)
+- Reconciler (Kraken ↔ SQLite, foreign orders, ghost prevention)
 - Scheduler (main loop orchestration)
 
 ### Phase 5: Observability (web/ + alerts/)
 - FastAPI read-only dashboard with SSE
 - D3.js visualizations (grid, stats, beliefs, equity)
 - Telegram alerts
-- Railway deployment
+- Local dashboard serving
 - Authentication decision
 
 ### Phase 6: Self-Healing (intended architecture)
@@ -767,13 +765,13 @@ STATS_FAIL_CLOSED=true
 | Language | Python 3.12 | Matches developer environment |
 | Belief sources | Claude Code CLI, Codex CLI | Subscription-funded ($0 marginal), proven in V3 |
 | Quantitative signals | Auto-research ensemble | Backtested, pure Python, no LLM cost |
-| Web framework | FastAPI | Lightweight, async, Railway-friendly |
+| Web framework | FastAPI | Lightweight, async, serves locally |
 | Visualization | D3.js + vanilla HTML/CSS/JS | D3 for stats/grid/belief charts; plain DOM for tables/cards |
-| Database | Supabase (PostgreSQL) | V3 proven, direct connection for low latency |
+| Database | SQLite (WAL mode) | Local-first, single-authority, no external dependency |
 | Exchange | Kraken REST + WebSocket | Existing expertise from V2/V3 |
 | Statistics | scipy.stats (validation only) | AP Stats formulas from scratch, scipy for test verification |
 | Testing | pytest | Standard |
-| Deployment | Laptop (trading) + Railway (dashboard) | Laptop-first eliminates container restart issues |
+| Deployment | Spare laptop (all-in-one: bot + DB + dashboard) | Single runtime authority, Tailscale for remote access |
 | Remote access | Tailscale | Secure access from school |
 | Alerts | python-telegram-bot | Existing infrastructure |
 
