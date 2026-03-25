@@ -19,7 +19,7 @@ from core.types import (
     TargetHit,
 )
 from guardian import CurrentPrices, Guardian, GuardianAction, GuardianActionType
-from trading.reconciler import KrakenState, ReconciliationReport, SupabaseState, reconcile
+from trading.reconciler import KrakenState, ReconciliationReport, RecordedState, reconcile
 
 Reducer: TypeAlias = Callable[[BotState, object, Settings], tuple[BotState, tuple[Action, ...]]]
 Reconciler: TypeAlias = Callable[..., ReconciliationReport]
@@ -86,7 +86,7 @@ class SchedulerState:
     bot_state: BotState = field(default_factory=BotState)
     current_prices: CurrentPrices = field(default_factory=dict)
     kraken_state: KrakenState = field(default_factory=KrakenState)
-    supabase_state: SupabaseState = field(default_factory=SupabaseState)
+    recorded_state: RecordedState = field(default_factory=RecordedState)
     pending_belief_signals: tuple[BeliefSnapshot, ...] = ()
     pending_grid_cycles: tuple[GridCycleComplete, ...] = ()
     now: datetime = field(default_factory=datetime.utcnow)
@@ -153,7 +153,7 @@ class Scheduler:
         ):
             report = self._reconciler(
                 working_state.kraken_state,
-                working_state.supabase_state,
+                working_state.recorded_state,
                 as_of=working_state.now,
             )
             summary = _reconciliation_summary(report)

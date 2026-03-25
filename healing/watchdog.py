@@ -275,8 +275,8 @@ def _select_incident_category(
     recent_incidents: Sequence[Incident],
     advice: WatchdogAdvice,
 ) -> IncidentCategory:
-    if heartbeat is not None and not heartbeat.supabase_connected:
-        return IncidentCategory.SUPABASE_UNAVAILABLE
+    if heartbeat is not None and not heartbeat.persistence_connected:
+        return IncidentCategory.PERSISTENCE_UNAVAILABLE
     if heartbeat is not None and not heartbeat.websocket_connected:
         return IncidentCategory.WEBSOCKET_DROP
     if advice.recommended_action is AllowedAction.RUN_RECONCILE:

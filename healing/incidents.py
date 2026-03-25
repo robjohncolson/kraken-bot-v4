@@ -55,7 +55,7 @@ class IncidentCategory(StrEnum):
     ORDER_FAILURE = "order_failure"
     WEBSOCKET_DROP = "websocket_drop"
     BELIEF_STALE = "belief_stale"
-    SUPABASE_UNAVAILABLE = "supabase_unavailable"
+    PERSISTENCE_UNAVAILABLE = "persistence_unavailable"
     UNKNOWN = "unknown"
 
 

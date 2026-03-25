@@ -30,7 +30,7 @@ def _snapshot(
         last_reconciliation_age_sec=12.5,
         last_belief_age_sec=45.0,
         websocket_connected=websocket_connected,
-        supabase_connected=True,
+        persistence_connected=True,
     )
 
 

@@ -51,7 +51,7 @@ class HeartbeatSnapshot:
     last_reconciliation_age_sec: float
     last_belief_age_sec: float
     websocket_connected: bool
-    supabase_connected: bool
+    persistence_connected: bool
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "timestamp", _normalize_timestamp(self.timestamp))
@@ -95,8 +95,8 @@ class HeartbeatSnapshot:
         )
         object.__setattr__(
             self,
-            "supabase_connected",
-            _coerce_bool(self.supabase_connected, field_name="supabase_connected"),
+            "persistence_connected",
+            _coerce_bool(self.persistence_connected, field_name="persistence_connected"),
         )
 
     def to_record(self) -> dict[str, object]:
@@ -108,7 +108,7 @@ class HeartbeatSnapshot:
             "last_reconciliation_age_sec": self.last_reconciliation_age_sec,
             "last_belief_age_sec": self.last_belief_age_sec,
             "websocket_connected": self.websocket_connected,
-            "supabase_connected": self.supabase_connected,
+            "persistence_connected": self.persistence_connected,
         }
 
     @classmethod
@@ -121,7 +121,7 @@ class HeartbeatSnapshot:
             last_reconciliation_age_sec=_read_float(record, "last_reconciliation_age_sec"),
             last_belief_age_sec=_read_float(record, "last_belief_age_sec"),
             websocket_connected=_read_bool(record, "websocket_connected"),
-            supabase_connected=_read_bool(record, "supabase_connected"),
+            persistence_connected=_read_bool(record, "persistence_connected"),
         )
 
 

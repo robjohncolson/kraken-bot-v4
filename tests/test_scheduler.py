@@ -29,7 +29,7 @@ from trading.reconciler import (
     KrakenState,
     ReconciliationAction,
     ReconciliationSeverity,
-    SupabaseState,
+    RecordedState,
 )
 
 NOW = datetime(2026, 3, 24, 12, 0, tzinfo=timezone.utc)
@@ -159,7 +159,7 @@ def test_run_cycle_records_reconciliation_discrepancies_when_due() -> None:
                 ),
             ),
         ),
-        supabase_state=SupabaseState(),
+        recorded_state=RecordedState(),
         now=NOW,
         last_guardian_check_at=NOW,
     )

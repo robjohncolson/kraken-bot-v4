@@ -20,7 +20,7 @@ def _snapshot(
     timestamp: datetime | None = None,
     bot_status: HeartbeatStatus = HeartbeatStatus.HEALTHY,
     websocket_connected: bool = True,
-    supabase_connected: bool = True,
+    persistence_connected: bool = True,
 ) -> HeartbeatSnapshot:
     return HeartbeatSnapshot(
         timestamp=timestamp or datetime.now(timezone.utc),
@@ -30,7 +30,7 @@ def _snapshot(
         last_reconciliation_age_sec=12.5,
         last_belief_age_sec=45.0,
         websocket_connected=websocket_connected,
-        supabase_connected=supabase_connected,
+        persistence_connected=persistence_connected,
     )
 
 

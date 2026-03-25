@@ -14,9 +14,9 @@ from trading.reconciler import (
     ReconciliationAction,
     ReconciliationReport,
     ReconciliationSeverity,
-    SupabaseOrder,
-    SupabasePosition,
-    SupabaseState,
+    RecordedOrder,
+    RecordedPosition,
+    RecordedState,
     UntrackedAsset,
     reconcile,
 )
@@ -68,8 +68,8 @@ def _sb_order(
     exchange_order_id: str | None = None,
     client_order_id: str | None = None,
     recorded_fee: str | None = None,
-) -> SupabaseOrder:
-    return SupabaseOrder(
+) -> RecordedOrder:
+    return RecordedOrder(
         order_id=order_id,
         pair=pair,
         position_id=position_id,
@@ -105,8 +105,8 @@ def test_reconcile_returns_clean_report_for_matching_state() -> None:
                 ),
             ),
         ),
-        SupabaseState(
-            positions=(SupabasePosition(position_id="pos-1", pair="BTC/USD"),),
+        RecordedState(
+            positions=(RecordedPosition(position_id="pos-1", pair="BTC/USD"),),
             orders=(
                 _sb_order(
                     "sb-1",
@@ -128,8 +128,8 @@ def test_reconcile_returns_clean_report_for_matching_state() -> None:
 def test_reconcile_flags_ghost_positions_without_live_exchange_support() -> None:
     report = reconcile(
         KrakenState(),
-        SupabaseState(
-            positions=(SupabasePosition(position_id="pos-ghost", pair="BTC/USD"),),
+        RecordedState(
+            positions=(RecordedPosition(position_id="pos-ghost", pair="BTC/USD"),),
             orders=(
                 _sb_order(
                     "sb-ghost",
@@ -163,7 +163,7 @@ def test_reconcile_classifies_foreign_orders_by_lifecycle() -> None:
                 _order("stale-1", pair="DOGE/USD", client_order_id=None, opened_minutes_ago=90),
             ),
         ),
-        SupabaseState(
+        RecordedState(
             orders=(
                 _sb_order(
                     "sb-acked",
@@ -188,7 +188,7 @@ def test_reconcile_classifies_foreign_orders_by_lifecycle() -> None:
     assert foreign_orders["stale-1"].recommended_action == ReconciliationAction.ALERT
 
 
-def test_reconcile_detects_fee_drift_against_supabase_fees() -> None:
+def test_reconcile_detects_fee_drift_against_recorded_fees() -> None:
     report = reconcile(
         KrakenState(
             trade_history=(
@@ -201,7 +201,7 @@ def test_reconcile_detects_fee_drift_against_supabase_fees() -> None:
                 ),
             ),
         ),
-        SupabaseState(
+        RecordedState(
             orders=(
                 _sb_order(
                     "sb-fee-1",
@@ -222,7 +222,7 @@ def test_reconcile_detects_fee_drift_against_supabase_fees() -> None:
             order_id="sb-fee-1",
             pair="BTC/USD",
             kraken_fee=Decimal("0.17"),
-            supabase_fee=Decimal("0.10"),
+            recorded_fee=Decimal("0.10"),
             delta=Decimal("0.07"),
             severity=ReconciliationSeverity.LOW,
             recommended_action=ReconciliationAction.AUTO_FIX,
@@ -247,7 +247,7 @@ def test_reconcile_maps_low_and_high_severity_to_expected_actions() -> None:
                 ),
             ),
         ),
-        SupabaseState(
+        RecordedState(
             orders=(
                 _sb_order(
                     "sb-fee-2",

@@ -33,13 +33,13 @@ class ForeignOrderClassification(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
-class SupabasePosition:
+class RecordedPosition:
     position_id: PositionId
     pair: Pair
 
 
 @dataclass(frozen=True, slots=True)
-class SupabaseOrder:
+class RecordedOrder:
     order_id: str
     pair: Pair
     position_id: PositionId | None = None
@@ -49,9 +49,9 @@ class SupabaseOrder:
 
 
 @dataclass(frozen=True, slots=True)
-class SupabaseState:
-    positions: tuple[SupabasePosition, ...] = field(default_factory=tuple)
-    orders: tuple[SupabaseOrder, ...] = field(default_factory=tuple)
+class RecordedState:
+    positions: tuple[RecordedPosition, ...] = field(default_factory=tuple)
+    orders: tuple[RecordedOrder, ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,7 +60,7 @@ class GhostPosition:
     pair: Pair
     severity: ReconciliationSeverity
     recommended_action: ReconciliationAction
-    recommended_step: str = "close_supabase_position"
+    recommended_step: str = "close_recorded_position"
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,7 +80,7 @@ class FeeDrift:
     order_id: str
     pair: Pair
     kraken_fee: Decimal
-    supabase_fee: Decimal
+    recorded_fee: Decimal
     delta: Decimal
     severity: ReconciliationSeverity
     recommended_action: ReconciliationAction
@@ -118,7 +118,7 @@ class ReconciliationReport:
 
 def reconcile(
     kraken_state: KrakenState,
-    supabase_state: SupabaseState,
+    recorded_state: RecordedState,
     *,
     cl_ord_id_prefix: str = DEFAULT_CLIENT_ORDER_ID_PREFIX,
     recent_fill_window: timedelta = DEFAULT_RECENT_FILL_WINDOW,
@@ -136,41 +136,41 @@ def reconcile(
     return ReconciliationReport(
         ghost_positions=_detect_ghost_positions(
             kraken_state,
-            supabase_state,
+            recorded_state,
             as_of=effective_as_of,
             recent_fill_window=recent_fill_window,
             cl_ord_id_prefix=cl_ord_id_prefix,
         ),
         foreign_orders=_detect_foreign_orders(
             kraken_state,
-            supabase_state,
+            recorded_state,
             as_of=effective_as_of,
             stale_order_age=stale_order_age,
             cl_ord_id_prefix=cl_ord_id_prefix,
         ),
         fee_drift=_detect_fee_drift(
             kraken_state,
-            supabase_state,
+            recorded_state,
             fee_drift_tolerance=fee_drift_tolerance,
             high_fee_drift_tolerance=high_fee_limit,
         ),
-        untracked_assets=_detect_untracked_assets(kraken_state, supabase_state),
+        untracked_assets=_detect_untracked_assets(kraken_state, recorded_state),
     )
 
 
 def _detect_ghost_positions(
     kraken_state: KrakenState,
-    supabase_state: SupabaseState,
+    recorded_state: RecordedState,
     *,
     as_of: datetime,
     recent_fill_window: timedelta,
     cl_ord_id_prefix: str,
 ) -> tuple[GhostPosition, ...]:
     ghost_positions: list[GhostPosition] = []
-    for position in sorted(supabase_state.positions, key=lambda item: item.position_id):
+    for position in sorted(recorded_state.positions, key=lambda item: item.position_id):
         related_orders = tuple(
             order
-            for order in supabase_state.orders
+            for order in recorded_state.orders
             if _position_id(order) == position.position_id
         )
         exchange_ids = {_exchange_order_id(order) for order in related_orders if _exchange_order_id(order)}
@@ -209,7 +209,7 @@ def _detect_ghost_positions(
 
 def _detect_foreign_orders(
     kraken_state: KrakenState,
-    supabase_state: SupabaseState,
+    recorded_state: RecordedState,
     *,
     as_of: datetime,
     stale_order_age: timedelta,
@@ -217,10 +217,10 @@ def _detect_foreign_orders(
 ) -> tuple[ForeignOrder, ...]:
     foreign_orders: list[ForeignOrder] = []
     acknowledged_exchange_ids = {
-        _exchange_order_id(order) for order in supabase_state.orders if _exchange_order_id(order)
+        _exchange_order_id(order) for order in recorded_state.orders if _exchange_order_id(order)
     }
     acknowledged_client_ids = {
-        _client_order_id(order) for order in supabase_state.orders if _client_order_id(order)
+        _client_order_id(order) for order in recorded_state.orders if _client_order_id(order)
     }
     for order in sorted(kraken_state.open_orders, key=lambda item: item.order_id):
         client_order_id = _client_order_id(order)
@@ -259,13 +259,13 @@ def _detect_foreign_orders(
 
 def _detect_fee_drift(
     kraken_state: KrakenState,
-    supabase_state: SupabaseState,
+    recorded_state: RecordedState,
     *,
     fee_drift_tolerance: Decimal,
     high_fee_drift_tolerance: Decimal,
 ) -> tuple[FeeDrift, ...]:
     fee_drift: list[FeeDrift] = []
-    for order in sorted(supabase_state.orders, key=lambda item: item.order_id):
+    for order in sorted(recorded_state.orders, key=lambda item: item.order_id):
         recorded_fee = order.recorded_fee
         if recorded_fee is None:
             continue
@@ -291,7 +291,7 @@ def _detect_fee_drift(
                 order_id=order.order_id,
                 pair=order.pair,
                 kraken_fee=kraken_fee,
-                supabase_fee=recorded_fee,
+                recorded_fee=recorded_fee,
                 delta=delta,
                 severity=severity,
                 recommended_action=action,
@@ -303,12 +303,12 @@ def _detect_fee_drift(
 
 def _detect_untracked_assets(
     kraken_state: KrakenState,
-    supabase_state: SupabaseState,
+    recorded_state: RecordedState,
 ) -> tuple[UntrackedAsset, ...]:
     tracked_assets = {"USD"}
-    for position in supabase_state.positions:
+    for position in recorded_state.positions:
         tracked_assets.update(_pair_assets(position.pair))
-    for order in supabase_state.orders:
+    for order in recorded_state.orders:
         tracked_assets.update(_pair_assets(order.pair))
 
     untracked_assets = [
@@ -336,7 +336,7 @@ def _resolve_as_of(kraken_state: KrakenState, *, as_of: datetime | None) -> date
 
 
 def _matches_position_order(
-    position: SupabasePosition,
+    position: RecordedPosition,
     order: KrakenOrder,
     *,
     exchange_ids: set[str],
@@ -357,7 +357,7 @@ def _matches_position_order(
 
 
 def _is_recent_fill(
-    position: SupabasePosition,
+    position: RecordedPosition,
     trade: KrakenTrade,
     *,
     exchange_ids: set[str],
@@ -375,7 +375,7 @@ def _is_recent_fill(
     )
 
 
-def _trade_matches_order(trade: KrakenTrade, order: SupabaseOrder) -> bool:
+def _trade_matches_order(trade: KrakenTrade, order: RecordedOrder) -> bool:
     exchange_order_id = _exchange_order_id(order)
     client_order_id = _client_order_id(order)
     return _order_id(trade) == exchange_order_id or _client_order_id(trade) == client_order_id
@@ -444,9 +444,9 @@ __all__ = [
     "ReconciliationAction",
     "ReconciliationReport",
     "ReconciliationSeverity",
-    "SupabaseOrder",
-    "SupabasePosition",
-    "SupabaseState",
+    "RecordedOrder",
+    "RecordedPosition",
+    "RecordedState",
     "UntrackedAsset",
     "reconcile",
 ]
