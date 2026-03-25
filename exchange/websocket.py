@@ -3,12 +3,15 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from enum import Enum
 from typing import Protocol
 
 from core.errors import ExchangeError
+from exchange.symbols import SymbolNormalizationError, normalize_pair
 
 KRAKEN_WEBSOCKET_V2_URL = "wss://ws.kraken.com/v2"
 
@@ -26,6 +29,8 @@ class SupportsWebSocket(Protocol):
 
 Connector = Callable[[str], Awaitable[SupportsWebSocket]]
 Sleeper = Callable[[float], Awaitable[None]]
+PriceTickHandler = Callable[["PriceTick"], Awaitable[None]]
+UtcNow = Callable[[], datetime]
 
 
 class ConnectionState(str, Enum):
@@ -47,10 +52,27 @@ class KrakenWebSocketConnectError(KrakenWebSocketError):
         super().__init__(f"Failed to connect to Kraken WebSocket at {url}.")
 
 
+class KrakenWebSocketSubscriptionError(KrakenWebSocketError):
+    """Raised when a WebSocket subscription cannot be sent."""
+
+    def __init__(self, detail: str) -> None:
+        self.detail = detail
+        super().__init__(detail)
+
+
 @dataclass(frozen=True, slots=True)
 class ReconnectPolicy:
     base_delay_sec: float = 2.0
     max_delay_sec: float = 30.0
+
+
+@dataclass(frozen=True, slots=True)
+class PriceTick:
+    pair: str
+    bid: Decimal
+    ask: Decimal
+    last: Decimal
+    timestamp: datetime
 
 
 async def _default_connector(url: str) -> SupportsWebSocket:
@@ -60,6 +82,10 @@ async def _default_connector(url: str) -> SupportsWebSocket:
         raise KrakenWebSocketConnectError(url) from exc
 
     return await websockets.connect(url)
+
+
+def _default_utc_now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 def _connect_error_types() -> tuple[type[BaseException], ...]:
@@ -92,11 +118,15 @@ class KrakenWebSocketV2:
         connector: Connector = _default_connector,
         sleep: Sleeper = asyncio.sleep,
         reconnect_policy: ReconnectPolicy = ReconnectPolicy(),
+        ticker_handler: PriceTickHandler | None = None,
+        utc_now: UtcNow = _default_utc_now,
     ) -> None:
         self._url = url
         self._connector = connector
         self._sleep = sleep
         self._reconnect_policy = reconnect_policy
+        self._ticker_handler = ticker_handler
+        self._utc_now = utc_now
         self._state = ConnectionState.DISCONNECTED
         self._websocket: SupportsWebSocket | None = None
         self._reader_task: asyncio.Task[None] | None = None
@@ -104,10 +134,19 @@ class KrakenWebSocketV2:
         self._reconnect_attempt = 0
         self._connect_errors = _connect_error_types()
         self._disconnect_errors = _disconnect_error_types()
+        self._price_ticks: asyncio.Queue[PriceTick] = asyncio.Queue()
+        self._ticker_pairs: tuple[str, ...] = ()
 
     @property
     def state(self) -> ConnectionState:
         return self._state
+
+    @property
+    def price_ticks(self) -> asyncio.Queue[PriceTick]:
+        return self._price_ticks
+
+    async def get_price_tick(self) -> PriceTick:
+        return await self._price_ticks.get()
 
     async def connect(self) -> None:
         if self._state is not ConnectionState.DISCONNECTED:
@@ -139,6 +178,21 @@ class KrakenWebSocketV2:
             await websocket.close()
 
         self._state = ConnectionState.DISCONNECTED
+
+    async def subscribe_ticker(self, pairs: Iterable[str]) -> None:
+        normalized_pairs = _normalize_pairs(pairs)
+        if not normalized_pairs:
+            raise KrakenWebSocketSubscriptionError(
+                "Ticker subscription requires at least one pair."
+            )
+
+        if self._websocket is None:
+            raise KrakenWebSocketSubscriptionError(
+                "Cannot subscribe to ticker while disconnected."
+            )
+
+        self._ticker_pairs = _merge_pairs(self._ticker_pairs, normalized_pairs)
+        await self._send_ticker_subscription(normalized_pairs)
 
     async def _run(self) -> None:
         while self._should_reconnect:
@@ -194,14 +248,39 @@ class KrakenWebSocketV2:
 
     async def _handle_message(self, raw_message: str | bytes) -> None:
         payload = _decode_message(raw_message)
-        if payload is None or not _is_ping_message(payload):
+        if payload is None:
             return
 
+        if _is_ping_message(payload):
+            await self._send_json(_build_pong_message(payload))
+            return
+
+        for tick in _parse_ticker_payload(payload, utc_now=self._utc_now):
+            await self._emit_price_tick(tick)
+
+    async def _send_ticker_subscription(self, pairs: tuple[str, ...]) -> None:
+        await self._send_json(
+            {
+                "method": "subscribe",
+                "params": {
+                    "channel": "ticker",
+                    "symbol": list(pairs),
+                },
+            }
+        )
+
+    async def _send_json(self, payload: dict[str, object]) -> None:
         websocket = self._websocket
         if websocket is None:
-            return
+            raise KrakenWebSocketSubscriptionError(
+                "Cannot send WebSocket message while disconnected."
+            )
+        await websocket.send(json.dumps(payload, separators=(",", ":")))
 
-        await websocket.send(json.dumps(_build_pong_message(payload), separators=(",", ":")))
+    async def _emit_price_tick(self, tick: PriceTick) -> None:
+        await self._price_ticks.put(tick)
+        if self._ticker_handler is not None:
+            await self._ticker_handler(tick)
 
 
 def _decode_message(raw_message: str | bytes) -> dict[str, object] | None:
@@ -244,11 +323,132 @@ def _build_pong_message(payload: dict[str, object]) -> dict[str, object]:
     return pong
 
 
+def _normalize_pairs(pairs: Iterable[str]) -> tuple[str, ...]:
+    normalized: list[str] = []
+    for pair in pairs:
+        normalized_pair = normalize_pair(pair)
+        if normalized_pair not in normalized:
+            normalized.append(normalized_pair)
+    return tuple(normalized)
+
+
+def _merge_pairs(existing: tuple[str, ...], new_pairs: tuple[str, ...]) -> tuple[str, ...]:
+    merged = list(existing)
+    for pair in new_pairs:
+        if pair not in merged:
+            merged.append(pair)
+    return tuple(merged)
+
+
+def _parse_ticker_payload(
+    payload: Mapping[str, object], *, utc_now: UtcNow
+) -> tuple[PriceTick, ...]:
+    if payload.get("channel") != "ticker":
+        return ()
+
+    raw_data = payload.get("data")
+    if not isinstance(raw_data, (list, tuple)):
+        return ()
+
+    message_timestamp = _parse_timestamp(_first_present(payload, "timestamp", "time_in", "time_out"))
+    ticks: list[PriceTick] = []
+    for entry in raw_data:
+        if not isinstance(entry, Mapping):
+            continue
+
+        raw_symbol = entry.get("symbol")
+        if not isinstance(raw_symbol, str):
+            continue
+
+        try:
+            pair = normalize_pair(raw_symbol)
+        except SymbolNormalizationError:
+            continue
+
+        bid = _extract_decimal(_first_present(entry, "bid", "best_bid"))
+        ask = _extract_decimal(_first_present(entry, "ask", "best_ask"))
+        last = _extract_decimal(_first_present(entry, "last", "last_price"))
+        if bid is None or ask is None or last is None:
+            continue
+
+        timestamp = _parse_timestamp(_first_present(entry, "timestamp", "time", "as_of"))
+        if timestamp is None:
+            timestamp = message_timestamp
+        if timestamp is None:
+            timestamp = utc_now()
+
+        ticks.append(
+            PriceTick(
+                pair=pair,
+                bid=bid,
+                ask=ask,
+                last=last,
+                timestamp=timestamp,
+            )
+        )
+
+    return tuple(ticks)
+
+
+def _first_present(mapping: Mapping[str, object], *keys: str) -> object | None:
+    for key in keys:
+        if key in mapping:
+            return mapping[key]
+    return None
+
+
+def _extract_decimal(value: object) -> Decimal | None:
+    raw_value = value
+    if isinstance(value, Mapping):
+        raw_value = _first_present(value, "price", "value")
+    if raw_value is None:
+        return None
+
+    try:
+        return Decimal(str(raw_value))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+
+
+def _parse_timestamp(value: object) -> datetime | None:
+    if value is None or isinstance(value, bool):
+        return None
+
+    if isinstance(value, datetime):
+        return _to_utc(value)
+
+    if isinstance(value, (int, float)):
+        return datetime.fromtimestamp(float(value), tz=timezone.utc)
+
+    if not isinstance(value, str):
+        return None
+
+    stripped = value.strip()
+    if not stripped:
+        return None
+
+    try:
+        return _to_utc(datetime.fromisoformat(stripped.replace("Z", "+00:00")))
+    except ValueError:
+        try:
+            return datetime.fromtimestamp(float(stripped), tz=timezone.utc)
+        except ValueError:
+            return None
+
+
+def _to_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
 __all__ = [
     "ConnectionState",
     "KRAKEN_WEBSOCKET_V2_URL",
     "KrakenWebSocketConnectError",
     "KrakenWebSocketError",
+    "KrakenWebSocketSubscriptionError",
     "KrakenWebSocketV2",
+    "PriceTick",
     "ReconnectPolicy",
 ]
