@@ -6,133 +6,129 @@
 - **Kraken**: truth for live balances/orders/fills
 - **SQLite** (`./data/bot.db`): durable coordination store (WAL mode)
 - **Local JSONL**: audit/recovery trail (ledger, snapshots, offline queue)
-- **FastAPI dashboard**: local on bot host (`localhost:8080`)
+- **FastAPI dashboard**: local on bot host (`localhost:58392` — port 8080/8081 may collide)
 - **Tailscale**: remote access from school
 - **No Supabase** in runtime path (legacy code retained, not used)
 - **No Railway** (dashboard is local)
 
-## What to do NOW: First controlled run
+## What to do NOW: First controlled writable run on laptop
 
-All implementation tasks are complete. The bot has full Kraken integration (read + write), SQLite persistence (read + write), WebSocket feeds with REST fallback, and the complete scaffold from phases 1-6.
+The school network intermittently filters Kraken API traffic. All remaining live tests must run on the spare laptop (hotspot).
 
-### Completed tasks:
+### Setup on laptop
+
+1. `git pull` to get commit `d6ee7da`
+2. Create `.env` with Kraken keys (see `kraken-bot-v4-env.txt` on school machine, NOT committed):
+   ```
+   KRAKEN_API_KEY=FPJlgctDrBoz6PkKuDT11/S/nH3mGs9SbL4McRtQEdPdOab6iuUGbnjO
+   KRAKEN_API_SECRET=3rUOnXkAgtjXtYs+rLxcCJDLPqxJ3jr7WB09sGk7H6VKc1blGmq6yiEqXFTyPJQcD99H8kKEZgMT+f+7K2yumw==
+   ```
+   Plus all other defaults from `.env.example`. Safe mode flags stay ON in `.env`.
+3. `pip install python-dotenv websockets httpx` (if not already installed)
+4. Run smoke test first: `python main.py` (reconcile-only, should exit cleanly)
+
+### Writable run (shell overrides, don't edit .env)
+
+```powershell
+$env:STARTUP_RECONCILE_ONLY='false'
+$env:READ_ONLY_EXCHANGE='false'
+$env:DISABLE_ORDER_MUTATIONS='false'
+$env:ALLOWED_PAIRS='DOGE/USD'
+$env:MAX_POSITION_USD='10'
+$env:MIN_POSITION_USD='10'
+$env:WEB_PORT='58392'
+python main.py
+```
+
+### What to expect
+
+The state machine reducer (`core/state_machine.py:33`) is a **complete no-op** — returns NO_ACTIONS for every event. So even with mutations enabled, the bot will NOT place orders. The writable run validates:
+- Kraken connectivity (REST + WebSocket) without school network filtering
+- Authenticated session stays healthy
+- Dashboard/heartbeat/guardian run clean for 2+ cycles
+- Pair whitelist logs `DOGE/USD` in startup banner
+- No `SafeModeBlockedError` (proves wiring fix works)
+
+### Success criteria
+
+1. Startup banner: no safe mode flags + `Pair whitelist: DOGE/USD`
+2. Reconciliation completes (untracked assets warning is fine)
+3. 2+ scheduler cycles with no errors
+4. Heartbeat: `bot_status: healthy`, `websocket_connected: true`
+5. Dashboard: `/api/health` and `/api/reconciliation` respond
+6. Zero AddOrder/CancelOrder in logs
+
+### Abort conditions
+
+- `SafeModeBlockedError` (wiring bug)
+- `PairNotAllowedError` for DOGE/USD (normalization bug)
+- Any `AddOrder`/`CancelOrder` in logs
+- `DEGRADED` heartbeat for >2 cycles
+- Repeated `ExchangeError`
+
+### After writable run passes
+
+The next real milestone is **implementing the reducer** — making the state machine produce actual PlaceOrder/CancelOrder actions based on belief signals and grid state. The no-op reducer is the only thing standing between "runtime works" and "bot trades."
+
+## Completed tasks
 
 - **Task 1** ✅ `.env.example`, `main.py` entry point, safe mode flags
-- **Task 2A** ✅ Authenticated read-only Kraken REST (transport, parsers, executor)
-- **Task 2B** ✅ Kraken mutation execution (execute_order, execute_cancel, SafeModeBlockedError, cl_ord_id retry, circuit breaker)
+- **Task 2A** ✅ Authenticated read-only Kraken REST
+- **Task 2B** ✅ Kraken mutation execution (execute_order, execute_cancel)
 - **Task 3** ✅ Local-first migration (SQLite adapter, config flipped)
-- **Task 3B** ✅ SQLite write support (SqliteWriter: positions, orders, ledger; reconciler DB seeding)
-- **WebSocket** ✅ Kraken WS v2 (connection manager, ticker feed, execution feed, FallbackPoller REST fallback)
+- **Task 3B** ✅ SQLite write support (SqliteWriter: positions, orders, ledger)
+- **WebSocket** ✅ Kraken WS v2 (connection manager, ticker, executions, fallback)
+- **Runtime loop** ✅ Wired WebSocket into scheduler, dashboard, heartbeat
+- **Pair whitelist** ✅ ALLOWED_PAIRS config + OrderGate enforcement
+- **Executor wiring** ✅ Fixed: safe mode flags now flow from Settings to KrakenExecutor
+- **Smoke test** ✅ Reconcile-only against real Kraken (school machine)
+- **Read-only runtime** ✅ Dashboard, WebSocket, heartbeat verified (school machine)
+- **Writable run** ⏳ Inconclusive on school network — needs laptop retest
 
-### Priority tasks remaining (in order):
-
-**1. First smoke test with real `.env`**
-- Copy `.env.example` to `.env`, fill in `KRAKEN_API_KEY` + `KRAKEN_API_SECRET`
-- Run `python main.py` with `STARTUP_RECONCILE_ONLY=true`
-- Should: fetch Kraken balances/orders/trades, read empty SQLite, reconcile (all Kraken assets flagged as "untracked"), exit cleanly
-- Fix any issues found
-
-**2. Wire WebSocket into scheduler**
-- Connect `KrakenWebSocketV2` to the main scheduler loop
-- Subscribe to ticker for active pairs
-- Subscribe to execution feed with `get_ws_token()`
-- Route PriceTick → belief updates, FillConfirmed → reconciler
-
-**3. First controlled run**
-- Minimum position sizes, DOGE/USD as first pair
-- Verify: startup reconciliation, heartbeat writing, guardian loop, grid activation
-- Dashboard on localhost via Tailscale
-- Set `STARTUP_RECONCILE_ONLY=false`, `READ_ONLY_EXCHANGE=false`, `DISABLE_ORDER_MUTATIONS=false`
-
-### Key architectural decisions:
-
-- Spare laptop = single runtime authority (no split state)
-- Kraken native stop-loss = only market order exception
-- All other orders = limit, +/- 0.4% for maker fees
-- Beliefs: Claude Code CLI + Codex CLI + auto-research 6-signal ensemble, 2/3 agreement
-- Grid: V2 S0/S1a/S1b/S2 states, no per-slot identity, profit redistribution
-- Stats: AP Stats parametric first, normality gate, n>=30, fail closed
-- Safe mode defaults to all-on (must opt in to live trading)
-
-## Session Commits (2026-03-25) — Phases 7-9 automated build
+## Session Commits (2026-03-25)
 
 ```
-60da50b docs: add phase 7-9 build manifests for mutations, SQLite writes, WebSocket
-66d336f build(phase-9/9.4): add FallbackPoller and get_ws_token for REST fallback
-4ebf785 build(phase-9/9.3): extract ws_parsers.py, add execution feed subscription
-850570d build(phase-9/9.2): add public ticker subscription with PriceTick emission
-b3636fd build(phase-9/9.1): KrakenWebSocketV2 connection manager with reconnect
-4912dd0 fix: split semicolon-joined dataclass fields in reconciler.py
-f1b824b build(phase-8/8.3): wire reconciler to seed DB via SqliteWriter
-2c4724c build(phase-8/8.2): add insert_order and insert_ledger_entry to SqliteWriter
-fafad2b build(phase-8/8.1): add SqliteWriter with position insert/update methods
-43b86ad build(phase-7/7.3): implement execute_cancel with circuit breaker
-f8feafe build(phase-7/7.2): implement execute_order with cl_ord_id integration
-b9d6ee8 build(phase-7/7.1): add SafeModeBlockedError and mutation parsers
+d6ee7da build: add ALLOWED_PAIRS whitelist, fix executor wiring, add runtime loop
 ```
 
-## Previous Session Commits (2026-03-24)
-
+Previous session commits:
 ```
-0a9ab9d docs: update continuation prompt for local-first architecture
-4cfe5b4 docs(task-3): complete SPEC.md local-first migration
-8ac73c6 build(task-3): flip config and startup to local-first SQLite
-143ec50 build(task-3): add SQLite persistence adapter
-11ba30c build(task-2a): authenticated read-only Kraken REST client
-e58c239 build(task-1): add .env.example, main.py entry point, safe mode flags
-```
-
-## Initial Scaffold Commits
-
-```
-aa6f466 fix(phase-6): remove unused WatchdogAnalyzer import
-c073986 build(phase-6): complete self-healing skeleton with optional Ollama watchdog
-2f7c599 build(phase-5): complete observability phase
-c2af597 build(phase-4): complete trading phase
-1938d91 build(phase-3): complete belief formation phase
-bc5e030 build(scaffold): add spec and local build orchestration
+d2c1656 docs: update continuation prompt after phases 7-9 complete
+60da50b docs: add phase 7-9 build manifests
+66d336f-b3636fd build(phase-9): WebSocket v2
+fafad2b-f1b824b build(phase-8): SQLite writes
+b9d6ee8-43b86ad build(phase-7): Mutations
 ```
 
 ## Current State
 
-- **Branch**: master, pushed to origin at 60da50b
-- **Tests**: 317 passed, ruff clean
-- **Architecture**: local-first (SQLite + local dashboard + Tailscale)
-- **Startup path**: config → SQLite → Kraken health → Kraken state → recorded state → reconcile → exit or loop
-- **Safe mode**: all flags default to true
-- **Build phases**: 1-9 complete (1-6 scaffold, 7 mutations, 8 SQLite writes, 9 WebSocket)
-- **Untracked**: chatGPT_analysis.md, claude_analysis.md, grok_analysis.md, doge-bot-env.txt, grid-bot-v2-envs.txt
+- **Branch**: master, pushed at `d6ee7da`
+- **Tests**: 330 passed, ruff clean
+- **Kraken account**: ~5,522 DOGE, $0.009 USD (dust), 0 open orders
+- **Reducer**: no-op (core/state_machine.py:33) — no actions produced
+- **Untracked**: chatGPT_analysis.md, claude_analysis.md, grok_analysis.md
 
 ## Key Paths
 
 | File | Purpose |
 |------|---------|
 | `SPEC.md` | Full system spec (local-first architecture) |
-| `main.py` | Entry point with full startup sequence |
-| `core/config.py` | Env-driven config (SQLITE_PATH, WEB_HOST, safe mode flags) |
-| `core/types.py` | All frozen dataclasses and enums |
-| `core/errors.py` | Typed error hierarchy (SafeModeBlockedError, exchange errors) |
-| `exchange/transport.py` | HMAC-SHA512 signing, HTTP transport with retry |
-| `exchange/parsers.py` | Kraken JSON → domain types + mutation response parsers |
-| `exchange/executor.py` | Full Kraken executor (read + write: orders, cancels, ws_token) |
-| `exchange/order_gate.py` | cl_ord_id generation, circuit breaker |
-| `exchange/websocket.py` | Kraken WS v2 (connect, ticker, executions, FallbackPoller) |
-| `exchange/ws_parsers.py` | Pure WS message parsing (PriceTick, FillConfirmed) |
-| `exchange/models.py` | KrakenOrder, KrakenTrade, KrakenState |
-| `persistence/sqlite.py` | SQLite adapter (WAL, SqliteReader + SqliteWriter, ledger) |
-| `trading/reconciler.py` | Kraken ↔ recorded state reconciliation + DB seeding |
-| `trading/risk_rules.py` | Position + portfolio risk checks |
-| `guardian.py` | Stop/target monitoring, risk enforcement |
-| `scheduler.py` | Main loop orchestration |
+| `main.py` | Entry point — wires settings into executor + runtime |
+| `runtime_loop.py` | WebSocket, dashboard, heartbeat, scheduler integration |
+| `core/config.py` | Env-driven config (includes ALLOWED_PAIRS) |
+| `core/state_machine.py` | **No-op reducer** — next major implementation target |
+| `exchange/order_gate.py` | Single mutation gate with pair whitelist |
+| `exchange/executor.py` | Kraken executor (read + write, safe mode enforcement) |
+| `exchange/websocket.py` | Kraken WS v2 (ticker, executions, fallback) |
+| `persistence/sqlite.py` | SQLite adapter (WAL, reader + writer) |
+| `trading/reconciler.py` | Kraken vs recorded state reconciliation |
 | `web/app.py` | FastAPI + SSE local dashboard |
-| `healing/watchdog.py` | Advisory watchdog with optional Ollama |
 
 ## Environment
 
 - **Platform**: Windows 11, Git Bash
-- **Python**: 3.12 at C:/Users/ColsonR/AppData/Local/Programs/Python/Python312
+- **Python**: 3.12
 - **Deployment**: Spare laptop (bot + SQLite + dashboard), Tailscale for remote
-- **Subscriptions**: Claude Max + Codex Max (flat-rate, $0 marginal LLM cost)
-- **Cross-agent runner**: C:/Users/ColsonR/Agent/runner/cross-agent.py
-- **Auto-research strategy**: C:/Users/ColsonR/auto-researchtrading
+- **Subscriptions**: Claude Max + Codex Max ($0 marginal LLM cost)
 - **Repo**: git@github.com:robjohncolson/kraken-bot-v4.git
+- **Known issue**: School network may filter Kraken API — use hotspot for live tests
