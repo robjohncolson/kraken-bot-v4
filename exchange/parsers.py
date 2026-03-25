@@ -1,8 +1,8 @@
 """Pure parsers for Kraken REST API JSON responses.
 
-Each function accepts the ``"result"`` dict from a Kraken response and
-returns immutable domain types.  Read-only parsers only — write-side
-parsers (add_order, cancel_order) are a future task.
+Each function accepts either a full Kraken response envelope or a
+``"result"`` mapping and returns immutable domain types. Both read-side
+and mutation response parsing live here.
 """
 
 from __future__ import annotations
@@ -13,14 +13,22 @@ from collections.abc import Mapping
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 
-from core.errors import ExchangeError
+from core.errors import (
+    ExchangeError,
+    InsufficientFundsError,
+    KrakenAPIError,
+    OrderRejectedError,
+    RateLimitExceededError,
+)
 from core.types import Balance, ZERO_DECIMAL
 from exchange.models import KrakenOrder, KrakenTrade
 from exchange.symbols import normalize_asset_symbol, normalize_pair
 
 __all__ = [
     "KrakenResponseError",
+    "parse_add_order_response",
     "parse_balances",
+    "parse_cancel_order_response",
     "parse_open_orders",
     "parse_trade_history",
 ]
@@ -63,6 +71,37 @@ def _safe_timestamp(value: object) -> datetime | None:
     return datetime.fromtimestamp(ts, tz=timezone.utc)
 
 
+def _classify_kraken_errors(errors: list[str]) -> KrakenAPIError:
+    """Map Kraken API error strings to the project's typed exception hierarchy."""
+    for err in errors:
+        if err.startswith("EAPI:Rate limit"):
+            return RateLimitExceededError(err)
+        if err == "EOrder:Insufficient funds":
+            return InsufficientFundsError(err)
+        if err.startswith("EOrder:"):
+            return OrderRejectedError(err)
+    return KrakenAPIError("; ".join(errors))
+
+
+def _unwrap_result(response: Mapping[str, object]) -> Mapping[str, object]:
+    """Accept either a full Kraken response envelope or a bare result mapping."""
+    if "error" not in response and "result" not in response:
+        return response
+
+    raw_errors = response.get("error", [])
+    if raw_errors:
+        if not isinstance(raw_errors, (list, tuple)) or any(
+            not isinstance(err, str) for err in raw_errors
+        ):
+            raise KrakenResponseError("Invalid 'error' list in Kraken response")
+        raise _classify_kraken_errors(list(raw_errors))
+
+    raw_result = response.get("result")
+    if not isinstance(raw_result, Mapping):
+        raise KrakenResponseError("Missing or invalid 'result' mapping")
+    return raw_result
+
+
 # ---------------------------------------------------------------------------
 # Public parsers
 # ---------------------------------------------------------------------------
@@ -97,6 +136,42 @@ def parse_balances(result: Mapping[str, object]) -> tuple[Balance, ...]:
     ]
     balances.sort(key=lambda b: b.asset)
     return tuple(balances)
+
+
+def parse_add_order_response(response: Mapping[str, object]) -> tuple[str, ...]:
+    """Parse Kraken ``AddOrder`` output and return immutable txids."""
+    result = _unwrap_result(response)
+    raw_txids = result.get("txid")
+    if not isinstance(raw_txids, (list, tuple)) or not raw_txids:
+        raise KrakenResponseError("AddOrder result missing non-empty 'txid' list")
+
+    txids = tuple(raw_txids)
+    if any(not isinstance(txid, str) or not txid for txid in txids):
+        raise KrakenResponseError("AddOrder result contains invalid txid values")
+    return txids
+
+
+def parse_cancel_order_response(response: Mapping[str, object]) -> int:
+    """Parse Kraken ``CancelOrder`` output and return the cancel count."""
+    result = _unwrap_result(response)
+    raw_count = result.get("count")
+    if isinstance(raw_count, bool):
+        raise KrakenResponseError("CancelOrder result contains invalid 'count' value")
+
+    if isinstance(raw_count, int):
+        count = raw_count
+    elif isinstance(raw_count, str):
+        stripped = raw_count.strip()
+        digits = stripped[1:] if stripped.startswith(("+", "-")) else stripped
+        if not digits.isdigit():
+            raise KrakenResponseError("CancelOrder result missing integer 'count'")
+        count = int(stripped)
+    else:
+        raise KrakenResponseError("CancelOrder result missing integer 'count'")
+
+    if count < 0:
+        raise KrakenResponseError("CancelOrder result contains negative 'count'")
+    return count
 
 
 def parse_open_orders(result: Mapping[str, object]) -> tuple[KrakenOrder, ...]:

@@ -33,6 +33,10 @@ class ExchangeError(KrakenBotError):
     """Base exception for exchange integration failures."""
 
 
+class SafeModeBlockedError(ExchangeError):
+    """Raised when local configuration blocks exchange mutations."""
+
+
 class KrakenAPIError(ExchangeError):
     """Raised when Kraken returns an API-level error."""
 
@@ -64,4 +68,5 @@ __all__ = [
     "MissingEnvironmentVariableError",
     "OrderRejectedError",
     "RateLimitExceededError",
+    "SafeModeBlockedError",
 ]
