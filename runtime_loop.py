@@ -174,6 +174,8 @@ class SchedulerRuntime:
         self._subscribed_pairs: set[str] = set()
         self._execution_feed_ready = False
         self._last_runtime_error: str | None = None
+        self._last_belief_poll_at: datetime | None = None
+        self._belief_poll_interval_sec = settings.belief_stale_hours * 3600 // 2  # poll at half staleness
         factory = websocket_factory or _default_websocket_factory
         self._websocket = factory(self._handle_price_tick, self._handle_fill_confirmed)
         self.app = build_runtime_app(state_provider=self._dashboard_store.snapshot)
@@ -234,6 +236,7 @@ class SchedulerRuntime:
 
         await self._ensure_websocket_connected()
         await self._ensure_subscriptions()
+        await self._maybe_poll_beliefs(now)
         await self._handle_effects(effects)
         self._write_heartbeat()
         return effects
@@ -363,6 +366,33 @@ class SchedulerRuntime:
             if p.position_id == position_id:
                 return p
         return None
+
+    async def _maybe_poll_beliefs(self, now: datetime) -> None:
+        """Periodically generate beliefs for allowed pairs (cold-start + refresh)."""
+        if self._belief_refresh_handler is None:
+            return
+        if (
+            self._last_belief_poll_at is not None
+            and (now - self._last_belief_poll_at).total_seconds() < self._belief_poll_interval_sec
+        ):
+            return
+
+        self._last_belief_poll_at = now
+        allowed_pairs = self._settings.allowed_pairs
+        if not allowed_pairs:
+            return
+
+        for pair in sorted(allowed_pairs):
+            dummy_request = BeliefRefreshRequest(
+                pair=pair,
+                position_id="",
+                checked_at=now,
+                stale_after_hours=self._settings.belief_stale_hours,
+            )
+            result = self._belief_refresh_handler(dummy_request)
+            belief = await result if inspect.isawaitable(result) else result
+            if belief is not None:
+                await self.enqueue_belief(belief, observed_at=now)
 
     async def _maybe_refresh_belief(self, request: BeliefRefreshRequest) -> None:
         if self._belief_refresh_handler is None:

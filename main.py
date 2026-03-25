@@ -34,6 +34,7 @@ from persistence.sqlite import (
     ensure_schema,
     open_database,
 )
+from beliefs.autoresearch_handler import autoresearch_belief_handler
 from runtime_loop import SchedulerRuntime, build_initial_scheduler_state
 from trading.reconciler import ReconciliationReport, RecordedState, reconcile
 
@@ -232,6 +233,7 @@ def _run_main_loop(
             report=report,
             now=datetime.now(timezone.utc),
         ),
+        belief_refresh_handler=autoresearch_belief_handler,
     )
     try:
         asyncio.run(runtime.run_forever())
