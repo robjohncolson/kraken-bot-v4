@@ -35,7 +35,19 @@ CREATE TABLE IF NOT EXISTS orders (
     created_at        TEXT NOT NULL DEFAULT (datetime('now'))
 )"""
 
-SCHEMA_STATEMENTS = (POSITIONS_DDL, ORDERS_DDL)
+LEDGER_DDL = """\
+CREATE TABLE IF NOT EXISTS ledger (
+    id         INTEGER PRIMARY KEY,
+    pair       TEXT,
+    side       TEXT,
+    quantity   TEXT,
+    price      TEXT,
+    fee        TEXT,
+    filled_at  TEXT,
+    created_at TEXT DEFAULT current_timestamp
+)"""
+
+SCHEMA_STATEMENTS = (POSITIONS_DDL, ORDERS_DDL, LEDGER_DDL)
 
 
 class SqlitePersistenceError(KrakenBotError):
@@ -85,12 +97,12 @@ def open_database(path: Path) -> sqlite3.Connection:
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
-    """Create positions and orders tables if they don't exist."""
+    """Create positions, orders, and ledger tables if they don't exist."""
     try:
         for ddl in SCHEMA_STATEMENTS:
             conn.execute(ddl)
         conn.commit()
-        logger.info("SQLite schema verified (positions, orders)")
+        logger.info("SQLite schema verified (positions, orders, ledger)")
     except sqlite3.Error as exc:
         raise SqliteSchemaError(f"Schema bootstrap failed: {exc}") from exc
 
@@ -169,6 +181,57 @@ class SqliteWriter:
             self._conn.commit()
         except sqlite3.Error as exc:
             raise SqliteWriteError(f"Failed to insert position {position_id!r}: {exc}") from exc
+
+    def insert_order(
+        self,
+        order_id: str,
+        pair: str,
+        client_order_id: str,
+        *,
+        position_id: str | None = None,
+        exchange_order_id: str | None = None,
+        recorded_fee: Decimal | None = None,
+    ) -> None:
+        """Insert an order record if it does not already exist."""
+        try:
+            self._conn.execute(
+                "INSERT OR IGNORE INTO orders ("
+                "order_id, pair, position_id, exchange_order_id, client_order_id, recorded_fee"
+                ") VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    order_id,
+                    pair,
+                    position_id,
+                    exchange_order_id,
+                    client_order_id,
+                    str(recorded_fee) if recorded_fee is not None else None,
+                ),
+            )
+            self._conn.commit()
+        except sqlite3.Error as exc:
+            self._conn.rollback()
+            raise SqliteWriteError(f"Failed to insert order {order_id!r}: {exc}") from exc
+
+    def insert_ledger_entry(
+        self,
+        pair: str,
+        side: str,
+        quantity: Decimal | str,
+        price: Decimal | str,
+        fee: Decimal | str,
+        filled_at: str,
+    ) -> None:
+        """Append a fill record to the ledger."""
+        try:
+            self._conn.execute(
+                "INSERT INTO ledger (pair, side, quantity, price, fee, filled_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (pair, side, str(quantity), str(price), str(fee), filled_at),
+            )
+            self._conn.commit()
+        except sqlite3.Error as exc:
+            self._conn.rollback()
+            raise SqliteWriteError(f"Failed to insert ledger entry for {pair!r}: {exc}") from exc
 
     def update_position_closed(self, position_id: str) -> None:
         """Mark an existing position closed with the current UTC timestamp."""
