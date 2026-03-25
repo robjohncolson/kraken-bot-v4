@@ -1,7 +1,7 @@
 """SQLite persistence adapter for local-first bot coordination.
 
-Provides the minimum viable read interface for startup reconciliation:
-positions and orders tables. Write support deferred to Task 3B.
+Provides schema bootstrap plus the minimal read/write interface for
+positions and orders used by startup reconciliation.
 """
 
 from __future__ import annotations
@@ -52,6 +52,18 @@ class SqliteSchemaError(SqlitePersistenceError):
 
 class SqliteReadError(SqlitePersistenceError):
     """Raised when a read query fails."""
+
+
+class SqliteWriteError(SqlitePersistenceError):
+    """Raised when a write query fails."""
+
+
+class SqlitePositionNotFoundError(SqliteWriteError):
+    """Raised when a requested position does not exist."""
+
+    def __init__(self, position_id: str) -> None:
+        self.position_id = position_id
+        super().__init__(f"Position {position_id!r} does not exist.")
 
 
 def open_database(path: Path) -> sqlite3.Connection:
@@ -141,12 +153,53 @@ class SqliteReader:
         return RecordedState(positions=positions, orders=orders)
 
 
+class SqliteWriter:
+    """Write adapter for idempotent position mutations."""
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self._conn = conn
+
+    def insert_position(self, position_id: str, pair: str) -> None:
+        """Insert a position record if it does not already exist."""
+        try:
+            self._conn.execute(
+                "INSERT OR IGNORE INTO positions (position_id, pair) VALUES (?, ?)",
+                (position_id, pair),
+            )
+            self._conn.commit()
+        except sqlite3.Error as exc:
+            raise SqliteWriteError(f"Failed to insert position {position_id!r}: {exc}") from exc
+
+    def update_position_closed(self, position_id: str) -> None:
+        """Mark an existing position closed with the current UTC timestamp."""
+        try:
+            cursor = self._conn.execute(
+                "UPDATE positions "
+                "SET closed_at = COALESCE(closed_at, datetime('now')) "
+                "WHERE position_id = ?",
+                (position_id,),
+            )
+        except sqlite3.Error as exc:
+            raise SqliteWriteError(
+                f"Failed to update closed_at for position {position_id!r}: {exc}"
+            ) from exc
+
+        if cursor.rowcount == 0:
+            self._conn.rollback()
+            raise SqlitePositionNotFoundError(position_id)
+
+        self._conn.commit()
+
+
 __all__ = [
     "SqliteOpenError",
     "SqlitePersistenceError",
+    "SqlitePositionNotFoundError",
     "SqliteReadError",
     "SqliteReader",
     "SqliteSchemaError",
+    "SqliteWriteError",
+    "SqliteWriter",
     "ensure_schema",
     "open_database",
 ]
