@@ -6,6 +6,8 @@ import asyncio
 import contextlib
 import json
 from collections.abc import Awaitable, Callable, Iterable
+from dataclasses import dataclass
+from decimal import Decimal
 from enum import Enum
 from typing import Protocol
 
@@ -35,6 +37,8 @@ Connector = Callable[[str], Awaitable[SupportsWebSocket]]
 Sleeper = Callable[[float], Awaitable[None]]
 PriceTickHandler = Callable[[PriceTick], Awaitable[None]]
 FillConfirmedHandler = Callable[[FillConfirmed], Awaitable[None]]
+TickerPoller = Callable[[tuple[str, ...]], Awaitable[Iterable[PriceTick]]]
+OpenOrdersPoller = Callable[[], Awaitable[Iterable["PolledOrderSnapshot"]]]
 
 
 class ConnectionState(str, Enum):
@@ -58,6 +62,17 @@ class KrakenWebSocketSubscriptionError(KrakenWebSocketError):
     def __init__(self, detail: str) -> None:
         self.detail = detail
         super().__init__(detail)
+
+
+@dataclass(frozen=True, slots=True)
+class PolledOrderSnapshot:
+    order_id: str
+    pair: str
+    side: str
+    quantity: Decimal
+    price: Decimal
+    fee: Decimal = Decimal("0")
+    client_order_id: str | None = None
 
 
 class ReconnectPolicy:
@@ -110,6 +125,102 @@ def _normalize_pairs(pairs: Iterable[str]) -> tuple[str, ...]:
     return tuple(seen)
 
 
+class FallbackPoller:
+    """Poll REST snapshots while the WebSocket feed is unavailable."""
+
+    def __init__(
+        self,
+        *,
+        ticker_fetcher: TickerPoller | None,
+        open_orders_fetcher: OpenOrdersPoller | None,
+        ticker_pairs: Callable[[], tuple[str, ...]],
+        emit_price_tick: PriceTickHandler,
+        emit_fill: FillConfirmedHandler,
+        sleep: Sleeper = asyncio.sleep,
+        utc_now: UtcNow = _default_utc_now,
+        price_poll_interval_sec: float = 15.0,
+        order_poll_interval_sec: float = 30.0,
+    ) -> None:
+        self._ticker_fetcher = ticker_fetcher
+        self._open_orders_fetcher = open_orders_fetcher
+        self._ticker_pairs = ticker_pairs
+        self._emit_price_tick = emit_price_tick
+        self._emit_fill = emit_fill
+        self._sleep = sleep
+        self._utc_now = utc_now
+        self._price_poll_interval_sec = price_poll_interval_sec
+        self._order_poll_interval_sec = order_poll_interval_sec
+        self._tasks: tuple[asyncio.Task[None], ...] = ()
+        self._known_orders: dict[str, PolledOrderSnapshot] = {}
+
+    @property
+    def active(self) -> bool:
+        return any(not task.done() for task in self._tasks)
+
+    @property
+    def price_poll_interval_sec(self) -> float:
+        return self._price_poll_interval_sec
+
+    @property
+    def order_poll_interval_sec(self) -> float:
+        return self._order_poll_interval_sec
+
+    def activate(self) -> None:
+        if self.active:
+            return
+        tasks: list[asyncio.Task[None]] = []
+        if self._ticker_fetcher is not None:
+            tasks.append(asyncio.create_task(self._run_ticker_loop(), name="kraken-rest-fallback-ticker"))
+        if self._open_orders_fetcher is not None:
+            tasks.append(asyncio.create_task(self._run_order_loop(), name="kraken-rest-fallback-orders"))
+        self._tasks = tuple(tasks)
+
+    async def deactivate(self) -> None:
+        tasks = self._tasks
+        self._tasks = ()
+        self._known_orders = {}
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+    async def _run_ticker_loop(self) -> None:
+        assert self._ticker_fetcher is not None
+        while True:
+            pairs = self._ticker_pairs()
+            if pairs:
+                for tick in tuple(await self._ticker_fetcher(pairs)):
+                    await self._emit_price_tick(tick)
+            await self._sleep(self._price_poll_interval_sec)
+
+    async def _run_order_loop(self) -> None:
+        assert self._open_orders_fetcher is not None
+        while True:
+            current_orders = {
+                snapshot.order_id: snapshot
+                for snapshot in tuple(await self._open_orders_fetcher())
+            }
+            for order_id, snapshot in tuple(self._known_orders.items()):
+                if order_id not in current_orders:
+                    # While the private feed is unavailable, a missing open order
+                    # is the only terminal signal available to downstream consumers.
+                    await self._emit_fill(
+                        FillConfirmed(
+                            order_id=snapshot.order_id,
+                            client_order_id=snapshot.client_order_id,
+                            pair=snapshot.pair,
+                            side=snapshot.side,
+                            quantity=snapshot.quantity,
+                            price=snapshot.price,
+                            fee=snapshot.fee,
+                            timestamp=self._utc_now(),
+                        )
+                    )
+            self._known_orders = current_orders
+            await self._sleep(self._order_poll_interval_sec)
+
+
 class KrakenWebSocketV2:
     """Kraken WebSocket v2 client with auto-reconnect and feed subscriptions."""
 
@@ -122,6 +233,10 @@ class KrakenWebSocketV2:
         reconnect_policy: ReconnectPolicy | None = None,
         ticker_handler: PriceTickHandler | None = None,
         fill_handler: FillConfirmedHandler | None = None,
+        rest_ticker_poller: TickerPoller | None = None,
+        rest_open_orders_poller: OpenOrdersPoller | None = None,
+        price_poll_interval_sec: float = 15.0,
+        order_poll_interval_sec: float = 30.0,
         utc_now: UtcNow = _default_utc_now,
     ) -> None:
         self._url = url
@@ -141,6 +256,18 @@ class KrakenWebSocketV2:
         self._price_ticks: asyncio.Queue[PriceTick] = asyncio.Queue()
         self._fills: asyncio.Queue[FillConfirmed] = asyncio.Queue()
         self._ticker_pairs: tuple[str, ...] = ()
+        self._execution_token: str | None = None
+        self._fallback_poller = FallbackPoller(
+            ticker_fetcher=rest_ticker_poller,
+            open_orders_fetcher=rest_open_orders_poller,
+            ticker_pairs=lambda: self._ticker_pairs,
+            emit_price_tick=self._emit_price_tick,
+            emit_fill=self._emit_fill_confirmed,
+            sleep=self._sleep,
+            utc_now=self._utc_now,
+            price_poll_interval_sec=price_poll_interval_sec,
+            order_poll_interval_sec=order_poll_interval_sec,
+        )
 
     @property
     def state(self) -> ConnectionState:
@@ -153,6 +280,10 @@ class KrakenWebSocketV2:
     @property
     def fills(self) -> asyncio.Queue[FillConfirmed]:
         return self._fills
+
+    @property
+    def fallback_poller(self) -> FallbackPoller:
+        return self._fallback_poller
 
     async def get_price_tick(self) -> PriceTick:
         return await self._price_ticks.get()
@@ -168,7 +299,7 @@ class KrakenWebSocketV2:
             await self._open_connection(ConnectionState.CONNECTING)
         except KrakenWebSocketConnectError:
             self._should_reconnect = False
-            self._state = ConnectionState.DISCONNECTED
+            await self._set_state(ConnectionState.DISCONNECTED)
             raise
         self._reader_task = asyncio.create_task(self._run(), name="kraken-websocket-v2")
 
@@ -184,7 +315,7 @@ class KrakenWebSocketV2:
         self._websocket = None
         if websocket is not None:
             await websocket.close()
-        self._state = ConnectionState.DISCONNECTED
+        await self._set_state(ConnectionState.DISCONNECTED)
 
     async def subscribe_ticker(self, pairs: Iterable[str]) -> None:
         normalized = _normalize_pairs(pairs)
@@ -202,9 +333,13 @@ class KrakenWebSocketV2:
     async def subscribe_executions(self, token: str) -> None:
         if self._websocket is None:
             raise KrakenWebSocketSubscriptionError("Cannot subscribe to executions while disconnected.")
-        if not token.strip():
+        normalized_token = token.strip()
+        if not normalized_token:
             raise KrakenWebSocketSubscriptionError("Execution subscription requires a WebSocket token.")
-        await self._send_json({"method": "subscribe", "params": {"channel": "executions", "token": token}})
+        self._execution_token = normalized_token
+        await self._send_json(
+            {"method": "subscribe", "params": {"channel": "executions", "token": normalized_token}}
+        )
 
     # --- internal ---
 
@@ -212,7 +347,7 @@ class KrakenWebSocketV2:
         while self._should_reconnect:
             ws = self._websocket
             if ws is None:
-                self._state = ConnectionState.DISCONNECTED
+                await self._set_state(ConnectionState.DISCONNECTED)
                 return
             try:
                 raw = await ws.recv()
@@ -221,24 +356,24 @@ class KrakenWebSocketV2:
                 return
             except self._disconnect_errors:
                 self._websocket = None
+                await self._set_state(ConnectionState.DISCONNECTED)
                 if not self._should_reconnect:
-                    self._state = ConnectionState.DISCONNECTED
                     return
                 await self._reconnect()
 
     async def _reconnect(self) -> None:
         while self._should_reconnect:
-            self._state = ConnectionState.RECONNECTING
+            await self._set_state(ConnectionState.RECONNECTING)
             await self._sleep(self._next_delay())
             try:
                 await self._open_connection(ConnectionState.RECONNECTING)
             except KrakenWebSocketConnectError:
                 continue
             return
-        self._state = ConnectionState.DISCONNECTED
+        await self._set_state(ConnectionState.DISCONNECTED)
 
     async def _open_connection(self, state: ConnectionState) -> None:
-        self._state = state
+        await self._set_state(state)
         try:
             ws = await self._connector(self._url)
         except KrakenWebSocketConnectError:
@@ -247,7 +382,8 @@ class KrakenWebSocketV2:
             raise KrakenWebSocketConnectError(self._url) from exc
         self._websocket = ws
         self._reconnect_attempt = 0
-        self._state = ConnectionState.CONNECTED
+        await self._restore_subscriptions()
+        await self._set_state(ConnectionState.CONNECTED)
 
     def _next_delay(self) -> float:
         delay = min(
@@ -265,13 +401,39 @@ class KrakenWebSocketV2:
             await self._send_json(build_pong_message(payload))
             return
         for tick in parse_ticker_payload(payload, utc_now=self._utc_now):
-            await self._price_ticks.put(tick)
-            if self._ticker_handler is not None:
-                await self._ticker_handler(tick)
+            await self._emit_price_tick(tick)
         for fill in parse_execution_payload(payload, utc_now=self._utc_now):
-            await self._fills.put(fill)
-            if self._fill_handler is not None:
-                await self._fill_handler(fill)
+            await self._emit_fill_confirmed(fill)
+
+    async def _emit_price_tick(self, tick: PriceTick) -> None:
+        await self._price_ticks.put(tick)
+        if self._ticker_handler is not None:
+            await self._ticker_handler(tick)
+
+    async def _emit_fill_confirmed(self, fill: FillConfirmed) -> None:
+        await self._fills.put(fill)
+        if self._fill_handler is not None:
+            await self._fill_handler(fill)
+
+    async def _restore_subscriptions(self) -> None:
+        if self._ticker_pairs:
+            await self._send_json(
+                {"method": "subscribe", "params": {"channel": "ticker", "symbol": list(self._ticker_pairs)}}
+            )
+        if self._execution_token is not None:
+            await self._send_json(
+                {"method": "subscribe", "params": {"channel": "executions", "token": self._execution_token}}
+            )
+
+    async def _set_state(self, state: ConnectionState) -> None:
+        self._state = state
+        if state is ConnectionState.CONNECTED:
+            await self._fallback_poller.deactivate()
+            return
+        if self._should_reconnect and state in (ConnectionState.DISCONNECTED, ConnectionState.RECONNECTING):
+            self._fallback_poller.activate()
+            return
+        await self._fallback_poller.deactivate()
 
     async def _send_json(self, payload: dict[str, object]) -> None:
         ws = self._websocket
@@ -282,12 +444,14 @@ class KrakenWebSocketV2:
 
 __all__ = [
     "ConnectionState",
+    "FallbackPoller",
     "FillConfirmed",
     "KRAKEN_WEBSOCKET_V2_URL",
     "KrakenWebSocketConnectError",
     "KrakenWebSocketError",
     "KrakenWebSocketSubscriptionError",
     "KrakenWebSocketV2",
+    "PolledOrderSnapshot",
     "PriceTick",
     "ReconnectPolicy",
 ]

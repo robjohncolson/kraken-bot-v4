@@ -82,6 +82,14 @@ class CancelRejectedError(ExchangeError):
         super().__init__(f"CancelOrder did not cancel {order_id!r}; count={cancel_count}.")
 
 
+class WebSocketTokenError(ExchangeError):
+    """Raised when Kraken does not return a usable WebSocket token."""
+
+    def __init__(self, detail: str) -> None:
+        self.detail = detail
+        super().__init__(detail)
+
+
 class KrakenExecutor:
     """Fetch exchange state and execute authenticated Kraken REST mutations."""
 
@@ -118,6 +126,19 @@ class KrakenExecutor:
         prepared = self._client.get_trade_history()
         result = self._execute(prepared)
         return parse_trade_history(result)
+
+    def get_ws_token(self) -> str:
+        self._client.rate_limiter.consume_rest()
+        result = self._execute(
+            PreparedKrakenRequest(
+                endpoint="/0/private/GetWebSocketsToken",
+                payload={},
+            )
+        )
+        token = result.get("token")
+        if isinstance(token, str) and token:
+            return token
+        raise WebSocketTokenError("Kraken GetWebSocketsToken response missing token.")
 
     def execute_order(self, order: OrderRequest) -> str:
         self._ensure_mutations_enabled()
@@ -329,4 +350,5 @@ __all__ = [
     "AmbiguousOrderResultError",
     "KrakenExecutor",
     "OrderVerificationError",
+    "WebSocketTokenError",
 ]
