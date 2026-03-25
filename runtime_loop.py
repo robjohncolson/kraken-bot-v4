@@ -14,8 +14,22 @@ from typing import Protocol
 from fastapi.encoders import jsonable_encoder
 
 from core.config import Settings
-from core.errors import ExchangeError, KrakenBotError
-from core.types import BeliefSnapshot, BeliefSource, BotState, Position, PositionSide
+from core.errors import ExchangeError, KrakenBotError, SafeModeBlockedError
+from core.types import (
+    BeliefSnapshot,
+    BeliefSource,
+    BotState,
+    CancelOrder,
+    ClosePosition,
+    FillConfirmed as CoreFillConfirmed,
+    LogEvent,
+    OrderRequest,
+    OrderSide,
+    OrderType,
+    PlaceOrder,
+    Position,
+    PositionSide,
+)
 from exchange.executor import KrakenExecutor
 from exchange.websocket import ConnectionState, FillConfirmed, KrakenWebSocketV2, PriceTick
 from guardian import PriceSnapshot
@@ -265,9 +279,31 @@ class SchedulerRuntime:
                 recorded_state=self._reader.fetch_recorded_state(),
                 last_reconcile_at=None,
             )
+        # Enqueue core FillConfirmed for reducer processing on next cycle
+        core_fill = CoreFillConfirmed(
+            order_id=fill.order_id,
+            pair=fill.pair,
+            filled_quantity=fill.quantity,
+            fill_price=fill.price,
+        )
+        async with self._state_lock:
+            pending = self._state.pending_fills + (core_fill,)
+            self._state = replace(self._state, pending_fills=pending)
 
     async def _handle_effects(self, effects: tuple[object, ...]) -> None:
         for effect in effects:
+            if isinstance(effect, PlaceOrder):
+                await self._execute_place_order(effect)
+                continue
+            if isinstance(effect, CancelOrder):
+                await self._execute_cancel_order(effect)
+                continue
+            if isinstance(effect, ClosePosition):
+                await self._execute_close_position(effect)
+                continue
+            if isinstance(effect, LogEvent):
+                logger.info("Reducer: %s", effect.message)
+                continue
             if isinstance(effect, BeliefRefreshRequest):
                 await self._maybe_refresh_belief(effect)
                 continue
@@ -276,6 +312,57 @@ class SchedulerRuntime:
                 continue
             if isinstance(effect, DashboardStateUpdate):
                 await self._publish_dashboard_update()
+
+    async def _execute_place_order(self, effect: PlaceOrder) -> None:
+        try:
+            order_id = self._executor.execute_order(effect.order)
+            logger.info("Placed order %s for %s", order_id, effect.order.pair)
+        except (ExchangeError, SafeModeBlockedError) as exc:
+            logger.error("Failed to place order for %s: %s", effect.order.pair, exc)
+
+    async def _execute_cancel_order(self, effect: CancelOrder) -> None:
+        cancel_target = effect.order_id or effect.client_order_id
+        try:
+            if effect.order_id:
+                self._executor.execute_cancel(effect.order_id)
+            logger.info("Canceled order %s", cancel_target)
+        except (ExchangeError, SafeModeBlockedError) as exc:
+            logger.error("Failed to cancel order %s: %s", cancel_target, exc)
+
+    async def _execute_close_position(self, effect: ClosePosition) -> None:
+        position = self._find_position(effect.position_id)
+        if position is None:
+            logger.warning(
+                "Close position %s (%s): position not found in portfolio",
+                effect.position_id, effect.reason,
+            )
+            return
+        close_side = OrderSide.SELL if position.side == PositionSide.LONG else OrderSide.BUY
+        order = OrderRequest(
+            pair=position.pair,
+            side=close_side,
+            order_type=OrderType.LIMIT,
+            quantity=position.quantity,
+            limit_price=position.entry_price,  # placeholder; market conditions may differ
+        )
+        try:
+            order_id = self._executor.execute_order(order)
+            logger.info(
+                "Close position %s (%s): placed %s order %s for %s qty=%s",
+                effect.position_id, effect.reason, close_side.value,
+                order_id, position.pair, position.quantity,
+            )
+        except (ExchangeError, SafeModeBlockedError) as exc:
+            logger.error(
+                "Close position %s (%s): failed to place closing order: %s",
+                effect.position_id, effect.reason, exc,
+            )
+
+    def _find_position(self, position_id: str) -> Position | None:
+        for p in self._state.bot_state.portfolio.positions:
+            if p.position_id == position_id:
+                return p
+        return None
 
     async def _maybe_refresh_belief(self, request: BeliefRefreshRequest) -> None:
         if self._belief_refresh_handler is None:

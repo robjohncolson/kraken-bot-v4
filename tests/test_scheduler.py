@@ -208,11 +208,12 @@ def test_run_cycle_consumes_pending_belief_signals_and_updates_bot_state() -> No
     assert new_state.pending_belief_signals == ()
     assert new_state.bot_state.beliefs == (fresh_belief,)
     assert new_state.bot_state.last_event is EventType.BELIEF_UPDATE
-    assert actions == (
-        DashboardStateUpdate(
-            bot_state=new_state.bot_state,
-            cycle_count=1,
-            emitted_at=NOW,
-            next_cycle_due_at=NOW + timedelta(seconds=30),
-        ),
+    # Dashboard update is always the last effect; reducer may emit additional actions
+    dashboard_updates = [a for a in actions if isinstance(a, DashboardStateUpdate)]
+    assert len(dashboard_updates) == 1
+    assert dashboard_updates[0] == DashboardStateUpdate(
+        bot_state=new_state.bot_state,
+        cycle_count=1,
+        emitted_at=NOW,
+        next_cycle_due_at=NOW + timedelta(seconds=30),
     )

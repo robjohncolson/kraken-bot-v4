@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
 from typing import TypeAlias
@@ -179,6 +180,11 @@ class BotState:
     open_orders: tuple[OrderSnapshot, ...] = field(default_factory=tuple)
     beliefs: tuple[BeliefSnapshot, ...] = field(default_factory=tuple)
     last_event: EventType | None = None
+    as_of: datetime | None = None
+    next_position_seq: int = 0
+    pending_orders: tuple[tuple[str, str], ...] = field(default_factory=tuple)
+    cooldowns: tuple[tuple[str, str], ...] = field(default_factory=tuple)
+    entry_blocked: bool = False
 
 
 @dataclass(frozen=True, slots=True)

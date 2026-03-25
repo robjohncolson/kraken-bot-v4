@@ -13,6 +13,7 @@ from core.types import (
     BeliefSnapshot,
     BeliefUpdate,
     BotState,
+    FillConfirmed,
     GridCycleComplete,
     ReconciliationResult,
     StopTriggered,
@@ -88,6 +89,7 @@ class SchedulerState:
     kraken_state: KrakenState = field(default_factory=KrakenState)
     recorded_state: RecordedState = field(default_factory=RecordedState)
     pending_belief_signals: tuple[BeliefSnapshot, ...] = ()
+    pending_fills: tuple[FillConfirmed, ...] = ()
     pending_grid_cycles: tuple[GridCycleComplete, ...] = ()
     now: datetime = field(default_factory=datetime.utcnow)
     last_cycle_at: datetime | None = None
@@ -175,6 +177,9 @@ class Scheduler:
             if report.discrepancy_detected:
                 effects.append(ReconciliationDiscrepancy(report=report, summary=summary))
 
+        working_state, fill_actions = self._process_fills(working_state)
+        effects.extend(fill_actions)
+
         working_state, belief_actions = self._process_belief_signals(working_state)
         effects.extend(belief_actions)
 
@@ -215,6 +220,19 @@ class Scheduler:
 
         return working_state, tuple(reducer_actions)
 
+    def _process_fills(
+        self,
+        state: SchedulerState,
+    ) -> tuple[SchedulerState, tuple[Action, ...]]:
+        reducer_actions: list[Action] = []
+        working_state = state
+
+        for fill in working_state.pending_fills:
+            working_state, applied_actions = self._apply_event(working_state, fill)
+            reducer_actions.extend(applied_actions)
+
+        return replace(working_state, pending_fills=()), tuple(reducer_actions)
+
     def _process_belief_signals(
         self,
         state: SchedulerState,
@@ -249,8 +267,9 @@ class Scheduler:
         state: SchedulerState,
         event: object,
     ) -> tuple[SchedulerState, tuple[Action, ...]]:
+        bot_state_with_time = replace(state.bot_state, as_of=state.now)
         reduced_bot_state, reducer_actions = self._reducer(
-            state.bot_state,
+            bot_state_with_time,
             event,
             self._settings,
         )
