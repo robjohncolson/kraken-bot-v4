@@ -69,3 +69,17 @@ def test_cancel_after_five_seconds_avoids_extra_penalty() -> None:
     assert snapshot.pair == "DOGE/USD"
     assert snapshot.used_points == 60
     assert snapshot.remaining_points == 0
+
+
+def test_get_trade_history_consumes_two_rest_points() -> None:
+    clock = ManualClock()
+    client = KrakenClient(
+        api_key="key",
+        api_secret="secret",
+        rate_limiter=KrakenRateLimiter(now=clock.now),
+    )
+
+    request = client.get_trade_history()
+
+    assert request.endpoint == "/0/private/TradesHistory"
+    assert client.rate_limiter.rest_snapshot().used_points == Decimal("2")

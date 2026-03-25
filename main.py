@@ -3,9 +3,9 @@
 Startup sequence (SPEC.md section 8):
   1. Load .env and validate config (fail fast on missing vars)
   2. Health-check Kraken + Supabase connectivity
-  3. Run startup reconciliation (stub until exchange client is wired)
-  4. If STARTUP_RECONCILE_ONLY=true, print report and exit
-  5. Start main scheduler loop (stub until exchange client is wired)
+  3. Fetch Kraken state (balances, open orders, trade history)
+  4. If STARTUP_RECONCILE_ONLY=true, log summary and exit
+  5. Start main scheduler loop (stub until Supabase + scheduler wired)
 """
 
 from __future__ import annotations
@@ -17,7 +17,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from core.config import Settings, load_settings
-from core.errors import ConfigError
+from core.errors import ConfigError, ExchangeError
+from exchange.client import KrakenClient
+from exchange.executor import KrakenExecutor
+from exchange.models import KrakenState
+from exchange.transport import HttpKrakenTransport
 
 logger = logging.getLogger("kraken-bot-v4")
 
@@ -116,15 +120,36 @@ def _startup_healthcheck(settings: Settings) -> bool:
     return ok
 
 
-def _run_reconciliation(settings: Settings) -> None:
-    """Run startup reconciliation. Currently logs placeholder until exchange client is wired."""
-    logger.info("Running startup reconciliation...")
-    # TODO(task-2): Wire real Kraken client and Supabase client here
-    # reconciler needs KrakenState (from exchange) and SupabaseState (from persistence)
-    logger.info(
-        "Reconciliation: STUB — exchange client not yet wired (task 2). "
-        "Skipping real reconciliation."
+def _build_executor(settings: Settings) -> KrakenExecutor:
+    """Construct the read-only Kraken executor from settings."""
+    client = KrakenClient(
+        api_key=settings.kraken_api_key,
+        api_secret=settings.kraken_api_secret,
+        tier=settings.kraken_tier,
     )
+    transport = HttpKrakenTransport()
+    return KrakenExecutor(client=client, transport=transport)
+
+
+def _fetch_kraken_state(executor: KrakenExecutor) -> KrakenState | None:
+    """Fetch live Kraken state. Returns None on failure."""
+    logger.info("Fetching Kraken state (balances, open orders, trade history)...")
+    try:
+        state = executor.fetch_kraken_state()
+    except ExchangeError as exc:
+        logger.error("Failed to fetch Kraken state: %s", exc)
+        return None
+
+    for balance in state.balances:
+        logger.info("  Balance: %s = %s", balance.asset, balance.available)
+    logger.info("  Open orders: %d", len(state.open_orders))
+    for order in state.open_orders:
+        logger.info("    %s %s cl_ord=%s", order.order_id, order.pair, order.client_order_id)
+    logger.info("  Recent trades: %d", len(state.trade_history))
+    logger.info(
+        "Kraken state fetched — real reconciliation requires Supabase (not yet wired)"
+    )
+    return state
 
 
 def _run_main_loop(settings: Settings) -> None:
@@ -170,12 +195,16 @@ def main() -> int:
         logger.error("Startup health check failed — aborting")
         return 1
 
-    # Step 4: Reconcile
-    _run_reconciliation(settings)
+    # Step 4: Fetch Kraken state
+    executor = _build_executor(settings)
+    kraken_state = _fetch_kraken_state(executor)
+    if kraken_state is None:
+        logger.error("Could not fetch Kraken state — aborting")
+        return 1
 
     # Step 5: If reconcile-only mode, stop here
     if settings.startup_reconcile_only:
-        logger.info("STARTUP_RECONCILE_ONLY=true — exiting after reconciliation")
+        logger.info("STARTUP_RECONCILE_ONLY=true — exiting after Kraken state fetch")
         return 0
 
     # Step 6: Main loop

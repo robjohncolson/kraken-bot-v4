@@ -6,6 +6,7 @@ from decimal import Decimal
 from enum import StrEnum
 
 from core.types import Balance, ClientOrderId, OrderId, Pair, PositionId, ZERO_DECIMAL
+from exchange.models import KrakenOrder, KrakenState, KrakenTrade
 
 DEFAULT_CLIENT_ORDER_ID_PREFIX = "kbv4"
 DEFAULT_RECENT_FILL_WINDOW = timedelta(minutes=15)
@@ -32,25 +33,6 @@ class ForeignOrderClassification(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
-class KrakenOrder:
-    order_id: OrderId
-    pair: Pair
-    client_order_id: ClientOrderId | None = None
-    opened_at: datetime | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class KrakenTrade:
-    trade_id: str
-    pair: Pair
-    order_id: OrderId | None = None
-    client_order_id: ClientOrderId | None = None
-    position_id: PositionId | None = None
-    fee: Decimal = ZERO_DECIMAL
-    filled_at: datetime | None = None
-
-
-@dataclass(frozen=True, slots=True)
 class SupabasePosition:
     position_id: PositionId
     pair: Pair
@@ -64,13 +46,6 @@ class SupabaseOrder:
     exchange_order_id: OrderId | None = None
     client_order_id: ClientOrderId | None = None
     recorded_fee: Decimal | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class KrakenState:
-    balances: tuple[Balance, ...] = field(default_factory=tuple)
-    open_orders: tuple[KrakenOrder, ...] = field(default_factory=tuple)
-    trade_history: tuple[KrakenTrade, ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True, slots=True)

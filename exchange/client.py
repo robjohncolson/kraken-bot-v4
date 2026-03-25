@@ -194,6 +194,10 @@ class KrakenClient:
         self._rate_limiter.consume_rest()
         return self._prepare_request("/0/private/OpenOrders", {})
 
+    def get_trade_history(self) -> PreparedKrakenRequest:
+        self._rate_limiter.consume_rest(cost=2)
+        return self._prepare_request("/0/private/TradesHistory", {})
+
     def place_order(
         self,
         pair: str,
