@@ -1,6 +1,6 @@
 # Continuation Prompt — kraken-bot-v4
 
-## Architecture (local-first, decided 2024-03-24)
+## Architecture (local-first, decided 2026-03-24)
 
 - **Spare laptop at home**: single always-on runtime host
 - **Kraken**: truth for live balances/orders/fills
@@ -13,13 +13,16 @@
 
 ## What to do NOW: First controlled run
 
-Tasks 1, 2A, and 3 are done. The bot can start up, fetch live Kraken state, read SQLite recorded state, and run real reconciliation.
+All implementation tasks are complete. The bot has full Kraken integration (read + write), SQLite persistence (read + write), WebSocket feeds with REST fallback, and the complete scaffold from phases 1-6.
 
 ### Completed tasks:
 
-- **Task 1** ✅ `.env.example`, `main.py` entry point, safe mode flags (READ_ONLY_EXCHANGE, DISABLE_ORDER_MUTATIONS, STARTUP_RECONCILE_ONLY — all default true)
-- **Task 2A** ✅ Authenticated read-only Kraken REST (transport with HMAC-SHA512 signing, parsers with `.F`/`.S` suffix stripping, executor, strictly-increasing nonce)
-- **Task 3** ✅ Local-first migration (Supabase types renamed to RecordedPosition/Order/State, SQLite adapter, config flipped, SPEC.md updated)
+- **Task 1** ✅ `.env.example`, `main.py` entry point, safe mode flags
+- **Task 2A** ✅ Authenticated read-only Kraken REST (transport, parsers, executor)
+- **Task 2B** ✅ Kraken mutation execution (execute_order, execute_cancel, SafeModeBlockedError, cl_ord_id retry, circuit breaker)
+- **Task 3** ✅ Local-first migration (SQLite adapter, config flipped)
+- **Task 3B** ✅ SQLite write support (SqliteWriter: positions, orders, ledger; reconciler DB seeding)
+- **WebSocket** ✅ Kraken WS v2 (connection manager, ticker feed, execution feed, FallbackPoller REST fallback)
 
 ### Priority tasks remaining (in order):
 
@@ -29,25 +32,17 @@ Tasks 1, 2A, and 3 are done. The bot can start up, fetch live Kraken state, read
 - Should: fetch Kraken balances/orders/trades, read empty SQLite, reconcile (all Kraken assets flagged as "untracked"), exit cleanly
 - Fix any issues found
 
-**2. Task 2B: Kraken mutation execution**
-- `execute_order()` / `execute_cancel()` on executor
-- `cl_ord_id`-aware retry (no blind retry on mutations)
-- Safe mode enforcement (`SafeModeBlockedError`)
-- Mutation parsers (`parse_add_order`, `parse_cancel_order`)
+**2. Wire WebSocket into scheduler**
+- Connect `KrakenWebSocketV2` to the main scheduler loop
+- Subscribe to ticker for active pairs
+- Subscribe to execution feed with `get_ws_token()`
+- Route PriceTick → belief updates, FillConfirmed → reconciler
 
-**3. Task 3B: SQLite write support**
-- Upsert positions, orders from reconciliation results
-- Ledger writes
-- So startup reconciliation can seed the DB on first run
-
-**4. Wire `exchange/websocket.py` to Kraken WebSocket v2**
-- Price feeds (ticker, ohlc) and private feeds (executions, openOrders)
-- REST polling fallback when WebSocket drops
-
-**5. First controlled run**
+**3. First controlled run**
 - Minimum position sizes, DOGE/USD as first pair
 - Verify: startup reconciliation, heartbeat writing, guardian loop, grid activation
 - Dashboard on localhost via Tailscale
+- Set `STARTUP_RECONCILE_ONLY=false`, `READ_ONLY_EXCHANGE=false`, `DISABLE_ORDER_MUTATIONS=false`
 
 ### Key architectural decisions:
 
@@ -59,21 +54,35 @@ Tasks 1, 2A, and 3 are done. The bot can start up, fetch live Kraken state, read
 - Stats: AP Stats parametric first, normality gate, n>=30, fail closed
 - Safe mode defaults to all-on (must opt in to live trading)
 
-## Session Commits (2024-03-24)
+## Session Commits (2026-03-25) — Phases 7-9 automated build
 
 ```
+60da50b docs: add phase 7-9 build manifests for mutations, SQLite writes, WebSocket
+66d336f build(phase-9/9.4): add FallbackPoller and get_ws_token for REST fallback
+4ebf785 build(phase-9/9.3): extract ws_parsers.py, add execution feed subscription
+850570d build(phase-9/9.2): add public ticker subscription with PriceTick emission
+b3636fd build(phase-9/9.1): KrakenWebSocketV2 connection manager with reconnect
+4912dd0 fix: split semicolon-joined dataclass fields in reconciler.py
+f1b824b build(phase-8/8.3): wire reconciler to seed DB via SqliteWriter
+2c4724c build(phase-8/8.2): add insert_order and insert_ledger_entry to SqliteWriter
+fafad2b build(phase-8/8.1): add SqliteWriter with position insert/update methods
+43b86ad build(phase-7/7.3): implement execute_cancel with circuit breaker
+f8feafe build(phase-7/7.2): implement execute_order with cl_ord_id integration
+b9d6ee8 build(phase-7/7.1): add SafeModeBlockedError and mutation parsers
+```
+
+## Previous Session Commits (2026-03-24)
+
+```
+0a9ab9d docs: update continuation prompt for local-first architecture
 4cfe5b4 docs(task-3): complete SPEC.md local-first migration
-36245d1 docs(task-3): update SPEC.md and dashboard to local-first architecture
 8ac73c6 build(task-3): flip config and startup to local-first SQLite
 143ec50 build(task-3): add SQLite persistence adapter
-5cb2fc4 refactor(task-3): rename Supabase runtime types to storage-agnostic names
-ad7cbab docs: add session continuation prompt from initial build session
 11ba30c build(task-2a): authenticated read-only Kraken REST client
-6e1e8e2 fix(task-1): address review findings
 e58c239 build(task-1): add .env.example, main.py entry point, safe mode flags
 ```
 
-## Previous Session Commits (initial scaffold build)
+## Initial Scaffold Commits
 
 ```
 aa6f466 fix(phase-6): remove unused WatchdogAnalyzer import
@@ -82,16 +91,16 @@ c073986 build(phase-6): complete self-healing skeleton with optional Ollama watc
 c2af597 build(phase-4): complete trading phase
 1938d91 build(phase-3): complete belief formation phase
 bc5e030 build(scaffold): add spec and local build orchestration
-7cbc97a build(auto-review): eliminate manual CC↔Codex relay
 ```
 
 ## Current State
 
-- **Branch**: master, pushed to origin at 4cfe5b4
-- **Tests**: 268 passed, ruff clean
+- **Branch**: master, pushed to origin at 60da50b
+- **Tests**: 317 passed, ruff clean
 - **Architecture**: local-first (SQLite + local dashboard + Tailscale)
 - **Startup path**: config → SQLite → Kraken health → Kraken state → recorded state → reconcile → exit or loop
 - **Safe mode**: all flags default to true
+- **Build phases**: 1-9 complete (1-6 scaffold, 7 mutations, 8 SQLite writes, 9 WebSocket)
 - **Untracked**: chatGPT_analysis.md, claude_analysis.md, grok_analysis.md, doge-bot-env.txt, grid-bot-v2-envs.txt
 
 ## Key Paths
@@ -102,13 +111,16 @@ bc5e030 build(scaffold): add spec and local build orchestration
 | `main.py` | Entry point with full startup sequence |
 | `core/config.py` | Env-driven config (SQLITE_PATH, WEB_HOST, safe mode flags) |
 | `core/types.py` | All frozen dataclasses and enums |
+| `core/errors.py` | Typed error hierarchy (SafeModeBlockedError, exchange errors) |
 | `exchange/transport.py` | HMAC-SHA512 signing, HTTP transport with retry |
-| `exchange/parsers.py` | Kraken JSON → domain types (Balance, KrakenOrder, KrakenTrade) |
-| `exchange/executor.py` | Read-only Kraken executor (fetch_kraken_state) |
+| `exchange/parsers.py` | Kraken JSON → domain types + mutation response parsers |
+| `exchange/executor.py` | Full Kraken executor (read + write: orders, cancels, ws_token) |
+| `exchange/order_gate.py` | cl_ord_id generation, circuit breaker |
+| `exchange/websocket.py` | Kraken WS v2 (connect, ticker, executions, FallbackPoller) |
+| `exchange/ws_parsers.py` | Pure WS message parsing (PriceTick, FillConfirmed) |
 | `exchange/models.py` | KrakenOrder, KrakenTrade, KrakenState |
-| `persistence/sqlite.py` | SQLite adapter (WAL, schema, SqliteReader) |
-| `persistence/supabase.py` | Legacy (unused, retained for reference) |
-| `trading/reconciler.py` | Kraken ↔ recorded state reconciliation |
+| `persistence/sqlite.py` | SQLite adapter (WAL, SqliteReader + SqliteWriter, ledger) |
+| `trading/reconciler.py` | Kraken ↔ recorded state reconciliation + DB seeding |
 | `trading/risk_rules.py` | Position + portfolio risk checks |
 | `guardian.py` | Stop/target monitoring, risk enforcement |
 | `scheduler.py` | Main loop orchestration |
