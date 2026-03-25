@@ -11,8 +11,6 @@ from core.errors import MissingEnvironmentVariableError
 REQUIRED_ENV = {
     "KRAKEN_API_KEY": "kraken-key",
     "KRAKEN_API_SECRET": "kraken-secret",
-    "SUPABASE_URL": "https://example.supabase.co",
-    "SUPABASE_KEY": "supabase-key",
 }
 
 

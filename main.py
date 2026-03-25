@@ -1,11 +1,14 @@
 """kraken-bot-v4 entry point.
 
-Startup sequence (SPEC.md section 8):
+Startup sequence:
   1. Load .env and validate config (fail fast on missing vars)
-  2. Health-check Kraken + Supabase connectivity
-  3. Fetch Kraken state (balances, open orders, trade history)
-  4. If STARTUP_RECONCILE_ONLY=true, log summary and exit
-  5. Start main scheduler loop (stub until Supabase + scheduler wired)
+  2. Ensure local state dir + open SQLite + ensure schema
+  3. Health-check Kraken connectivity
+  4. Fetch Kraken state (balances, open orders, trade history)
+  5. Fetch recorded state from SQLite
+  6. Reconcile Kraken state vs recorded state
+  7. If STARTUP_RECONCILE_ONLY=true, log report and exit
+  8. Start main scheduler loop (stub until scheduler wired)
 """
 
 from __future__ import annotations
@@ -16,12 +19,21 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+import sqlite3
+
 from core.config import Settings, load_settings
 from core.errors import ConfigError, ExchangeError
 from exchange.client import KrakenClient
 from exchange.executor import KrakenExecutor
 from exchange.models import KrakenState
 from exchange.transport import HttpKrakenTransport
+from persistence.sqlite import (
+    SqlitePersistenceError,
+    SqliteReader,
+    ensure_schema,
+    open_database,
+)
+from trading.reconciler import ReconciliationReport, RecordedState, reconcile
 
 logger = logging.getLogger("kraken-bot-v4")
 
@@ -94,23 +106,6 @@ def _startup_healthcheck(settings: Settings) -> bool:
         logger.error("Kraken API health check failed: %s", exc)
         ok = False
 
-    # Supabase connectivity check
-    try:
-        from urllib.request import Request, urlopen
-
-        req = Request(
-            f"{settings.supabase_url.rstrip('/')}/rest/v1/",
-            headers={
-                "apikey": settings.supabase_key,
-                "Authorization": f"Bearer {settings.supabase_key}",
-            },
-        )
-        urlopen(req, timeout=10)  # noqa: S310
-        logger.info("Supabase connection: OK (%s)", settings.supabase_url)
-    except (OSError, ValueError) as exc:
-        logger.error("Supabase health check failed: %s", exc)
-        ok = False
-
     # Telegram (optional)
     if settings.telegram_bot_token and settings.telegram_chat_id:
         logger.info("Telegram alerts: configured")
@@ -146,10 +141,54 @@ def _fetch_kraken_state(executor: KrakenExecutor) -> KrakenState | None:
     for order in state.open_orders:
         logger.info("    %s %s cl_ord=%s", order.order_id, order.pair, order.client_order_id)
     logger.info("  Recent trades: %d", len(state.trade_history))
-    logger.info(
-        "Kraken state fetched — real reconciliation requires Supabase (not yet wired)"
-    )
     return state
+
+
+def _open_sqlite(settings: Settings) -> sqlite3.Connection | None:
+    """Open SQLite database and ensure schema. Returns None on failure."""
+    try:
+        conn = open_database(settings.sqlite_path)
+        ensure_schema(conn)
+        return conn
+    except SqlitePersistenceError as exc:
+        logger.error("SQLite startup failed: %s", exc)
+        return None
+
+
+def _fetch_recorded_state(conn: sqlite3.Connection) -> RecordedState | None:
+    """Fetch recorded state from SQLite. Returns None on failure."""
+    logger.info("Fetching recorded state from SQLite...")
+    try:
+        reader = SqliteReader(conn)
+        state = reader.fetch_recorded_state()
+    except SqlitePersistenceError as exc:
+        logger.error("Failed to fetch recorded state: %s", exc)
+        return None
+
+    logger.info("  Open positions: %d", len(state.positions))
+    logger.info("  Orders: %d", len(state.orders))
+    return state
+
+
+def _run_reconciliation(
+    kraken_state: KrakenState, recorded_state: RecordedState
+) -> ReconciliationReport:
+    """Run startup reconciliation and log results."""
+    logger.info("Running startup reconciliation...")
+    report = reconcile(kraken_state, recorded_state)
+    if report.discrepancy_detected:
+        logger.warning("Reconciliation found discrepancies:")
+        if report.ghost_positions:
+            logger.warning("  Ghost positions: %d", len(report.ghost_positions))
+        if report.foreign_orders:
+            logger.warning("  Foreign orders: %d", len(report.foreign_orders))
+        if report.fee_drift:
+            logger.warning("  Fee drift: %d", len(report.fee_drift))
+        if report.untracked_assets:
+            logger.warning("  Untracked assets: %d", len(report.untracked_assets))
+    else:
+        logger.info("Reconciliation: clean — no discrepancies")
+    return report
 
 
 def _run_main_loop(settings: Settings) -> None:
@@ -189,10 +228,15 @@ def main() -> int:
     _print_safe_mode_banner(settings)
     _ensure_local_state_dir(settings)
 
-    # Step 2-3: Health check external services
+    # Step 2: Open SQLite
+    conn = _open_sqlite(settings)
+    if conn is None:
+        return 1
+
+    # Step 3: Health check Kraken
     healthy = _startup_healthcheck(settings)
     if not healthy:
-        logger.error("Startup health check failed — aborting")
+        logger.error("Kraken health check failed — aborting")
         return 1
 
     # Step 4: Fetch Kraken state
@@ -202,13 +246,24 @@ def main() -> int:
         logger.error("Could not fetch Kraken state — aborting")
         return 1
 
-    # Step 5: If reconcile-only mode, stop here
+    # Step 5: Fetch recorded state from SQLite
+    recorded_state = _fetch_recorded_state(conn)
+    if recorded_state is None:
+        logger.error("Could not fetch recorded state — aborting")
+        return 1
+
+    # Step 6: Reconcile
+    _run_reconciliation(kraken_state, recorded_state)
+
+    # Step 7: If reconcile-only mode, stop here
     if settings.startup_reconcile_only:
-        logger.info("STARTUP_RECONCILE_ONLY=true — exiting after Kraken state fetch")
+        logger.info("STARTUP_RECONCILE_ONLY=true — exiting after reconciliation")
+        conn.close()
         return 0
 
-    # Step 6: Main loop
+    # Step 8: Main loop
     _run_main_loop(settings)
+    conn.close()
     return 0
 
 

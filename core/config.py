@@ -25,6 +25,8 @@ DEFAULT_BELIEF_STALE_HOURS = 4
 DEFAULT_BELIEF_CONSENSUS_THRESHOLD = 2
 DEFAULT_REENTRY_COOLDOWN_HOURS = 24
 DEFAULT_LOCAL_STATE_DIR = Path("./data")
+DEFAULT_SQLITE_PATH = Path("./data/bot.db")
+DEFAULT_WEB_HOST = "127.0.0.1"
 DEFAULT_WEB_PORT = 8080
 DEFAULT_CIRCUIT_BREAKER_THRESHOLD = 3
 DEFAULT_CIRCUIT_BREAKER_WINDOW_SEC = 120
@@ -43,8 +45,6 @@ FALSE_VALUES = frozenset({"0", "false", "no", "off"})
 REQUIRED_ENV_VARS = (
     "KRAKEN_API_KEY",
     "KRAKEN_API_SECRET",
-    "SUPABASE_URL",
-    "SUPABASE_KEY",
 )
 
 
@@ -52,9 +52,11 @@ REQUIRED_ENV_VARS = (
 class Settings:
     kraken_api_key: str
     kraken_api_secret: str
-    supabase_url: str
-    supabase_key: str
     kraken_tier: str
+    sqlite_path: Path
+    web_host: str
+    supabase_url: str | None
+    supabase_key: str | None
     max_positions: int
     max_same_side_pct: int
     max_single_pair_pct: int
@@ -92,9 +94,11 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
     return Settings(
         kraken_api_key=_read_required(env, "KRAKEN_API_KEY"),
         kraken_api_secret=_read_required(env, "KRAKEN_API_SECRET"),
-        supabase_url=_read_required(env, "SUPABASE_URL"),
-        supabase_key=_read_required(env, "SUPABASE_KEY"),
         kraken_tier=_read_choice(env, "KRAKEN_TIER", DEFAULT_KRAKEN_TIER, ALLOWED_KRAKEN_TIERS),
+        sqlite_path=_read_path(env, "SQLITE_PATH", DEFAULT_SQLITE_PATH),
+        web_host=_read_optional(env, "WEB_HOST") or DEFAULT_WEB_HOST,
+        supabase_url=_read_optional(env, "SUPABASE_URL"),
+        supabase_key=_read_optional(env, "SUPABASE_KEY"),
         max_positions=_read_int(env, "MAX_POSITIONS", DEFAULT_MAX_POSITIONS),
         max_same_side_pct=_read_int(env, "MAX_SAME_SIDE_PCT", DEFAULT_MAX_SAME_SIDE_PCT),
         max_single_pair_pct=_read_int(env, "MAX_SINGLE_PAIR_PCT", DEFAULT_MAX_SINGLE_PAIR_PCT),
