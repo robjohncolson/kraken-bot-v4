@@ -115,8 +115,20 @@ def build_initial_scheduler_state(
     now: datetime | None = None,
 ) -> SchedulerState:
     effective_now = _utcnow() if now is None else _normalize_timestamp(now)
+    from core.types import Portfolio, ZERO_DECIMAL
+
+    usd = sum(
+        (b.available + b.held for b in kraken_state.balances if b.asset == "USD"),
+        start=ZERO_DECIMAL,
+    )
+    doge = sum(
+        (b.available + b.held for b in kraken_state.balances if b.asset == "DOGE"),
+        start=ZERO_DECIMAL,
+    )
+    portfolio = Portfolio(cash_usd=usd, cash_doge=doge)
+
     return SchedulerState(
-        bot_state=BotState(balances=kraken_state.balances),
+        bot_state=BotState(balances=kraken_state.balances, portfolio=portfolio),
         kraken_state=kraken_state,
         recorded_state=recorded_state,
         now=effective_now,
@@ -288,6 +300,7 @@ class SchedulerRuntime:
             pair=fill.pair,
             filled_quantity=fill.quantity,
             fill_price=fill.price,
+            client_order_id=fill.client_order_id,
         )
         async with self._state_lock:
             pending = self._state.pending_fills + (core_fill,)

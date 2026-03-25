@@ -182,7 +182,8 @@ class BotState:
     last_event: EventType | None = None
     as_of: datetime | None = None
     next_position_seq: int = 0
-    pending_orders: tuple[tuple[str, str], ...] = field(default_factory=tuple)
+    pending_orders: tuple[PendingOrder, ...] = field(default_factory=tuple)
+    reference_prices: tuple[tuple[str, Decimal], ...] = field(default_factory=tuple)
     cooldowns: tuple[tuple[str, str], ...] = field(default_factory=tuple)
     entry_blocked: bool = False
 
@@ -200,7 +201,22 @@ class FillConfirmed:
     pair: Pair
     filled_quantity: Quantity
     fill_price: Price
+    client_order_id: ClientOrderId | None = None
     kind: EventType = field(default=EventType.FILL_CONFIRMED, init=False)
+
+
+@dataclass(frozen=True, slots=True)
+class PendingOrder:
+    """Tracks an in-flight order for reservation accounting."""
+
+    client_order_id: ClientOrderId
+    kind: str  # "position_entry" | "inventory_sell"
+    pair: Pair
+    side: OrderSide
+    base_qty: Quantity  # base-asset quantity (e.g. DOGE for DOGE/USD)
+    quote_qty: UsdAmount  # quote-asset committed (USD for buys, ZERO for sells)
+    filled_qty: Quantity = ZERO_DECIMAL  # base-asset filled so far
+    position_id: PositionId | None = None  # set for position entries
 
 
 @dataclass(frozen=True, slots=True)
@@ -354,6 +370,7 @@ __all__ = [
     "OrderType",
     "Pair",
     "PairAllocation",
+    "PendingOrder",
     "PlaceOrder",
     "Portfolio",
     "Position",

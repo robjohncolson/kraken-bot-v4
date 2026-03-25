@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
+from decimal import Decimal as _Decimal
 from typing import TypeAlias
 
 from core.config import Settings
@@ -19,7 +20,8 @@ from core.types import (
     StopTriggered,
     TargetHit,
 )
-from guardian import CurrentPrices, Guardian, GuardianAction, GuardianActionType
+from guardian import CurrentPrices, Guardian, GuardianAction, GuardianActionType, PriceSnapshot
+from trading.portfolio import mark_to_market
 from trading.reconciler import KrakenState, ReconciliationReport, RecordedState, reconcile
 
 Reducer: TypeAlias = Callable[[BotState, object, Settings], tuple[BotState, tuple[Action, ...]]]
@@ -167,7 +169,7 @@ class Scheduler:
             working_state, reducer_actions = self._apply_event(
                 working_state,
                 ReconciliationResult(
-                    balances=working_state.bot_state.balances,
+                    balances=working_state.kraken_state.balances,
                     open_orders=working_state.bot_state.open_orders,
                     discrepancy_detected=report.discrepancy_detected,
                     summary=summary,
@@ -267,13 +269,21 @@ class Scheduler:
         state: SchedulerState,
         event: object,
     ) -> tuple[SchedulerState, tuple[Action, ...]]:
-        bot_state_with_time = replace(state.bot_state, as_of=state.now)
+        prices = _extract_reference_prices(state.current_prices)
+        bot_state_with_time = replace(
+            state.bot_state, as_of=state.now, reference_prices=prices,
+        )
         reduced_bot_state, reducer_actions = self._reducer(
             bot_state_with_time,
             event,
             self._settings,
         )
         merged_bot_state = _merge_event_state(reduced_bot_state, event)
+        doge_price = _extract_doge_price(state.current_prices)
+        merged_bot_state = replace(
+            merged_bot_state,
+            portfolio=mark_to_market(merged_bot_state.portfolio, doge_price_usd=doge_price),
+        )
         return replace(state, bot_state=merged_bot_state), reducer_actions
 
 
@@ -340,6 +350,25 @@ def _upsert_belief(
     updated = [belief for belief in beliefs if belief.pair != new_belief.pair]
     updated.append(new_belief)
     return tuple(sorted(updated, key=lambda belief: belief.pair))
+
+
+def _extract_reference_prices(
+    current_prices: CurrentPrices,
+) -> tuple[tuple[str, _Decimal], ...]:
+    result: list[tuple[str, _Decimal]] = []
+    for pair, snap in current_prices.items():
+        price = snap.price if isinstance(snap, PriceSnapshot) else snap
+        if isinstance(price, _Decimal):
+            result.append((pair, price))
+    return tuple(result)
+
+
+def _extract_doge_price(current_prices: CurrentPrices) -> _Decimal:
+    for pair, snap in current_prices.items():
+        if pair == "DOGE/USD":
+            price = snap.price if isinstance(snap, PriceSnapshot) else snap
+            return price if isinstance(price, _Decimal) else _Decimal(0)
+    return _Decimal(0)
 
 
 def _reconciliation_summary(report: ReconciliationReport) -> str:

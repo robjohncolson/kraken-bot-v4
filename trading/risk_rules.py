@@ -235,10 +235,7 @@ def _position_notional_usd(position: Position) -> Decimal:
 
 
 def _portfolio_total_value_usd(portfolio: Portfolio) -> Decimal:
-    return portfolio.cash_usd + sum(
-        (_signed_notional_usd(position) for position in portfolio.positions),
-        start=ZERO_DECIMAL,
-    )
+    return portfolio.total_value_usd
 
 
 def _signed_notional_usd(position: Position) -> Decimal:
@@ -263,6 +260,9 @@ def _same_side_concentrations(
         else:
             short_total += _position_notional_usd(position)
 
+    # DOGE inventory is managed long exposure
+    long_total += _doge_inventory_value_usd(portfolio, total_value_usd)
+
     return (
         (PositionSide.LONG, long_total / total_value_usd),
         (PositionSide.SHORT, short_total / total_value_usd),
@@ -282,10 +282,25 @@ def _pair_allocations(
             _position_notional_usd(position)
         )
 
+    # DOGE inventory is managed DOGE/USD exposure
+    doge_value = _doge_inventory_value_usd(portfolio, total_value_usd)
+    if doge_value > ZERO_DECIMAL:
+        pair_totals["DOGE/USD"] = pair_totals.get("DOGE/USD", ZERO_DECIMAL) + doge_value
+
     return tuple(
         (pair, notional_usd / total_value_usd)
         for pair, notional_usd in sorted(pair_totals.items())
     )
+
+
+def _doge_inventory_value_usd(portfolio: Portfolio, total_value_usd: Decimal) -> Decimal:
+    """Derive DOGE inventory value as residual: total - cash_usd - positions."""
+    position_value = sum(
+        (_position_notional_usd(p) for p in portfolio.positions),
+        start=ZERO_DECIMAL,
+    )
+    residual = total_value_usd - portfolio.cash_usd - position_value
+    return max(residual, ZERO_DECIMAL)
 
 
 def _ratio(raw_percent: int) -> Decimal:

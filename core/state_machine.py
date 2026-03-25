@@ -20,6 +20,7 @@ from core.types import (
     OrderRequest,
     OrderSide,
     OrderType,
+    PendingOrder,
     PlaceOrder,
     Portfolio,
     Position,
@@ -71,6 +72,36 @@ def reduce(state: BotState, event: Event, config: Settings) -> ReducerResult:
             return _handle_grid_cycle_complete(state, event, config)
         case _:
             raise UnsupportedEventError(type(event).__name__)
+
+
+# ---------------------------------------------------------------------------
+# Derived reservation helpers
+# ---------------------------------------------------------------------------
+
+
+def _doge_reserved(state: BotState) -> Decimal:
+    """DOGE reserved in pending inventory sell orders."""
+    return sum(
+        (po.base_qty - po.filled_qty for po in state.pending_orders if po.kind == "inventory_sell"),
+        start=ZERO_DECIMAL,
+    )
+
+
+def _usd_reserved(state: BotState) -> Decimal:
+    """USD reserved in pending position entry orders."""
+    return sum(
+        (po.quote_qty for po in state.pending_orders
+         if po.kind == "position_entry" and po.filled_qty < po.base_qty),
+        start=ZERO_DECIMAL,
+    )
+
+
+def _get_reference_price(state: BotState, pair: str) -> Decimal | None:
+    """Look up current price from scheduler-injected reference_prices."""
+    for ref_pair, price in state.reference_prices:
+        if ref_pair == pair:
+            return price
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -149,7 +180,7 @@ def _handle_target_hit(
 
 
 # ---------------------------------------------------------------------------
-# BeliefUpdate — consensus check, open/close positions
+# BeliefUpdate — consensus check, buy-side entry or sell-side inventory
 # ---------------------------------------------------------------------------
 
 
@@ -191,15 +222,16 @@ def _handle_belief_update(
             LogEvent(message=f"belief_update: soft drawdown blocks entry for {pair}"),
         )
 
-    # Max positions check
-    if len(state.portfolio.positions) >= config.max_positions:
-        return state, (LogEvent(message=f"belief_update: max positions ({config.max_positions}) reached"),)
-
     # Cooldown check
     if _pair_in_cooldown(state, pair, config):
         return state, (LogEvent(message=f"belief_update: {pair} in re-entry cooldown"),)
 
-    # Position sizing — with no trade history Kelly returns 0, use min as fallback
+    # Reference price required for base-asset conversion
+    ref_price = _get_reference_price(state, pair)
+    if ref_price is None or ref_price <= ZERO_DECIMAL:
+        return state, (LogEvent(message=f"belief_update: no reference price for {pair}"),)
+
+    # Position sizing
     kelly_frac = ZERO_DECIMAL  # safe default until stats engine has enough samples
     min_usd = Decimal(config.min_position_usd)
     max_usd = Decimal(config.max_position_usd)
@@ -210,65 +242,166 @@ def _handle_belief_update(
         max_position_usd=max_usd,
     )
     if position_usd <= ZERO_DECIMAL:
-        # No Kelly edge yet — fall back to minimum position size if portfolio can cover it
         if state.portfolio.total_value_usd >= min_usd:
             position_usd = min_usd
         else:
             return state, (LogEvent(message=f"belief_update: insufficient funds for {pair}"),)
 
-    # Build entry
+    # Branch: bearish spot sell vs bullish buy
+    if expected_side == PositionSide.SHORT and pair == "DOGE/USD":
+        return _bearish_inventory_sell(state, pair, position_usd, ref_price, config)
+    return _bullish_position_entry(state, pair, position_usd, ref_price, expected_side, config)
+
+
+def _bullish_position_entry(
+    state: BotState, pair: str, position_usd: Decimal,
+    ref_price: Decimal, expected_side: PositionSide, config: Settings,
+) -> ReducerResult:
+    """Buy-side entry: cap by free USD, quantity in base-asset."""
+    _ = config
+    available_usd = state.portfolio.cash_usd - _usd_reserved(state)
+    capped_usd = min(position_usd, available_usd)
+    min_usd = Decimal(config.min_position_usd)
+    if capped_usd < min_usd:
+        return state, (LogEvent(message=f"belief_update: insufficient free USD for {pair} (have ${available_usd}, need ${min_usd})"),)
+
+    base_qty = capped_usd / ref_price  # convert USD to base-asset quantity
+
     seq = state.next_position_seq
     pair_slug = pair.replace("/", "").lower()
     position_id = f"kbv4-{pair_slug}-{seq:06d}"
     client_order_id = f"kbv4-{pair_slug}-{seq:06d}-entry"
 
-    # Entry price: use the belief's confidence-weighted price placeholder.
-    # In practice the limit order goes at a maker offset below/above market.
-    # For now we use a placeholder; the runtime will have current market price.
-    # The reducer emits the PlaceOrder; the OrderGate handles price validation.
-    entry_quantity = position_usd  # quantity in USD terms for the order
-
-    order_side = OrderSide.BUY if expected_side == PositionSide.LONG else OrderSide.SELL
     order = OrderRequest(
         pair=pair,
-        side=order_side,
+        side=OrderSide.BUY,
         order_type=OrderType.LIMIT,
-        quantity=entry_quantity,
+        quantity=base_qty,
+        limit_price=ref_price,
         client_order_id=client_order_id,
     )
-
-    updated_pending = state.pending_orders + ((client_order_id, position_id),)
+    pending = PendingOrder(
+        client_order_id=client_order_id,
+        kind="position_entry",
+        pair=pair,
+        side=OrderSide.BUY,
+        base_qty=base_qty,
+        quote_qty=capped_usd,
+        position_id=position_id,
+    )
     new_state = replace(
         state,
         next_position_seq=seq + 1,
-        pending_orders=updated_pending,
+        pending_orders=state.pending_orders + (pending,),
     )
     return new_state, (
         PlaceOrder(order=order),
-        LogEvent(message=f"belief_update: entry order for {pair} side={expected_side.value} size=${position_usd}"),
+        LogEvent(message=f"belief_update: BUY {pair} qty={base_qty:.4f} @ {ref_price} (${capped_usd})"),
+    )
+
+
+def _bearish_inventory_sell(
+    state: BotState, pair: str, position_usd: Decimal,
+    ref_price: Decimal, config: Settings,
+) -> ReducerResult:
+    """Spot inventory sell: reduce DOGE exposure on bearish consensus. No Position created."""
+    _ = config
+    available_doge = state.portfolio.cash_doge - _doge_reserved(state)
+    if available_doge <= ZERO_DECIMAL:
+        return state, (LogEvent(message="belief_update: no DOGE inventory to sell"),)
+
+    sell_qty = position_usd / ref_price
+    sell_qty = min(sell_qty, available_doge)  # cap by available balance
+
+    if sell_qty <= ZERO_DECIMAL:
+        return state, (LogEvent(message=f"belief_update: sell quantity too small for {pair}"),)
+
+    seq = state.next_position_seq
+    pair_slug = pair.replace("/", "").lower()
+    client_order_id = f"kbv4-{pair_slug}-{seq:06d}-sell"
+
+    order = OrderRequest(
+        pair=pair,
+        side=OrderSide.SELL,
+        order_type=OrderType.LIMIT,
+        quantity=sell_qty,
+        limit_price=ref_price,
+        client_order_id=client_order_id,
+    )
+    pending = PendingOrder(
+        client_order_id=client_order_id,
+        kind="inventory_sell",
+        pair=pair,
+        side=OrderSide.SELL,
+        base_qty=sell_qty,
+        quote_qty=ZERO_DECIMAL,
+    )
+    new_state = replace(
+        state,
+        next_position_seq=seq + 1,
+        pending_orders=state.pending_orders + (pending,),
+    )
+    return new_state, (
+        PlaceOrder(order=order),
+        LogEvent(message=f"belief_update: SELL {pair} qty={sell_qty:.4f} @ {ref_price} (inventory)"),
     )
 
 
 # ---------------------------------------------------------------------------
-# FillConfirmed — update portfolio with fill data
+# FillConfirmed — route to inventory accounting or position entry
 # ---------------------------------------------------------------------------
 
 
 def _handle_fill_confirmed(
     state: BotState, event: FillConfirmed, config: Settings,
 ) -> ReducerResult:
-    # Try to match via pending_orders first (by scanning open_orders for the fill's order_id)
-    matched_position_id = _match_fill_to_pending(state, event)
-    if matched_position_id is None:
+    pending = _match_fill_to_pending(state, event)
+    if pending is None:
         return state, (
-            LogEvent(message=f"fill_confirmed: no pending order for order_id={event.order_id}"),
+            LogEvent(message=f"fill_confirmed: no pending order for {event.order_id}"),
         )
 
-    side = _infer_side_from_order(state, event)
+    if pending.kind == "inventory_sell":
+        return _handle_inventory_sell_fill(state, event, pending)
+    return _handle_position_entry_fill(state, event, pending, config)
 
-    # Build/update the position from fill data
+
+def _handle_inventory_sell_fill(
+    state: BotState, event: FillConfirmed, pending: PendingOrder,
+) -> ReducerResult:
+    """DOGE→USD inventory transfer on fill."""
+    received_usd = event.filled_quantity * event.fill_price
+    new_portfolio = replace(
+        state.portfolio,
+        cash_doge=state.portfolio.cash_doge - event.filled_quantity,
+        cash_usd=state.portfolio.cash_usd + received_usd,
+    )
+
+    updated_pending = replace(pending, filled_qty=pending.filled_qty + event.filled_quantity)
+
+    if updated_pending.filled_qty >= updated_pending.base_qty:
+        remaining = tuple(po for po in state.pending_orders if po.client_order_id != pending.client_order_id)
+    else:
+        remaining = tuple(
+            updated_pending if po.client_order_id == pending.client_order_id else po
+            for po in state.pending_orders
+        )
+
+    new_state = replace(state, portfolio=new_portfolio, pending_orders=remaining)
+    return new_state, (
+        LogEvent(message=f"fill_confirmed: sold {event.filled_quantity} {event.pair} @ {event.fill_price} → ${received_usd:.2f}"),
+    )
+
+
+def _handle_position_entry_fill(
+    state: BotState, event: FillConfirmed, pending: PendingOrder, config: Settings,
+) -> ReducerResult:
+    """Position entry fill — create Position with stop/target."""
+    position_id = pending.position_id or f"kbv4-fill-{event.order_id}"
+    side = PositionSide.LONG if pending.side == OrderSide.BUY else PositionSide.SHORT
+
     position = Position(
-        position_id=matched_position_id,
+        position_id=position_id,
         pair=event.pair,
         side=side,
         quantity=event.filled_quantity,
@@ -277,7 +410,6 @@ def _handle_fill_confirmed(
         target_price=ZERO_DECIMAL,
     )
 
-    # Open the position with stop/target via lifecycle
     belief = _belief_for_pair(state.beliefs, event.pair)
     if belief is not None and belief.direction != BeliefDirection.NEUTRAL:
         position, lifecycle_actions = PositionLifecycle.open_position(
@@ -288,44 +420,70 @@ def _handle_fill_confirmed(
 
     updated_portfolio = PortfolioManager.apply_fill(state.portfolio, position=position)
 
-    # Remove matched pending order
-    remaining_pending = tuple(
-        po for po in state.pending_orders if po[1] != matched_position_id
-    )
+    updated_pending = replace(pending, filled_qty=pending.filled_qty + event.filled_quantity)
+    if updated_pending.filled_qty >= updated_pending.base_qty:
+        remaining = tuple(po for po in state.pending_orders if po.client_order_id != pending.client_order_id)
+    else:
+        remaining = tuple(
+            updated_pending if po.client_order_id == pending.client_order_id else po
+            for po in state.pending_orders
+        )
 
-    new_state = replace(
-        state,
-        portfolio=updated_portfolio,
-        pending_orders=remaining_pending,
-    )
+    new_state = replace(state, portfolio=updated_portfolio, pending_orders=remaining)
     return new_state, lifecycle_actions + (
         LogEvent(message=f"fill_confirmed: {event.pair} qty={event.filled_quantity} @ {event.fill_price}"),
     )
 
 
 # ---------------------------------------------------------------------------
-# ReconciliationResult — check risk, block entries or close all
+# ReconciliationResult — sync balances, prune stale pending, check risk
 # ---------------------------------------------------------------------------
 
 
 def _handle_reconciliation(
     state: BotState, event: ReconciliationResult, config: Settings,
 ) -> ReducerResult:
-    risk_result = check_portfolio_rules(state.portfolio, config=config)
+    # Sync balances from exchange truth
+    actual_doge = sum(
+        (b.available + b.held for b in event.balances if b.asset == "DOGE"),
+        start=ZERO_DECIMAL,
+    )
+    actual_usd = sum(
+        (b.available + b.held for b in event.balances if b.asset == "USD"),
+        start=ZERO_DECIMAL,
+    )
+    synced_portfolio = replace(
+        state.portfolio, cash_doge=actual_doge, cash_usd=actual_usd,
+    )
+
+    # Prune pending orders not in exchange open orders
+    exchange_client_oids = {
+        o.client_order_id for o in event.open_orders if o.client_order_id
+    }
+    live_pending = tuple(
+        po for po in state.pending_orders if po.client_order_id in exchange_client_oids
+    )
+
+    synced_state = replace(
+        state, portfolio=synced_portfolio, pending_orders=live_pending,
+    )
+
+    # Risk check
+    risk_result = check_portfolio_rules(synced_state.portfolio, config=config)
 
     if isinstance(risk_result.recommended_action, CloseAllPositions):
-        new_state = replace(state, entry_blocked=True)
+        new_state = replace(synced_state, entry_blocked=True)
         return new_state, risk_result.recommended_action.actions + (
             LogEvent(message="reconciliation: hard drawdown — closing all positions"),
         )
 
     if isinstance(risk_result.recommended_action, BlockNewEntries):
-        new_state = replace(state, entry_blocked=True)
+        new_state = replace(synced_state, entry_blocked=True)
         return new_state, (
             LogEvent(message="reconciliation: soft drawdown — blocking new entries"),
         )
 
-    new_state = replace(state, entry_blocked=False)
+    new_state = replace(synced_state, entry_blocked=False)
     return new_state, (
         LogEvent(message=f"reconciliation: {event.summary or 'ok'}"),
     )
@@ -400,7 +558,6 @@ def _close_position_on_belief_change(
         position, reason="belief_change",
     )
     doge_belief = _belief_for_pair(state.beliefs, "DOGE/USD")
-    # Use entry_price as close proxy (actual close price comes from the fill)
     updated_portfolio, portfolio_actions = PortfolioManager.apply_close(
         state.portfolio,
         position_id=position.position_id,
@@ -435,43 +592,27 @@ def _pair_in_cooldown(state: BotState, pair: str, config: Settings) -> bool:
     return False
 
 
-def _match_fill_to_pending(state: BotState, event: FillConfirmed) -> str | None:
-    """Match a fill to a pending position_id via open_orders client_order_id."""
-    # Check if the order_id matches any open order with a client_order_id in pending_orders
+def _match_fill_to_pending(state: BotState, event: FillConfirmed) -> PendingOrder | None:
+    """Match a fill to a PendingOrder, preferring client_order_id."""
+    # Direct match by client_order_id (most reliable)
+    if event.client_order_id:
+        for po in state.pending_orders:
+            if po.client_order_id == event.client_order_id:
+                return po
+
+    # Fallback: match via open_orders order_id → client_order_id → pending
     for order in state.open_orders:
         if order.order_id == event.order_id and order.client_order_id:
-            for client_oid, position_id in state.pending_orders:
-                if client_oid == order.client_order_id:
-                    return position_id
+            for po in state.pending_orders:
+                if po.client_order_id == order.client_order_id:
+                    return po
 
-    # Fallback: match by pair if only one pending order for that pair
-    pair_matches = [
-        position_id
-        for _, position_id in state.pending_orders
-        if position_id.replace("kbv4-", "").rsplit("-", 1)[0].replace("usd", "/usd").replace("doge", "doge") == event.pair.lower().replace("/", "")
-    ]
-    # Simple pair-slug match
-    pair_slug = event.pair.replace("/", "").lower()
-    pair_matches = [
-        position_id
-        for client_oid, position_id in state.pending_orders
-        if pair_slug in position_id
-    ]
+    # Last resort: single pending order for this pair
+    pair_matches = [po for po in state.pending_orders if po.pair == event.pair]
     if len(pair_matches) == 1:
         return pair_matches[0]
 
     return None
-
-
-def _infer_side_from_order(state: BotState, event: FillConfirmed) -> PositionSide:
-    """Infer position side from the order that was filled."""
-    for order in state.open_orders:
-        if order.order_id == event.order_id:
-            if order.side == OrderSide.BUY:
-                return PositionSide.LONG
-            return PositionSide.SHORT
-    # Default to long for buys
-    return PositionSide.LONG
 
 
 def _doge_market_price(
@@ -480,9 +621,8 @@ def _doge_market_price(
     """Return DOGE market price for accumulation, if applicable."""
     if position_pair == "DOGE/USD":
         return trigger_price
-    # For non-DOGE pairs, we'd need the DOGE price from state
-    # For MVP with DOGE-only account, this is sufficient
-    return None
+    price = _get_reference_price(state, "DOGE/USD")
+    return price
 
 
 __all__ = [

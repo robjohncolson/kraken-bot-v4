@@ -20,6 +20,7 @@ from core.types import (
     PositionId,
     PositionSide,
     Price,
+    Quantity,
     UsdAmount,
     ZERO_DECIMAL,
 )
@@ -247,17 +248,35 @@ def _locate_position(
     return None, None
 
 
+def mark_to_market(
+    portfolio: Portfolio,
+    *,
+    doge_price_usd: Price = ZERO_DECIMAL,
+) -> Portfolio:
+    """Recompute total_value_usd, concentration, exposure with current DOGE price."""
+    return _rebalance_portfolio(
+        portfolio,
+        cash_usd=portfolio.cash_usd,
+        positions=portfolio.positions,
+        doge_price_usd=doge_price_usd,
+    )
+
+
 def _rebalance_portfolio(
     portfolio: Portfolio,
     *,
     cash_usd: UsdAmount,
     positions: tuple[Position, ...],
+    doge_price_usd: Price = ZERO_DECIMAL,
 ) -> Portfolio:
     snapshot = replace(
         portfolio,
         cash_usd=cash_usd,
         positions=positions,
-        total_value_usd=_total_value_usd(cash_usd, positions),
+        total_value_usd=_total_value_usd(
+            cash_usd, positions,
+            cash_doge=portfolio.cash_doge, doge_price_usd=doge_price_usd,
+        ),
     )
     concentration = compute_concentration(snapshot)
     directional_exposure = compute_directional_exposure(snapshot)
@@ -268,8 +287,14 @@ def _rebalance_portfolio(
     )
 
 
-def _total_value_usd(cash_usd: UsdAmount, positions: tuple[Position, ...]) -> UsdAmount:
-    return cash_usd + sum(
+def _total_value_usd(
+    cash_usd: UsdAmount,
+    positions: tuple[Position, ...],
+    cash_doge: Quantity = ZERO_DECIMAL,
+    doge_price_usd: Price = ZERO_DECIMAL,
+) -> UsdAmount:
+    doge_value = cash_doge * doge_price_usd if doge_price_usd > ZERO_DECIMAL else ZERO_DECIMAL
+    return cash_usd + doge_value + sum(
         (_signed_position_value_usd(position) for position in positions),
         start=ZERO_DECIMAL,
     )
@@ -323,6 +348,7 @@ __all__ = [
     "InvalidDogeMarketPriceError",
     "InvalidMakerOffsetError",
     "InvalidPositionStateError",
+    "mark_to_market",
     "MissingDogeMarketPriceError",
     "PortfolioCloseActions",
     "PortfolioCloseResult",
