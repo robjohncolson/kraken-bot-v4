@@ -380,31 +380,30 @@ Kraken (live truth)
   ├── balances
   └── fills / trade history
 
-Supabase (coordination + recovery authority)
+SQLite (durable coordination store — local on bot host)
   ├── positions table     # All open/closed positions
   ├── orders table        # All order history with cl_ord_id
-  ├── beliefs table       # Belief snapshots per source per pair
-  ├── grid_cycles table   # Grid trading cycle records
-  ├── config table        # Runtime config overrides
-  └── ledger table        # All financial events
+  (beliefs, grid_cycles, config, ledger tables added as needed)
 
-Local (cache + offline queue)
+Local files (audit + recovery)
   ├── state.json          # Latest snapshot (read-through cache)
   ├── ledger.jsonl        # Append-only local copy
-  └── queue.jsonl         # Offline write queue (retry on reconnect)
+  └── queue.jsonl         # Offline write queue
 ```
 
 **Startup sequence:**
-1. Connect to Supabase
-2. Pull coordination state
-3. Connect to Kraken
-4. Reconcile Supabase state vs. Kraken state
-5. If discrepancies → best-effort import + Telegram alert, resolve before entering main loop
-6. Start main loop
+1. Load config, ensure local state dir
+2. Open SQLite, ensure schema
+3. Health-check Kraken
+4. Fetch Kraken state (balances, open orders, trade history)
+5. Fetch recorded state from SQLite
+6. Reconcile Kraken state vs. recorded state
+7. If discrepancies → log + Telegram alert
+8. Start main loop (or exit if STARTUP_RECONCILE_ONLY=true)
 
 ### 9. Dashboard (web/)
 
-**Read-only D3.js dashboard, deployed to Railway.** No action endpoints. No `POST /api/override`.
+**Read-only D3.js dashboard, served locally on the bot host.** Access via Tailscale. No action endpoints. No `POST /api/override`.
 
 ```
 FastAPI backend (Railway):
@@ -555,12 +554,12 @@ This decision means reconciliation, foreign order handling, and ghost position p
 
 ```
 ┌─────────────────────────────────────────────┐
-│  LAPTOP (always on, Tailscale accessible)    │
+│  SPARE LAPTOP (always on, Tailscale)         │
 │                                              │
 │  Python Trading Bot                          │
 │    ├── scheduler.py (main loop)              │
 │    ├── guardian.py (stop/target monitor)      │
-│    ├── reconciler (Kraken ↔ Supabase)        │
+│    ├── reconciler (Kraken ↔ SQLite)          │
 │    └── grid engine                           │
 │                                              │
 │  Belief Formation                            │
@@ -568,26 +567,16 @@ This decision means reconciliation, foreign order handling, and ghost position p
 │    ├── Codex CLI (subscription)              │
 │    └── Auto-research strategy (pure Python)  │
 │                                              │
-│  State Files                                 │
+│  SQLite (durable coordination store)         │
+│    └── data/bot.db (positions, orders)       │
+│                                              │
+│  Local Files                                 │
 │    ├── state/bot-status.json                 │
-│    ├── data/state.json (local cache)         │
+│    ├── data/state.json (snapshot cache)      │
 │    └── data/queue.jsonl (offline queue)      │
-└──────────────┬──────────────────────────────┘
-               │ writes to
-               ▼
-┌─────────────────────────────────────────────┐
-│  SUPABASE (source of truth)                  │
-│    ├── positions, orders, beliefs            │
-│    ├── grid_cycles, ledger, config           │
-│    └── PostgreSQL direct connection          │
-└──────────────┬──────────────────────────────┘
-               │ reads from
-               ▼
-┌─────────────────────────────────────────────┐
-│  RAILWAY (read-only dashboard)               │
-│    ├── FastAPI + SSE                         │
-│    ├── D3.js frontend                        │
-│    └── No trading logic, no order placement  │
+│                                              │
+│  Local Dashboard (FastAPI + D3.js + SSE)     │
+│    └── localhost:8080, access via Tailscale  │
 └─────────────────────────────────────────────┘
 ```
 
@@ -670,12 +659,12 @@ BELIEF_STALE_HOURS=4
 BELIEF_CONSENSUS_THRESHOLD=2        # Out of 3 sources
 REENTRY_COOLDOWN_HOURS=24
 
-# Persistence
-SUPABASE_URL=
-SUPABASE_KEY=
+# Persistence (local-first)
+SQLITE_PATH=./data/bot.db
 LOCAL_STATE_DIR=./data
 
-# Dashboard (Railway)
+# Dashboard (local, access via Tailscale)
+WEB_HOST=127.0.0.1
 WEB_PORT=8080
 
 # Alerts
