@@ -40,7 +40,8 @@ class ForeignOrderClassification(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class RecordedPosition:
-    position_id: PositionId; pair: Pair
+    position_id: PositionId
+    pair: Pair
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,32 +62,44 @@ class RecordedState:
 
 @dataclass(frozen=True, slots=True)
 class GhostPosition:
-    position_id: PositionId; pair: Pair
-    severity: ReconciliationSeverity; recommended_action: ReconciliationAction
+    position_id: PositionId
+    pair: Pair
+    severity: ReconciliationSeverity
+    recommended_action: ReconciliationAction
     recommended_step: str = "close_recorded_position"
 
 
 @dataclass(frozen=True, slots=True)
 class ForeignOrder:
-    order_id: OrderId; pair: Pair
+    order_id: OrderId
+    pair: Pair
     client_order_id: ClientOrderId | None
-    classification: ForeignOrderClassification; age: timedelta
-    severity: ReconciliationSeverity; recommended_action: ReconciliationAction
+    classification: ForeignOrderClassification
+    age: timedelta
+    severity: ReconciliationSeverity
+    recommended_action: ReconciliationAction
     recommended_step: str
 
 
 @dataclass(frozen=True, slots=True)
 class FeeDrift:
-    order_id: str; pair: Pair
-    kraken_fee: Decimal; recorded_fee: Decimal; delta: Decimal
-    severity: ReconciliationSeverity; recommended_action: ReconciliationAction
+    order_id: str
+    pair: Pair
+    kraken_fee: Decimal
+    recorded_fee: Decimal
+    delta: Decimal
+    severity: ReconciliationSeverity
+    recommended_action: ReconciliationAction
     recommended_step: str
 
 
 @dataclass(frozen=True, slots=True)
 class UntrackedAsset:
-    asset: str; available: Decimal; held: Decimal
-    severity: ReconciliationSeverity; recommended_action: ReconciliationAction
+    asset: str
+    available: Decimal
+    held: Decimal
+    severity: ReconciliationSeverity
+    recommended_action: ReconciliationAction
     recommended_step: str = "import_asset_balance"
 
 
