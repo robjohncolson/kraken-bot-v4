@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Mapping
 
 from core.errors import InvalidEnvironmentVariableError, MissingEnvironmentVariableError
+from exchange.symbols import normalize_pair
 
 DEFAULT_KRAKEN_TIER = "starter"
 DEFAULT_MAX_POSITIONS = 8
@@ -87,6 +88,7 @@ class Settings:
     read_only_exchange: bool
     disable_order_mutations: bool
     startup_reconcile_only: bool
+    allowed_pairs: frozenset[str]
 
 
 def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
@@ -161,6 +163,7 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
         startup_reconcile_only=_read_bool(
             env, "STARTUP_RECONCILE_ONLY", DEFAULT_STARTUP_RECONCILE_ONLY
         ),
+        allowed_pairs=_read_pairs(env, "ALLOWED_PAIRS"),
     )
 
 
@@ -222,6 +225,14 @@ def _read_choice(
         expected = "one of: " + ", ".join(sorted(choices))
         raise InvalidEnvironmentVariableError(name, raw_value, expected)
     return normalized
+
+
+def _read_pairs(environ: Mapping[str, str], name: str) -> frozenset[str]:
+    raw_value = _read_optional(environ, name)
+    if raw_value is None:
+        return frozenset()
+    pairs = [normalize_pair(p.strip()) for p in raw_value.split(",") if p.strip()]
+    return frozenset(pairs)
 
 
 def _read_path(environ: Mapping[str, str], name: str, default: Path) -> Path:

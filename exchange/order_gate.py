@@ -42,6 +42,15 @@ class OrderMutationBlockedError(OrderGateError):
         super().__init__(f"Order mutations are blocked until monotonic time {resume_at}.")
 
 
+class PairNotAllowedError(OrderGateError):
+    """Raised when an order targets a pair not in the allowed set."""
+
+    def __init__(self, pair: str, allowed: frozenset[str]) -> None:
+        self.pair = pair
+        self.allowed = allowed
+        super().__init__(f"Pair {pair!r} is not in the allowed set: {sorted(allowed)}.")
+
+
 @dataclass(frozen=True, slots=True)
 class CircuitBreakerPolicy:
     threshold: int = DEFAULT_CIRCUIT_BREAKER_THRESHOLD
@@ -149,17 +158,27 @@ class OrderGate:
         breaker_policy: CircuitBreakerPolicy = CircuitBreakerPolicy(),
         now: TimeSource | None = None,
         sequence_source: SequenceSource | None = None,
+        allowed_pairs: frozenset[str] = frozenset(),
     ) -> None:
         self._client = client
         self._order_prefix = order_prefix
         self._sequence_source = count(1).__next__ if sequence_source is None else sequence_source
         self._breaker = OrderMutationCircuitBreaker(policy=breaker_policy, now=now)
+        self._allowed_pairs = allowed_pairs
 
     @property
     def circuit_breaker(self) -> CircuitBreakerSnapshot:
         return self._breaker.snapshot()
 
+    def _ensure_pair_allowed(self, pair: str) -> None:
+        if not self._allowed_pairs:
+            return
+        normalized = normalize_pair(pair)
+        if normalized not in self._allowed_pairs:
+            raise PairNotAllowedError(normalized, self._allowed_pairs)
+
     def place_order(self, order: OrderRequest) -> PreparedKrakenRequest:
+        self._ensure_pair_allowed(order.pair)
         self._breaker.before_mutation()
         payload = self.build_order_payload(order)
         try:
@@ -177,6 +196,7 @@ class OrderGate:
         *,
         order_age_seconds: float,
     ) -> PreparedKrakenRequest:
+        self._ensure_pair_allowed(pair)
         if not order_id.strip():
             raise InvalidOrderRequestError("Cancel requests require a non-empty order_id.")
 
@@ -241,4 +261,5 @@ __all__ = [
     "OrderGatewayClient",
     "OrderMutationBlockedError",
     "OrderMutationCircuitBreaker",
+    "PairNotAllowedError",
 ]

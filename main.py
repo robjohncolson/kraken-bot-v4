@@ -13,9 +13,9 @@ Startup sequence:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import sys
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -26,6 +26,7 @@ from core.errors import ConfigError, ExchangeError
 from exchange.client import KrakenClient
 from exchange.executor import KrakenExecutor
 from exchange.models import KrakenState
+from exchange.order_gate import OrderGate
 from exchange.transport import HttpKrakenTransport
 from persistence.sqlite import (
     SqlitePersistenceError,
@@ -33,6 +34,7 @@ from persistence.sqlite import (
     ensure_schema,
     open_database,
 )
+from runtime_loop import SchedulerRuntime, build_initial_scheduler_state
 from trading.reconciler import ReconciliationReport, RecordedState, reconcile
 
 logger = logging.getLogger("kraken-bot-v4")
@@ -57,7 +59,7 @@ def _load_dotenv() -> None:
     try:
         from dotenv import load_dotenv  # type: ignore[import-untyped]
 
-        load_dotenv(env_path, override=True)
+        load_dotenv(env_path, override=False)
         logger.info("Loaded .env file")
     except ImportError:
         logger.warning(
@@ -79,6 +81,11 @@ def _print_safe_mode_banner(settings: Settings) -> None:
         logger.info("Safe mode active: %s", ", ".join(flags))
     else:
         logger.warning("ALL SAFE MODE FLAGS ARE OFF — live trading enabled")
+
+    if settings.allowed_pairs:
+        logger.info("Pair whitelist: %s", ", ".join(sorted(settings.allowed_pairs)))
+    else:
+        logger.info("Pair whitelist: NONE (no filtering — all pairs allowed)")
 
 
 def _ensure_local_state_dir(settings: Settings) -> None:
@@ -116,14 +123,21 @@ def _startup_healthcheck(settings: Settings) -> bool:
 
 
 def _build_executor(settings: Settings) -> KrakenExecutor:
-    """Construct the read-only Kraken executor from settings."""
+    """Construct the Kraken executor from settings."""
     client = KrakenClient(
         api_key=settings.kraken_api_key,
         api_secret=settings.kraken_api_secret,
         tier=settings.kraken_tier,
     )
     transport = HttpKrakenTransport()
-    return KrakenExecutor(client=client, transport=transport)
+    order_gate = OrderGate(client=client, allowed_pairs=settings.allowed_pairs)
+    return KrakenExecutor(
+        client=client,
+        transport=transport,
+        order_gate=order_gate,
+        read_only_exchange=settings.read_only_exchange,
+        disable_order_mutations=settings.disable_order_mutations,
+    )
 
 
 def _fetch_kraken_state(executor: KrakenExecutor) -> KrakenState | None:
@@ -191,8 +205,16 @@ def _run_reconciliation(
     return report
 
 
-def _run_main_loop(settings: Settings) -> None:
-    """Run the main scheduler loop. Currently a stub that logs heartbeats."""
+def _run_main_loop(
+    settings: Settings,
+    *,
+    executor: KrakenExecutor,
+    conn: sqlite3.Connection,
+    kraken_state: KrakenState,
+    recorded_state: RecordedState,
+    report: ReconciliationReport,
+) -> None:
+    """Run the live scheduler runtime."""
     logger.info("Entering main scheduler loop...")
 
     if settings.read_only_exchange:
@@ -200,16 +222,21 @@ def _run_main_loop(settings: Settings) -> None:
     if settings.disable_order_mutations:
         logger.info("Order mutations are DISABLED — AddOrder/CancelOrder blocked")
 
-    # TODO(task-2): Wire real Scheduler with live exchange + persistence
-    cycle = 0
+    runtime = SchedulerRuntime(
+        settings=settings,
+        executor=executor,
+        conn=conn,
+        initial_state=build_initial_scheduler_state(
+            kraken_state=kraken_state,
+            recorded_state=recorded_state,
+            report=report,
+            now=datetime.now(timezone.utc),
+        ),
+    )
     try:
-        while True:
-            cycle += 1
-            now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-            logger.info("Heartbeat cycle=%d at=%s (stub — no real work yet)", cycle, now)
-            time.sleep(30)
+        asyncio.run(runtime.run_forever())
     except KeyboardInterrupt:
-        logger.info("Received Ctrl+C — shutting down after cycle %d", cycle)
+        logger.info("Received Ctrl+C — shutting down runtime loop")
 
 
 def main() -> int:
@@ -253,7 +280,7 @@ def main() -> int:
         return 1
 
     # Step 6: Reconcile
-    _run_reconciliation(kraken_state, recorded_state)
+    report = _run_reconciliation(kraken_state, recorded_state)
 
     # Step 7: If reconcile-only mode, stop here
     if settings.startup_reconcile_only:
@@ -262,7 +289,14 @@ def main() -> int:
         return 0
 
     # Step 8: Main loop
-    _run_main_loop(settings)
+    _run_main_loop(
+        settings,
+        executor=executor,
+        conn=conn,
+        kraken_state=kraken_state,
+        recorded_state=recorded_state,
+        report=report,
+    )
     conn.close()
     return 0
 

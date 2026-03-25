@@ -39,3 +39,20 @@ def test_load_settings_requires_required_env_vars(missing_name: str) -> None:
         load_settings(environment)
 
     assert exc_info.value.variable_name == missing_name
+
+
+def test_allowed_pairs_parses_comma_separated() -> None:
+    env = {**REQUIRED_ENV, "ALLOWED_PAIRS": "DOGE/USD,BTC/USD"}
+    settings = load_settings(env)
+    assert settings.allowed_pairs == frozenset({"DOGE/USD", "BTC/USD"})
+
+
+def test_allowed_pairs_defaults_to_empty() -> None:
+    settings = load_settings(REQUIRED_ENV)
+    assert settings.allowed_pairs == frozenset()
+
+
+def test_allowed_pairs_normalizes_kraken_format() -> None:
+    env = {**REQUIRED_ENV, "ALLOWED_PAIRS": "xdgusd"}
+    settings = load_settings(env)
+    assert settings.allowed_pairs == frozenset({"DOGE/USD"})

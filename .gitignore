@@ -1,5 +1,11 @@
 .gitnexus
 .env
+*-env.txt
+*-envs.txt
+
+# Runtime data
+data/
+*.log
 
 # Build system runtime state
 build/state/
