@@ -112,6 +112,8 @@ def fetch_ohlcv_history(
         break
 
     df = pd.DataFrame(all_rows)
+    if not df.empty:
+        df = df.drop_duplicates(subset=["timestamp"], keep="first").reset_index(drop=True)
     if df.empty:
         logger.warning("OHLCV history for %s: no candles returned", pair)
         return pd.DataFrame(
