@@ -13,7 +13,29 @@
 
 ## What to do NOW: Phase 5 — Qwen Research Path
 
-Phases 0-4 are complete. The next milestone is Phase 5: adding a Qwen-class model as a structured forecast candidate in the evaluation harness.
+Phases 0-4 are complete. TUI operator cockpit is complete (v1 read-only). The next milestone is Phase 5: adding a Qwen-class model as a structured forecast candidate in the evaluation harness.
+
+### TUI Operator Cockpit (v1, completed 2026-03-26)
+
+**Launch**: `python -m tui` (or `TUI_BASE_URL=http://host:port python -m tui`)
+
+**Package**: `tui/` — fully isolated from `web/` and runtime, consumes existing dashboard API + SSE.
+
+Screens (keyboard-navigable):
+- `1` Overview (health, portfolio, positions, orders, beliefs, reconciliation, event log)
+- `2` Positions (full table with pair/side/qty/entry/stop/target/price/P&L/grid)
+- `3` Beliefs (matrix by pair and source with direction/confidence/regime)
+- `4` Orders (open + pending orders)
+- `5` Reconciliation (discrepancy/ghost/foreign/untracked/fee drift)
+- `6` Event Log (recent bot events, ring buffer)
+- `?` Help (key bindings + color legend)
+- `r` manual refresh, `p` pause/resume, `[`/`]` pair navigation, `q` quit
+
+Data flow: initial snapshot from `/api/*` endpoints, live updates from `/sse/updates` with exponential backoff reconnect. SSE disconnect shows degraded banner, never crashes.
+
+No backend changes required — the TUI consumes the existing read model. If future TUI features need new fields (pending orders detail, cooldowns, heartbeat summary), extend the shared dashboard read model first.
+
+Tests: 54 new tests (state parsers, SSE parser, theme helpers, Textual app navigation). 447 total passing.
 
 ### Completed phases
 
@@ -99,6 +121,7 @@ python main.py
 - **Spot inventory** ✅ Bearish DOGE sells, structured PendingOrder, derived reservation, buy gated by USD
 - **Portfolio** ✅ DOGE-inclusive total_value_usd, mark_to_market(), DOGE as managed exposure in risk
 - **Dashboard** ✅ HTML served at /, SSE real-time updates
+- **TUI Cockpit** ✅ Read-only operator cockpit (Textual + Rich, 7 screens, SSE live, 54 tests)
 - **Phase 0** ✅ Renamed autoresearch → technical_ensemble
 - **Research specs** ✅ Codex-authored integration spec + implementation checklist
 - **Phase 1** ✅ Research dataset export (OHLCV history, DB reader, labels, builder, CLI, 34 tests)
@@ -139,7 +162,7 @@ eca8508 refactor: rename autoresearch to technical_ensemble (Phase 0)
 
 - **kraken-bot-v4 branch**: master, at `3682eb0`
 - **autoresearch branch**: master, at `6398c0e`
-- **kraken-bot-v4 tests**: 393 passed, ruff clean
+- **kraken-bot-v4 tests**: 447 passed (393 existing + 54 TUI), ruff clean
 - **autoresearch tests**: 102 passed, 11 skipped (parity tests, Python 3.10 vs 3.11)
 - **Trading bot**: unchanged, still live-capable with TA ensemble beliefs
 - **Evaluation harness**: fully operational in autoresearch
@@ -177,6 +200,13 @@ eca8508 refactor: rename autoresearch to technical_ensemble (Phase 0)
 | `research/cli.py` | CLI: python -m research.cli |
 | `build/manifests/phase-10.research-dataset.json` | Phase 10 task manifest |
 | `web/app.py` | FastAPI + SSE + static file serving |
+| `tui/app.py` | TUI operator cockpit (Textual App, key bindings, screen switching) |
+| `tui/client.py` | Dashboard HTTP client (snapshot fetch) |
+| `tui/events.py` | SSE stream reader (async generator) |
+| `tui/state.py` | Presentation state + JSON parsers |
+| `tui/screens/` | 7 screens: overview, positions, beliefs, orders, reconciliation, logs, help |
+| `tui/widgets/` | Reusable widgets: health, portfolio, positions, beliefs, orders, reconciliation, event_log, status_bar |
+| `docs/specs/tui-operator-cockpit-spec.md` | TUI v1 spec |
 
 ## Environment
 
