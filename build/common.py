@@ -15,7 +15,22 @@ BUILD_DIR = REPO_ROOT / "build"
 BUILD_STATE_DIR = BUILD_DIR / "state"
 BUILD_LOGS_DIR = BUILD_DIR / "logs"
 CROSS_AGENT_STATE_DIR = REPO_ROOT / "state" / "cross-agent"
-AGENT_RUNNER = Path(r"C:\Users\ColsonR\Agent\runner\cross-agent.py")
+def _resolve_agent_runner() -> Path:
+    """Resolve cross-agent runner path from env or well-known locations."""
+    env_path = os.environ.get("CROSS_AGENT_RUNNER")
+    if env_path:
+        return Path(env_path)
+    candidates = [
+        Path(r"C:\Users\rober\Downloads\Projects\Agent\runner\cross-agent.py"),
+        Path(r"C:\Users\ColsonR\Agent\runner\cross-agent.py"),
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
+
+
+AGENT_RUNNER = _resolve_agent_runner()
 
 MANIFEST_VERSION = "build-manifest/v1"
 STATE_VERSION = "build-state/v1"
