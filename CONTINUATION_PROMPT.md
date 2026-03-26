@@ -6,37 +6,39 @@
 - **Kraken**: truth for live balances/orders/fills
 - **SQLite** (`./data/bot.db`): durable coordination store (WAL mode)
 - **Local JSONL**: audit/recovery trail (ledger, snapshots, offline queue)
-- **FastAPI dashboard**: local on bot host (`localhost:58392` — port 8080/8081 may collide)
+- **FastAPI dashboard**: local on bot host (`localhost:58392`)
 - **Tailscale**: remote access from school
 - **No Supabase** in runtime path (legacy code retained, not used)
 - **No Railway** (dashboard is local)
 
-## What to do NOW: Wire belief sources to the reducer
+## What to do NOW: Phase 1 — Research Dataset Export
 
-The reducer is implemented and the runtime is fully wired end-to-end. The bot will not trade until belief sources feed into the reducer. The next milestone is connecting the belief pipeline so the reducer receives `BeliefUpdate` events and can act on them.
+The live bot is running with reducer, belief polling, and spot inventory management. The next milestone is building the research dataset for the autoresearch integration.
 
-### What the reducer can do (as of `2ec30ea`)
+### What exists
 
-- **BeliefUpdate**: checks consensus (2/3 sources agree), runs risk/cooldown/max-positions gates, sizes position at MIN_POSITION_USD ($10), emits `PlaceOrder`
-- **FillConfirmed**: matches fills to pending orders, opens position with stop/target via PositionLifecycle
-- **StopTriggered / TargetHit**: closes position via PositionLifecycle + PortfolioManager (with DOGE accumulation on target hit)
-- **ReconciliationResult**: risk check → block entries on soft drawdown, close all on hard drawdown
-- **PriceTick / GridCycleComplete**: no-op for now (Guardian handles monitoring, grid deferred)
+- `docs/specs/autoresearch-trading-research-spec.md` — full spec for offline research loop
+- `docs/specs/autoresearch-trading-implementation-checklist.md` — phased checklist
+- Phase 0 complete: renamed `autoresearch_source` → `technical_ensemble_source`
 
-### What's missing for live trading
+### Phase 1 scope
 
-1. **Belief source wiring**: `beliefs/orchestrator.py` exists but is not called from the runtime. Need to connect it as the `belief_refresh_handler` in `SchedulerRuntime`, or trigger it externally and feed results via `enqueue_belief()`.
-2. **Entry price from market data**: The reducer emits `PlaceOrder` with `quantity` but no `limit_price` (set to `None`). The `OrderGate` or executor needs a current market price to set the limit. Options: use last PriceTick from state, or let the executor fill it from the order book.
-3. **Stats engine for Kelly sizing**: Currently falls back to `MIN_POSITION_USD` because `kelly_fraction=0` (no trade history). Need `stats/` module to compute win/loss from ledger and feed real Kelly fractions.
-4. **Grid activation**: The reducer logs `GridCycleComplete` but doesn't activate grids. Grid engine exists in `grid/engine.py` and is ready to wire when ranging regime is detected.
+Build a dataset builder that exports time-indexed samples from:
+- Kraken OHLCV history (via `exchange/ohlcv.py:fetch_ohlcv`)
+- Local DB orders/fills/closed trades (via `persistence/sqlite.py`)
+- Labels: `return_sign_6h`, `return_sign_12h`, `return_bps_6h`, `return_bps_12h`, `regime_label`
+- Output: `data/research/market_v1.parquet`, `labels_v1.parquet`, `manifest_v1.json`
+- No feature may use future data
 
-### Recommended next steps (in order)
+### What the bot can do now
 
-1. Wire `beliefs/orchestrator.py` into the runtime's `belief_refresh_handler`
-2. Set `limit_price` on entry orders from current market price (PriceTick state)
-3. Run a writable test with a manual belief injection to verify the full entry→fill→position cycle
-4. Connect stats engine for Kelly sizing
-5. Wire grid activation for ranging regime
+- **Bearish DOGE/USD**: sells DOGE inventory (spot transition, no Position created)
+- **Bullish DOGE/USD**: buys DOGE with free USD (creates Position with stop/target)
+- **Fills**: tracks via structured PendingOrder, partial fill support
+- **Risk**: DOGE is managed long exposure in concentration numerators
+- **Reconciliation**: syncs balances from exchange, prunes stale pending orders
+- **Beliefs**: technical_ensemble polls OHLCV hourly, 6-signal TA → consensus
+- **Dashboard**: live at localhost:58392 with SSE updates
 
 ### Running the bot
 
@@ -44,7 +46,7 @@ The reducer is implemented and the runtime is fully wired end-to-end. The bot wi
 # Smoke test (safe mode, exits after reconcile)
 python main.py
 
-# Writable run (no orders placed without beliefs)
+# Writable run (trades when signals are directional)
 $env:STARTUP_RECONCILE_ONLY='false'
 $env:READ_ONLY_EXCHANGE='false'
 $env:DISABLE_ORDER_MUTATIONS='false'
@@ -65,24 +67,32 @@ python main.py
 - **WebSocket** ✅ Kraken WS v2 (connection manager, ticker, executions, fallback)
 - **Runtime loop** ✅ Wired WebSocket into scheduler, dashboard, heartbeat
 - **Pair whitelist** ✅ ALLOWED_PAIRS config + OrderGate enforcement
-- **Executor wiring** ✅ Fixed: safe mode flags now flow from Settings to KrakenExecutor
-- **Smoke test** ✅ Reconcile-only against real Kraken
-- **Read-only runtime** ✅ Dashboard, WebSocket, heartbeat verified
-- **Writable run** ✅ All 6 criteria passed (no orders — no-op reducer at the time)
+- **Executor wiring** ✅ Safe mode flags flow from Settings to KrakenExecutor
+- **Smoke + read-only + writable runs** ✅ All verified
 - **Reducer** ✅ 7 event handlers, belief consensus entry, stop/target exit, fill tracking, risk gating
-- **Runtime integration** ✅ PlaceOrder/CancelOrder/ClosePosition wired to executor, WS fills bridged to reducer via pending_fills
+- **Runtime integration** ✅ PlaceOrder/CancelOrder/ClosePosition to executor, WS fills → reducer
+- **Belief pipeline** ✅ Technical ensemble (6-signal TA) + OHLCV fetch, periodic polling
+- **Spot inventory** ✅ Bearish DOGE sells, structured PendingOrder, derived reservation, buy gated by USD
+- **Portfolio** ✅ DOGE-inclusive total_value_usd, mark_to_market(), DOGE as managed exposure in risk
+- **Dashboard** ✅ HTML served at /, SSE real-time updates
+- **Phase 0** ✅ Renamed autoresearch → technical_ensemble
+- **Research specs** ✅ Codex-authored integration spec + implementation checklist
 
 ## Session Commits (2026-03-25)
 
 ```
+689c3c1 build: serve dashboard HTML + add autoresearch integration specs
+eca8508 refactor: rename autoresearch to technical_ensemble (Phase 0)
+48a8385 build: add spot inventory management for bearish DOGE sells
+a516332 build: wire live belief polling into runtime
+c4771b6 docs: update continuation prompt after reducer implementation
 2ec30ea build: implement reducer-driven runtime event handling
-d6ee7da build: add ALLOWED_PAIRS whitelist, fix executor wiring, add runtime loop
 ```
 
 Previous session commits:
 ```
-d2c1656 docs: update continuation prompt after phases 7-9 complete
-60da50b docs: add phase 7-9 build manifests
+d6ee7da build: add ALLOWED_PAIRS whitelist, fix executor wiring, add runtime loop
+d2c1656-60da50b docs + manifests for phases 7-9
 66d336f-b3636fd build(phase-9): WebSocket v2
 fafad2b-f1b824b build(phase-8): SQLite writes
 b9d6ee8-43b86ad build(phase-7): Mutations
@@ -90,38 +100,41 @@ b9d6ee8-43b86ad build(phase-7): Mutations
 
 ## Current State
 
-- **Branch**: master, at `2ec30ea`
-- **Tests**: 347 passed, ruff clean
+- **Branch**: master, at `689c3c1`
+- **Tests**: 359 passed, ruff clean
 - **Kraken account**: ~5,522 DOGE, $0.009 USD (dust), 0 open orders
-- **Reducer**: LIVE — handles all 7 event types, emits real actions
-- **Runtime**: Fully wired — effects dispatch to executor, WS fills reach reducer
-- **Trading**: Will not place orders until beliefs are fed (no belief sources connected)
-- **Unstaged**: AGENTS.md, CLAUDE.md (GitNexus section updates, not committed)
-- **Untracked**: chatGPT_analysis.md, claude_analysis.md, grok_analysis.md
+- **Reducer**: LIVE — all 7 event handlers, spot inventory sell, structured PendingOrder
+- **Runtime**: Fully wired — effects dispatch, WS fills → reducer, belief polling
+- **Beliefs**: technical_ensemble (neutral 0.50 at last poll)
+- **Trading**: Will sell DOGE on bearish signal, buy on bullish with free USD
+- **Dashboard**: http://127.0.0.1:58392
+- **Unstaged**: AGENTS.md, CLAUDE.md (GitNexus section updates)
 
 ## Key Paths
 
 | File | Purpose |
 |------|---------|
 | `SPEC.md` | Full system spec (local-first architecture) |
-| `main.py` | Entry point — wires settings into executor + runtime |
-| `runtime_loop.py` | WebSocket, dashboard, heartbeat, effect dispatch, fill bridging |
+| `docs/specs/autoresearch-trading-research-spec.md` | Offline research integration spec |
+| `docs/specs/autoresearch-trading-implementation-checklist.md` | Phased implementation plan |
+| `main.py` | Entry point — wires settings, executor, belief handler into runtime |
+| `runtime_loop.py` | WebSocket, dashboard, heartbeat, effect dispatch, fill bridging, belief poll |
 | `core/config.py` | Env-driven config (includes ALLOWED_PAIRS) |
-| `core/state_machine.py` | **Reducer** — 7 event handlers, belief entry, stop/target exit |
-| `core/types.py` | BotState (with as_of, pending_orders, cooldowns, entry_blocked) |
-| `scheduler.py` | Orchestrator — pending_fills, pending_beliefs, guardian, reconciliation |
+| `core/types.py` | BotState, PendingOrder, FillConfirmed (with client_order_id) |
+| `core/state_machine.py` | Reducer — spot sell, buy entry, fills, reconciliation, risk |
+| `scheduler.py` | Orchestrator — pending_fills/beliefs, reference_prices injection, mark_to_market |
+| `beliefs/technical_ensemble_source.py` | 6-signal TA ensemble (was autoresearch_source) |
+| `beliefs/technical_ensemble_handler.py` | OHLCV fetch + TA → BeliefSnapshot |
+| `exchange/ohlcv.py` | Kraken public OHLCV fetch |
 | `exchange/order_gate.py` | Single mutation gate with pair whitelist |
 | `exchange/executor.py` | Kraken executor (read + write, safe mode enforcement) |
 | `exchange/websocket.py` | Kraken WS v2 (ticker, executions, fallback) |
-| `beliefs/consensus.py` | Belief consensus (2/3 rule) |
-| `beliefs/orchestrator.py` | Belief pipeline (not yet wired to runtime) |
-| `trading/portfolio.py` | Portfolio accounting + DOGE accumulation |
+| `trading/portfolio.py` | Portfolio accounting, DOGE-inclusive, mark_to_market() |
+| `trading/risk_rules.py` | Risk checks with DOGE as managed long exposure |
 | `trading/position.py` | Position lifecycle (open/close/update stop/target) |
-| `trading/risk_rules.py` | Portfolio risk checks (drawdown, concentration, cooldown) |
 | `trading/sizing.py` | Kelly criterion + bounded sizing |
 | `persistence/sqlite.py` | SQLite adapter (WAL, reader + writer) |
-| `trading/reconciler.py` | Kraken vs recorded state reconciliation |
-| `web/app.py` | FastAPI + SSE local dashboard |
+| `web/app.py` | FastAPI + SSE + static file serving |
 
 ## Environment
 
