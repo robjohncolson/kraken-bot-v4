@@ -1,0 +1,149 @@
+{
+  "schema_version": "build-manifest/v1",
+  "project": "kraken-bot-v4",
+  "phase": {
+    "id": "10",
+    "name": "Research Dataset Export",
+    "spec_ref": "docs/specs/autoresearch-trading-implementation-checklist.md#Phase 1: Define the Research Dataset",
+    "created_at": "2026-03-25T19:00:00-04:00",
+    "created_by": "claude-code"
+  },
+  "global_constraints": {
+    "max_attempts_per_task": 3,
+    "max_files_changed_per_task": 10,
+    "module_line_cap": 500,
+    "typed_exceptions_only": true,
+    "frozen_dataclasses_preferred": true,
+    "no_git_push": true
+  },
+  "tasks": [
+    {
+      "id": "10.1",
+      "description": "Create research module scaffold and OHLCV history fetcher with timestamps and pagination support.",
+      "acceptance_criteria": [
+        "research/__init__.py exists as module root.",
+        "research/ohlcv_history.py provides fetch_ohlcv_history(pair, interval, since) returning a DataFrame with timestamp, open, high, low, close, volume columns.",
+        "Timestamps are Unix epoch integers in the DataFrame index or column.",
+        "Pagination support: fetches multiple pages via Kraken since parameter to cover arbitrary date ranges.",
+        "Reuses exchange/ohlcv.py's kraken_pair_name for pair normalization.",
+        "Tests cover single-page fetch, pagination, and error handling with mocked HTTP."
+      ],
+      "owned_paths": [
+        "research/__init__.py",
+        "research/ohlcv_history.py",
+        "tests/research/__init__.py",
+        "tests/research/test_ohlcv_history.py"
+      ],
+      "dependencies": [],
+      "status": "pending",
+      "test_targets": [
+        "tests/research/test_ohlcv_history.py"
+      ]
+    },
+    {
+      "id": "10.2",
+      "description": "Create SQLite research reader for offline dataset export from fills, orders, and closed positions.",
+      "acceptance_criteria": [
+        "research/db_reader.py provides ResearchReader class that reads from an existing SQLite database.",
+        "Methods: fetch_fills() returns DataFrame with pair, side, quantity, price, fee, filled_at columns.",
+        "Methods: fetch_orders() returns DataFrame with order_id, pair, position_id, exchange_order_id, client_order_id, recorded_fee, created_at.",
+        "Methods: fetch_closed_trades() returns DataFrame with position_id, pair, created_at, closed_at.",
+        "Uses persistence/sqlite.py's open_database for connection management.",
+        "Tests use an in-memory SQLite database with known test data."
+      ],
+      "owned_paths": [
+        "research/db_reader.py",
+        "tests/research/test_db_reader.py"
+      ],
+      "dependencies": [],
+      "status": "pending",
+      "test_targets": [
+        "tests/research/test_db_reader.py"
+      ]
+    },
+    {
+      "id": "10.3",
+      "description": "Implement forward-looking label computation from OHLCV data.",
+      "acceptance_criteria": [
+        "research/labels.py provides compute_labels(ohlcv_df, horizons=[6,12]) returning a DataFrame.",
+        "Label columns: return_sign_6h, return_sign_12h, return_bps_6h, return_bps_12h, regime_label.",
+        "return_sign is 1 for positive, -1 for negative, 0 for zero return.",
+        "return_bps is the return in basis points (100 * pct_return).",
+        "regime_label is derived from realized volatility: low/medium/high.",
+        "Labels at row t use only close prices at t+horizon — this is the forward-looking ground truth, not a feature.",
+        "Rows where the horizon extends beyond available data have NaN labels.",
+        "Tests verify label correctness on synthetic OHLCV data and NaN handling at boundaries."
+      ],
+      "owned_paths": [
+        "research/labels.py",
+        "tests/research/test_labels.py"
+      ],
+      "dependencies": [],
+      "status": "pending",
+      "test_targets": [
+        "tests/research/test_labels.py"
+      ]
+    },
+    {
+      "id": "10.4",
+      "description": "Build dataset builder that assembles market features and labels into versioned Parquet files.",
+      "acceptance_criteria": [
+        "research/dataset_builder.py provides DatasetBuilder class.",
+        "build_dataset(pair, interval, since, until) method orchestrates OHLCV fetch, DB read, label computation.",
+        "Features DataFrame includes only point-in-time data: OHLCV columns plus any trade-derived features available at time t.",
+        "No feature uses future data — features at row t use only data at or before t.",
+        "Outputs market_v1.parquet and labels_v1.parquet to a configurable output directory.",
+        "Outputs manifest_v1.json with schema version, pair, interval, row count, date range, and generation timestamp.",
+        "Tests verify Parquet output structure, manifest content, and deterministic output for identical inputs."
+      ],
+      "owned_paths": [
+        "research/dataset_builder.py",
+        "tests/research/test_dataset_builder.py"
+      ],
+      "dependencies": ["10.1", "10.2", "10.3"],
+      "status": "pending",
+      "test_targets": [
+        "tests/research/test_dataset_builder.py"
+      ]
+    },
+    {
+      "id": "10.5",
+      "description": "Add CLI entrypoint for running the dataset export.",
+      "acceptance_criteria": [
+        "research/cli.py is runnable as python -m research.cli or python research/cli.py.",
+        "Accepts --pair, --interval, --since, --output-dir arguments.",
+        "Defaults: pair=DOGE/USD, interval=60, output-dir=data/research.",
+        "Prints summary of exported dataset (row count, date range, output paths).",
+        "Test verifies CLI argument parsing and that main() calls DatasetBuilder correctly."
+      ],
+      "owned_paths": [
+        "research/cli.py",
+        "tests/research/test_cli.py"
+      ],
+      "dependencies": ["10.4"],
+      "status": "pending",
+      "test_targets": [
+        "tests/research/test_cli.py"
+      ]
+    },
+    {
+      "id": "10.6",
+      "description": "Add integration test for determinism and point-in-time correctness.",
+      "acceptance_criteria": [
+        "tests/research/test_integration.py runs a full build_dataset cycle on synthetic data.",
+        "Verifies that running the builder twice on identical input produces byte-identical Parquet files.",
+        "Verifies that no label column value at row t depends on OHLCV data after row t (point-in-time test).",
+        "Verifies manifest_v1.json contains expected metadata fields.",
+        "All existing tests still pass."
+      ],
+      "owned_paths": [
+        "tests/research/test_integration.py"
+      ],
+      "dependencies": ["10.4", "10.5"],
+      "status": "pending",
+      "test_targets": [
+        "tests/research/test_integration.py"
+      ]
+    }
+  ]
+}
