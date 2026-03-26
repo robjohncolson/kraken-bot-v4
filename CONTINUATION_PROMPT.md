@@ -11,9 +11,9 @@
 - **No Supabase** in runtime path (legacy code retained, not used)
 - **No Railway** (dashboard is local)
 
-## What to do NOW: Phase 5 — Qwen Research Path
+## What to do NOW: Feature engineering and better baselines
 
-Phases 0-4 are complete. TUI operator cockpit is complete (v1 read-only). The next milestone is Phase 5: adding a Qwen-class model as a structured forecast candidate in the evaluation harness.
+Phases 0-5a are complete. The LLM path is proven infrastructure but does not beat logistic regression. Next research effort should focus on feature engineering, calibration, and stronger baselines — not LLM tuning.
 
 ### TUI Operator Cockpit (v1, completed 2026-03-26)
 
@@ -44,6 +44,7 @@ Tests: 54 new tests (state parsers, SSE parser, theme helpers, Textual app navig
 - **Phase 2**: walk-forward evaluation harness in autoresearch (`trading_eval/` package)
 - **Phase 3**: baselines established (TA ensemble, logistic regression, GBT)
 - **Phase 4**: artifact contract defined, synced to kraken-bot-v4
+- **Phase 5a**: LLM candidate evaluated — logistic regression wins (see below)
 
 ### Phase 2 deliverables (in autoresearch)
 
@@ -67,14 +68,37 @@ Tests: 54 new tests (state parsers, SSE parser, theme helpers, Textual app navig
 - `trading_eval/artifact.py` — ArtifactManifest + promote_candidate()
 - `kraken-bot-v4/docs/specs/artifact-contract-v1.md` — consumer interface spec
 
-### Phase 5 scope
+### Phase 5a result (evaluated 2026-03-26)
 
-Add Qwen structured forecast candidate in autoresearch:
-- Structured inference format (direction, confidence, regime, horizon_hours)
-- Constrained JSON output, no free-form text
-- Evaluate prompt-only and fine-tuned variants separately
-- Calibrate confidence after raw model scoring
-- Only promote if it beats simpler baselines out of sample
+**Model**: qwen3:8b (Q4_K_M, 5.2GB) via IPEX-Ollama 0.9.3 with Intel Arc GPU (SYCL/oneAPI)
+**Runtime**: ~21s per inference call on Intel Arc iGPU, GPU-accelerated via IPEX-LLM
+**Contract**: direction/confidence/prob_up/horizon_hours=6, Ollama JSON mode
+**Decision cadence**: 6h (one prediction per horizon period, no overcounting)
+
+Walk-forward results (5-fold, 10d train, 1d val, 5d step, DOGE/USD):
+
+| Candidate | Accuracy | Net P&L (bps) | Sharpe | Hit Rate | Trades |
+|-----------|----------|---------------|--------|----------|--------|
+| Logistic regression | 67.6% | +2,838 | 29.6 | 63.2% | 68 |
+| LLM (Qwen3 8B) | 62.5% | -167 | -9.3 | 50.0% | 8 |
+| GBT | 44.3% | -2,732 | -19.5 | 43.2% | 88 |
+| TA ensemble | 0% | 0 | 0 | 0% | 0 |
+
+**Verdict**: Prompted LLM does not beat logistic regression. Infrastructure is proven (structured output works, GPU path viable, contract enforced), but there is no signal advantage. TA ensemble produces 0 trades on this window size (needs 40 bars history, validation window too short).
+
+**Decision**:
+- Logistic regression is the incumbent research winner
+- LLM candidate remains as proven infrastructure for future use
+- Phase 5b (fine-tuning) is paused — not justified by current results
+- Next research effort: feature engineering, calibration, stronger baselines
+
+### Recommended next research directions
+
+1. **Feature engineering**: add more engineered features to the sklearn baselines (momentum indicators, volatility regimes, volume profiles, cross-timeframe features)
+2. **Calibration**: apply Platt scaling or isotonic regression to baseline probability outputs
+3. **Longer evaluation windows**: run with more data (90d train, broader date range)
+4. **Fix TA ensemble**: pass training tail to predict() so it has enough history for signals
+5. **Only revisit LLM if**: feature-enriched prompt or news/sentiment data gives a fundamentally different input than raw OHLCV
 
 ### What the bot can do now
 
@@ -126,48 +150,43 @@ python main.py
 - **Research specs** ✅ Codex-authored integration spec + implementation checklist
 - **Phase 1** ✅ Research dataset export (OHLCV history, DB reader, labels, builder, CLI, 34 tests)
 
-## Session Commits (2026-03-25, Phase 2-4 build)
+## Session Commits (2026-03-26, Phase 5a evaluation)
 
 ### kraken-bot-v4
 ```
-3682eb0 docs(phase-4): add artifact contract v1 for research model integration
+a584999 fix: deduplicate OHLCV timestamps across pagination boundaries
 ```
 
 ### autoresearch
 ```
-6398c0e build(phase-4): add artifact schema, promotion workflow, and CLI commands
-6aa2636 build(phase-3): add baseline runner script with comparison table
-f7f36f0 build(phase-3): add logistic regression and GBT baselines
-1fa40ab build(phase-3): add standalone TA ensemble baseline with parity test
-29f82c4 build(phase-2): add CLI with run/list/compare subcommands
-f6b7925 build(phase-2): add experiment storage with reproducibility metadata
-ac5badd build(phase-2): add experiment runner with walk-forward orchestration
-3869f5c build(phase-2): add metrics computation (accuracy, Brier, P&L, Sharpe, drawdown)
-5948bc3 build(phase-2): add backtest engine with fees, slippage, and abstain support
-4aca055 build(phase-2): add candidate protocol with timestamp-keyed predictions
-001ec27 build(phase-2): add walk-forward time-series splitter
-f9ce514 build(phase-2): add trading_eval package skeleton with config and data loader
+4dbb288 build(phase-5a): complete LLM evaluation — logistic regression wins
+2697633 build(phase-5a): upgrade default LLM to qwen3.5:9b
+b732d54 build(phase-5a): add LLM candidate via Ollama with 6h decision cadence
 ```
 
-### Previous sessions (kraken-bot-v4)
+### Previous sessions
 ```
-0fd6afc build(phase-10): implement research dataset export module
-eb0cd77 build: add phase-10 manifest for research dataset export
-dcf75da fix: make build harness runner path configurable via CROSS_AGENT_RUNNER env
-689c3c1 build: serve dashboard HTML + add autoresearch integration specs
-eca8508 refactor: rename autoresearch to technical_ensemble (Phase 0)
+# autoresearch (Phase 2-4, 2026-03-25)
+6398c0e build(phase-4): add artifact schema, promotion workflow, and CLI commands
+6aa2636..f9ce514 build(phase-2/3): walk-forward harness, baselines, storage, CLI
+
+# kraken-bot-v4 (Phase 2-4 + TUI, 2026-03-25/26)
+94a10ce docs: update continuation prompt after Phases 2-4 completion
+3682eb0 docs(phase-4): add artifact contract v1 for research model integration
 ```
 
 ## Current State
 
-- **kraken-bot-v4 branch**: master, at `3682eb0`
-- **autoresearch branch**: master, at `6398c0e`
+- **kraken-bot-v4 branch**: master, at `a584999`
+- **autoresearch branch**: master, at `4dbb288`
 - **kraken-bot-v4 tests**: 447 passed (393 existing + 54 TUI), ruff clean
-- **autoresearch tests**: 102 passed, 11 skipped (parity tests, Python 3.10 vs 3.11)
+- **autoresearch tests**: 119 passed, 11 skipped (parity tests, Python 3.10 vs 3.11)
 - **Trading bot**: unchanged, still live-capable with TA ensemble beliefs
-- **Evaluation harness**: fully operational in autoresearch
-- **Baselines**: TA ensemble, logistic regression, GBT — all runnable
+- **Evaluation harness**: fully operational with 4 candidates (TA, LogReg, GBT, LLM)
+- **Incumbent winner**: logistic regression (+2,838 bps, 67.6% accuracy, Sharpe 29.6)
+- **LLM path**: proven infrastructure, does not beat LogReg, Phase 5b paused
 - **Artifact contract**: defined and synced to kraken-bot-v4
+- **IPEX-Ollama**: working at `C:\Users\rober\ipex-ollama\` with Intel Arc GPU acceleration
 
 ## Key Paths
 
