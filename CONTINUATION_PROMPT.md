@@ -11,24 +11,33 @@
 - **No Supabase** in runtime path (legacy code retained, not used)
 - **No Railway** (dashboard is local)
 
-## What to do NOW: Phase 1 — Research Dataset Export
+## What to do NOW: Phase 2 — Evaluation Harness
 
-The live bot is running with reducer, belief polling, and spot inventory management. The next milestone is building the research dataset for the autoresearch integration.
+Phase 1 (Research Dataset Export) is complete. The next milestone is building the walk-forward evaluation harness in `..\autoresearch`.
 
 ### What exists
 
 - `docs/specs/autoresearch-trading-research-spec.md` — full spec for offline research loop
 - `docs/specs/autoresearch-trading-implementation-checklist.md` — phased checklist
 - Phase 0 complete: renamed `autoresearch_source` → `technical_ensemble_source`
+- **Phase 1 complete**: `research/` module exports versioned Parquet datasets with labels
 
-### Phase 1 scope
+### Phase 1 deliverables (done)
 
-Build a dataset builder that exports time-indexed samples from:
-- Kraken OHLCV history (via `exchange/ohlcv.py:fetch_ohlcv`)
-- Local DB orders/fills/closed trades (via `persistence/sqlite.py`)
-- Labels: `return_sign_6h`, `return_sign_12h`, `return_bps_6h`, `return_bps_12h`, `regime_label`
+- `research/ohlcv_history.py` — paginated Kraken OHLCV fetch with timestamps
+- `research/db_reader.py` — SQLite reader for fills, orders, closed trades
+- `research/labels.py` — forward-looking labels (return_sign/bps 6h/12h, regime_label)
+- `research/dataset_builder.py` — orchestrates export to Parquet + manifest
+- `research/cli.py` — CLI: `python -m research.cli --pair DOGE/USD --since <ts>`
+- 34 tests covering determinism, point-in-time correctness, label computation
 - Output: `data/research/market_v1.parquet`, `labels_v1.parquet`, `manifest_v1.json`
-- No feature may use future data
+
+### Phase 2 scope
+
+Build walk-forward evaluator in `..\autoresearch`:
+- Rolling train/validate windows (30-180 day train, 1-5 day validate)
+- Backtest scoring with fees, slippage, abstain support
+- Metrics: direction accuracy, Brier score, MAE, net P&L, max drawdown, Sharpe
 
 ### What the bot can do now
 
@@ -77,10 +86,15 @@ python main.py
 - **Dashboard** ✅ HTML served at /, SSE real-time updates
 - **Phase 0** ✅ Renamed autoresearch → technical_ensemble
 - **Research specs** ✅ Codex-authored integration spec + implementation checklist
+- **Phase 1** ✅ Research dataset export (OHLCV history, DB reader, labels, builder, CLI, 34 tests)
 
 ## Session Commits (2026-03-25)
 
 ```
+0fd6afc build(phase-10): implement research dataset export module
+eb0cd77 build: add phase-10 manifest for research dataset export
+dcf75da fix: make build harness runner path configurable via CROSS_AGENT_RUNNER env
+72a8d0d docs: update continuation prompt after full session
 689c3c1 build: serve dashboard HTML + add autoresearch integration specs
 eca8508 refactor: rename autoresearch to technical_ensemble (Phase 0)
 48a8385 build: add spot inventory management for bearish DOGE sells
@@ -100,8 +114,8 @@ b9d6ee8-43b86ad build(phase-7): Mutations
 
 ## Current State
 
-- **Branch**: master, at `689c3c1`
-- **Tests**: 359 passed, ruff clean
+- **Branch**: master, at `0fd6afc`
+- **Tests**: 393 passed, ruff clean
 - **Kraken account**: ~5,522 DOGE, $0.009 USD (dust), 0 open orders
 - **Reducer**: LIVE — all 7 event handlers, spot inventory sell, structured PendingOrder
 - **Runtime**: Fully wired — effects dispatch, WS fills → reducer, belief polling
@@ -134,6 +148,12 @@ b9d6ee8-43b86ad build(phase-7): Mutations
 | `trading/position.py` | Position lifecycle (open/close/update stop/target) |
 | `trading/sizing.py` | Kelly criterion + bounded sizing |
 | `persistence/sqlite.py` | SQLite adapter (WAL, reader + writer) |
+| `research/ohlcv_history.py` | Paginated Kraken OHLCV fetch with timestamps |
+| `research/db_reader.py` | SQLite reader for fills/orders/closed trades (research) |
+| `research/labels.py` | Forward-looking labels (return_sign/bps, regime) |
+| `research/dataset_builder.py` | Orchestrates Parquet + manifest export |
+| `research/cli.py` | CLI: python -m research.cli |
+| `build/manifests/phase-10.research-dataset.json` | Phase 10 task manifest |
 | `web/app.py` | FastAPI + SSE + static file serving |
 
 ## Environment
