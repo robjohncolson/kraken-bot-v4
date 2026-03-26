@@ -28,15 +28,15 @@ BOLLINGER_PERCENTILE: Final[float] = 85.0
 MIN_REQUIRED_BARS: Final[int] = 40
 
 
-class AutoResearchError(ValueError):
-    """Base exception for auto-research signal evaluation failures."""
+class TechnicalEnsembleError(ValueError):
+    """Base exception for technical-ensemble signal evaluation failures."""
 
 
-class AutoResearchInputError(AutoResearchError):
+class TechnicalEnsembleInputError(TechnicalEnsembleError):
     """Raised when OHLCV input data is missing or malformed."""
 
 
-class MissingOHLCVColumnsError(AutoResearchInputError):
+class MissingOHLCVColumnsError(TechnicalEnsembleInputError):
     """Raised when required OHLCV columns are absent."""
 
     def __init__(self, missing_columns: tuple[str, ...]) -> None:
@@ -45,19 +45,19 @@ class MissingOHLCVColumnsError(AutoResearchInputError):
         super().__init__(f"OHLCV bars are missing required columns: {formatted}")
 
 
-class InsufficientBarDataError(AutoResearchInputError):
+class InsufficientBarDataError(TechnicalEnsembleInputError):
     """Raised when the provided bar series is too short for the indicator."""
 
     def __init__(self, minimum_bars: int, actual_bars: int) -> None:
         self.minimum_bars = minimum_bars
         self.actual_bars = actual_bars
         super().__init__(
-            f"Auto-research requires at least {minimum_bars} bars; got {actual_bars}."
+            f"Technical ensemble requires at least {minimum_bars} bars; got {actual_bars}."
         )
 
 
 @dataclass(frozen=True, slots=True)
-class AutoResearchSignals:
+class TechnicalEnsembleSignals:
     momentum_12h: bool
     momentum_6h: bool
     ema_crossover: bool
@@ -88,12 +88,12 @@ class AutoResearchSignals:
         return max(self.bullish_count, self.bearish_count)
 
 
-class AutoResearchSource:
-    """Pure-Python adapter for the 6-signal auto-research ensemble."""
+class TechnicalEnsembleSource:
+    """Pure-Python adapter for the fixed 6-signal technical ensemble."""
 
     def __init__(self, min_bars: int = MIN_REQUIRED_BARS) -> None:
         if min_bars < BOLLINGER_WINDOW:
-            raise AutoResearchInputError(
+            raise TechnicalEnsembleInputError(
                 f"min_bars must be at least {BOLLINGER_WINDOW}; got {min_bars}."
             )
         self.min_bars = min_bars
@@ -102,9 +102,9 @@ class AutoResearchSource:
         signals = self.compute_signals(bars)
         return self.build_snapshot(pair=pair, signals=signals)
 
-    def compute_signals(self, bars: pd.DataFrame) -> AutoResearchSignals:
+    def compute_signals(self, bars: pd.DataFrame) -> TechnicalEnsembleSignals:
         close = self._extract_close_series(bars, minimum_bars=self.min_bars)
-        return AutoResearchSignals(
+        return TechnicalEnsembleSignals(
             momentum_12h=self.signal_12h_momentum(close),
             momentum_6h=self.signal_6h_momentum(close),
             ema_crossover=self.signal_ema_crossover(close),
@@ -116,7 +116,7 @@ class AutoResearchSource:
     def build_snapshot(
         self,
         pair: str,
-        signals: AutoResearchSignals,
+        signals: TechnicalEnsembleSignals,
     ) -> BeliefSnapshot:
         bullish_count = signals.bullish_count
         bearish_count = signals.bearish_count
@@ -140,7 +140,7 @@ class AutoResearchSource:
             direction=direction,
             confidence=confidence,
             regime=regime,
-            sources=(BeliefSource.AUTORESEARCH,),
+            sources=(BeliefSource.TECHNICAL_ENSEMBLE,),
         )
 
     def signal_12h_momentum(self, close: pd.Series) -> bool:
@@ -203,7 +203,9 @@ class AutoResearchSource:
         minimum_bars: int,
     ) -> pd.Series:
         if not isinstance(bars, pd.DataFrame):
-            raise AutoResearchInputError("bars must be a pandas DataFrame containing OHLCV data.")
+            raise TechnicalEnsembleInputError(
+                "bars must be a pandas DataFrame containing OHLCV data."
+            )
 
         missing_columns = tuple(
             column for column in OHLCV_COLUMNS if column not in bars.columns
@@ -223,18 +225,18 @@ class AutoResearchSource:
         if len(series) < minimum_bars:
             raise InsufficientBarDataError(minimum_bars, len(series))
         if series.isna().any():
-            raise AutoResearchInputError("close prices must be numeric and non-null.")
+            raise TechnicalEnsembleInputError("close prices must be numeric and non-null.")
         if (series <= 0.0).any():
-            raise AutoResearchInputError("close prices must be positive.")
+            raise TechnicalEnsembleInputError("close prices must be positive.")
 
         return series
 
 
 __all__ = [
-    "AutoResearchError",
-    "AutoResearchInputError",
-    "AutoResearchSignals",
-    "AutoResearchSource",
+    "TechnicalEnsembleError",
+    "TechnicalEnsembleInputError",
+    "TechnicalEnsembleSignals",
+    "TechnicalEnsembleSource",
     "InsufficientBarDataError",
     "MissingOHLCVColumnsError",
     "OHLCV_COLUMNS",

@@ -33,7 +33,7 @@ class BeliefDirection(StrEnum):
 class BeliefSource(StrEnum):
     CLAUDE = "claude"
     CODEX = "codex"
-    AUTORESEARCH = "autoresearch"
+    TECHNICAL_ENSEMBLE = "technical_ensemble"
 
 
 class MarketRegime(StrEnum):

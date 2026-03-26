@@ -7,8 +7,8 @@
   }
   root.BeliefMatrixChart = factory(root);
 })(typeof globalThis !== "undefined" ? globalThis : this, function createBeliefMatrixModule(globalRoot) {
-  const SOURCE_ORDER = ["claude", "codex", "autoresearch"];
-  const SOURCE_LABELS = { claude: "Claude", codex: "Codex", autoresearch: "Auto" };
+  const SOURCE_ORDER = ["claude", "codex", "technical_ensemble"];
+  const SOURCE_LABELS = { claude: "Claude", codex: "Codex", technical_ensemble: "Tech" };
   const CHARTS = new WeakMap();
   const D3_CDN = "https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js";
   let d3Requested = false;

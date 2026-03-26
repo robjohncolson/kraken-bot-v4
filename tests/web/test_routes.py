@@ -115,7 +115,7 @@ def _dashboard_state() -> DashboardState:
             ),
             BeliefEntry(
                 pair="DOGE/USD",
-                source=BeliefSource.AUTORESEARCH,
+                source=BeliefSource.TECHNICAL_ENSEMBLE,
                 direction=BeliefDirection.NEUTRAL,
                 confidence=0.55,
                 regime=MarketRegime.UNKNOWN,
@@ -195,7 +195,7 @@ def test_beliefs_endpoint_returns_latest_beliefs_grouped_by_pair_and_source() ->
     body = response.json()
     assert body["beliefs"]["BTC/USD"]["claude"]["direction"] == "bullish"
     assert body["beliefs"]["BTC/USD"]["codex"]["confidence"] == 0.8
-    assert body["beliefs"]["DOGE/USD"]["autoresearch"]["direction"] == "neutral"
+    assert body["beliefs"]["DOGE/USD"]["technical_ensemble"]["direction"] == "neutral"
 
 
 def test_stats_endpoint_returns_placeholder_strategy_statistics() -> None:

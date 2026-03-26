@@ -1,23 +1,23 @@
-"""Belief refresh handler backed by AutoResearchSource + Kraken OHLCV."""
+"""Belief refresh handler backed by the fixed technical ensemble + Kraken OHLCV."""
 
 from __future__ import annotations
 
 import logging
 
-from beliefs.autoresearch_source import AutoResearchSource
+from beliefs.technical_ensemble_source import TechnicalEnsembleSource
 from core.types import BeliefSnapshot
 from exchange.ohlcv import OHLCVFetchError, fetch_ohlcv
 from scheduler import BeliefRefreshRequest
 
 logger = logging.getLogger(__name__)
 
-_source = AutoResearchSource()
+_source = TechnicalEnsembleSource()
 
 
-def autoresearch_belief_handler(
+def technical_ensemble_belief_handler(
     request: BeliefRefreshRequest,
 ) -> BeliefSnapshot | None:
-    """Fetch OHLCV from Kraken, run AutoResearch, return a BeliefSnapshot."""
+    """Fetch OHLCV from Kraken, run the technical ensemble, return a belief."""
     pair = request.pair
     try:
         bars = fetch_ohlcv(pair, interval=60, count=50)
@@ -45,8 +45,8 @@ def autoresearch_belief_handler(
     return snapshot
 
 
-def generate_belief(pair: str) -> BeliefSnapshot | None:
-    """Standalone belief generation for a pair (used by periodic poll)."""
+def generate_technical_belief(pair: str) -> BeliefSnapshot | None:
+    """Standalone technical-ensemble belief generation for a pair."""
     try:
         bars = fetch_ohlcv(pair, interval=60, count=50)
     except OHLCVFetchError as exc:
@@ -74,6 +74,6 @@ def generate_belief(pair: str) -> BeliefSnapshot | None:
 
 
 __all__ = [
-    "autoresearch_belief_handler",
-    "generate_belief",
+    "technical_ensemble_belief_handler",
+    "generate_technical_belief",
 ]

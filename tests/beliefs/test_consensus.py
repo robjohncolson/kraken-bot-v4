@@ -41,7 +41,7 @@ def test_compute_consensus_returns_unanimous_agreement() -> None:
         make_snapshot(BeliefSource.CLAUDE, BeliefDirection.BULLISH, 1.0, MarketRegime.TRENDING),
         make_snapshot(BeliefSource.CODEX, BeliefDirection.BULLISH, 1.0, MarketRegime.TRENDING),
         make_snapshot(
-            BeliefSource.AUTORESEARCH,
+            BeliefSource.TECHNICAL_ENSEMBLE,
             BeliefDirection.BULLISH,
             1.0,
             MarketRegime.RANGING,
@@ -62,7 +62,7 @@ def test_compute_consensus_returns_two_of_three_split() -> None:
         make_snapshot(BeliefSource.CLAUDE, BeliefDirection.BULLISH, 1.0, MarketRegime.TRENDING),
         make_snapshot(BeliefSource.CODEX, BeliefDirection.BULLISH, 1.0, MarketRegime.RANGING),
         make_snapshot(
-            BeliefSource.AUTORESEARCH,
+            BeliefSource.TECHNICAL_ENSEMBLE,
             BeliefDirection.BEARISH,
             1.0,
             MarketRegime.TRENDING,
@@ -82,7 +82,7 @@ def test_compute_consensus_returns_neutral_for_three_way_split() -> None:
     snapshots = [
         make_snapshot(BeliefSource.CLAUDE, BeliefDirection.BULLISH, 1.0, MarketRegime.TRENDING),
         make_snapshot(BeliefSource.CODEX, BeliefDirection.BEARISH, 1.0, MarketRegime.RANGING),
-        make_snapshot(BeliefSource.AUTORESEARCH, BeliefDirection.NEUTRAL, 1.0),
+        make_snapshot(BeliefSource.TECHNICAL_ENSEMBLE, BeliefDirection.NEUTRAL, 1.0),
     ]
 
     result = compute_consensus(snapshots)
@@ -128,7 +128,7 @@ def test_compute_consensus_weights_strength_by_agreeing_confidence() -> None:
         make_snapshot(BeliefSource.CLAUDE, BeliefDirection.BULLISH, 0.9, MarketRegime.TRENDING),
         make_snapshot(BeliefSource.CODEX, BeliefDirection.BULLISH, 0.6, MarketRegime.TRENDING),
         make_snapshot(
-            BeliefSource.AUTORESEARCH,
+            BeliefSource.TECHNICAL_ENSEMBLE,
             BeliefDirection.BEARISH,
             0.2,
             MarketRegime.UNKNOWN,

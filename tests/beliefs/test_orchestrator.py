@@ -52,9 +52,9 @@ def test_run_belief_cycle_returns_consensus_when_all_sources_agree() -> None:
     codex = make_source(
         make_snapshot(BeliefSource.CODEX, BeliefDirection.BULLISH, 0.8, MarketRegime.TRENDING)
     )
-    autoresearch = make_source(
+    technical_ensemble = make_source(
         make_snapshot(
-            BeliefSource.AUTORESEARCH,
+            BeliefSource.TECHNICAL_ENSEMBLE,
             BeliefDirection.BULLISH,
             0.7,
             MarketRegime.RANGING,
@@ -64,7 +64,7 @@ def test_run_belief_cycle_returns_consensus_when_all_sources_agree() -> None:
         {
             BeliefSource.CLAUDE: claude,
             BeliefSource.CODEX: codex,
-            BeliefSource.AUTORESEARCH: autoresearch,
+            BeliefSource.TECHNICAL_ENSEMBLE: technical_ensemble,
         },
         clock=lambda: timestamp,
     )
@@ -76,7 +76,7 @@ def test_run_belief_cycle_returns_consensus_when_all_sources_agree() -> None:
     assert result.stale is False
     assert result.source_beliefs[BeliefSource.CLAUDE] is not None
     assert result.source_beliefs[BeliefSource.CODEX] is not None
-    assert result.source_beliefs[BeliefSource.AUTORESEARCH] is not None
+    assert result.source_beliefs[BeliefSource.TECHNICAL_ENSEMBLE] is not None
     assert result.consensus.agreed_direction is BeliefDirection.BULLISH
     assert result.consensus.agreement_count == 3
     assert result.consensus.total_sources == 3
@@ -85,7 +85,7 @@ def test_run_belief_cycle_returns_consensus_when_all_sources_agree() -> None:
 
     claude.analyze.assert_called_once_with("DOGE/USD")
     codex.analyze.assert_called_once_with("DOGE/USD")
-    autoresearch.analyze.assert_called_once_with("DOGE/USD")
+    technical_ensemble.analyze.assert_called_once_with("DOGE/USD")
 
 
 def test_run_belief_cycle_returns_two_of_three_consensus() -> None:
@@ -95,9 +95,9 @@ def test_run_belief_cycle_returns_two_of_three_consensus() -> None:
     codex = make_source(
         make_snapshot(BeliefSource.CODEX, BeliefDirection.BULLISH, 0.5, MarketRegime.RANGING)
     )
-    autoresearch = make_source(
+    technical_ensemble = make_source(
         make_snapshot(
-            BeliefSource.AUTORESEARCH,
+            BeliefSource.TECHNICAL_ENSEMBLE,
             BeliefDirection.BEARISH,
             0.4,
             MarketRegime.TRENDING,
@@ -107,7 +107,7 @@ def test_run_belief_cycle_returns_two_of_three_consensus() -> None:
         {
             "claude": claude,
             "codex": codex,
-            "autoresearch": autoresearch,
+            "technical_ensemble": technical_ensemble,
         }
     )
 
@@ -125,12 +125,12 @@ def test_run_belief_cycle_is_inconclusive_when_all_sources_fail(
 ) -> None:
     claude = make_source(None)
     codex = make_source(None)
-    autoresearch = make_source(None)
+    technical_ensemble = make_source(None)
     orchestrator = BeliefOrchestrator(
         {
             BeliefSource.CLAUDE: claude,
             BeliefSource.CODEX: codex,
-            BeliefSource.AUTORESEARCH: autoresearch,
+            BeliefSource.TECHNICAL_ENSEMBLE: technical_ensemble,
         }
     )
 
@@ -139,7 +139,7 @@ def test_run_belief_cycle_is_inconclusive_when_all_sources_fail(
 
     assert result.source_beliefs[BeliefSource.CLAUDE] is None
     assert result.source_beliefs[BeliefSource.CODEX] is None
-    assert result.source_beliefs[BeliefSource.AUTORESEARCH] is None
+    assert result.source_beliefs[BeliefSource.TECHNICAL_ENSEMBLE] is None
     assert result.consensus.agreed_direction is BeliefDirection.NEUTRAL
     assert result.consensus.agreement_count == 0
     assert result.consensus.total_sources == 0
@@ -147,7 +147,7 @@ def test_run_belief_cycle_is_inconclusive_when_all_sources_fail(
     assert result.consensus.regime is MarketRegime.UNKNOWN
     assert "claude" in caplog.text
     assert "codex" in caplog.text
-    assert "autoresearch" in caplog.text
+    assert "technical_ensemble" in caplog.text
 
 
 def test_run_belief_cycle_excludes_failed_sources_from_consensus_and_routes_inputs(
@@ -158,9 +158,9 @@ def test_run_belief_cycle_excludes_failed_sources_from_consensus_and_routes_inpu
         make_snapshot(BeliefSource.CLAUDE, BeliefDirection.BULLISH, 0.8, MarketRegime.TRENDING)
     )
     codex = make_source(None)
-    autoresearch = make_source(
+    technical_ensemble = make_source(
         make_snapshot(
-            BeliefSource.AUTORESEARCH,
+            BeliefSource.TECHNICAL_ENSEMBLE,
             BeliefDirection.BULLISH,
             0.6,
             MarketRegime.RANGING,
@@ -170,7 +170,7 @@ def test_run_belief_cycle_excludes_failed_sources_from_consensus_and_routes_inpu
         {
             BeliefSource.CLAUDE: claude,
             BeliefSource.CODEX: codex,
-            BeliefSource.AUTORESEARCH: autoresearch,
+            BeliefSource.TECHNICAL_ENSEMBLE: technical_ensemble,
         },
         clock=lambda: timestamp,
     )
@@ -181,7 +181,7 @@ def test_run_belief_cycle_excludes_failed_sources_from_consensus_and_routes_inpu
             source_inputs={
                 BeliefSource.CLAUDE: {"recent_trade_history_summary": "Two wins."},
                 BeliefSource.CODEX: {"recent_trade_history_summary": "Two wins."},
-                BeliefSource.AUTORESEARCH: {"bars": "mock-bars"},
+                BeliefSource.TECHNICAL_ENSEMBLE: {"bars": "mock-bars"},
             },
         )
 
@@ -204,7 +204,7 @@ def test_run_belief_cycle_excludes_failed_sources_from_consensus_and_routes_inpu
         "DOGE/USD",
         recent_trade_history_summary="Two wins.",
     )
-    autoresearch.analyze.assert_called_once_with(
+    technical_ensemble.analyze.assert_called_once_with(
         "DOGE/USD",
         bars="mock-bars",
     )
