@@ -38,9 +38,9 @@
     },
     {
       "id": "3.2",
-      "description": "Create auto-research source adapter in beliefs/autoresearch_source.py that computes the 6-signal ensemble.",
+      "description": "Create technical-ensemble source adapter in beliefs/technical_ensemble_source.py that computes the 6-signal ensemble.",
       "acceptance_criteria": [
-        "AutoResearchSource class takes OHLCV bar data and returns a BeliefSnapshot (from core.types).",
+        "TechnicalEnsembleSource class takes OHLCV bar data and returns a BeliefSnapshot (from core.types).",
         "Implements the 6-signal ensemble: 12h momentum, 6h momentum, EMA(7) vs EMA(26) crossover, RSI(8) > 50, MACD(14,23,9) histogram > 0, Bollinger Band width < 85th percentile.",
         "Majority vote (4/6) determines direction (bullish/bearish/neutral).",
         "Confidence is proportional to signal agreement count (4/6=0.67, 5/6=0.83, 6/6=1.0).",
@@ -48,13 +48,13 @@
         "Tests verify each signal independently and the ensemble vote with known data."
       ],
       "owned_paths": [
-        "beliefs/autoresearch_source.py",
-        "tests/beliefs/test_autoresearch.py"
+        "beliefs/technical_ensemble_source.py",
+        "tests/beliefs/test_technical_ensemble.py"
       ],
       "dependencies": [],
       "status": "pending",
       "test_targets": [
-        "tests/beliefs/test_autoresearch.py"
+        "tests/beliefs/test_technical_ensemble.py"
       ]
     },
     {
@@ -122,7 +122,7 @@
       "id": "3.6",
       "description": "Implement belief orchestrator in beliefs/orchestrator.py to coordinate sources, compute consensus, and manage belief lifecycle.",
       "acceptance_criteria": [
-        "BeliefOrchestrator class accepts registered sources (claude, codex, autoresearch) and a pair to analyze.",
+        "BeliefOrchestrator class accepts registered sources (claude, codex, technical_ensemble) and a pair to analyze.",
         "run_belief_cycle() invokes all registered sources, collects BeliefSnapshots, computes consensus, and returns a BeliefCycleResult.",
         "BeliefCycleResult is a frozen dataclass containing: pair, individual source beliefs, consensus result, timestamp, and staleness flag.",
         "Sources that return None (failed) are excluded from consensus but logged.",

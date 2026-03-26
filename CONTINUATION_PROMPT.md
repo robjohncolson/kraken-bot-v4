@@ -15,6 +15,14 @@
 
 Phase 1 (Research Dataset Export) is complete. The next milestone is building the walk-forward evaluation harness in `..\autoresearch`.
 
+### Claude Code autonomous-build reference
+
+For the repo-local autonomous build pattern and the known cross-agent harness bootstrap context, see:
+- `.claude/prompts/research-dataset-builder-launcher.md`
+- `.claude/skills/research-dataset-builder/SKILL.md`
+
+Those files were created for the Phase 1 dataset-export build, but they are the current reference for how to drive this repo's cross-agent harness from Claude Code.
+
 ### What exists
 
 - `docs/specs/autoresearch-trading-research-spec.md` — full spec for offline research loop
