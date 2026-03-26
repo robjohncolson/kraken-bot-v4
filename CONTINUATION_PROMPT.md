@@ -11,41 +11,48 @@
 - **No Supabase** in runtime path (legacy code retained, not used)
 - **No Railway** (dashboard is local)
 
-## What to do NOW: Phase 2 — Evaluation Harness
+## What to do NOW: Phase 5 — Qwen Research Path
 
-Phase 1 (Research Dataset Export) is complete. The next milestone is building the walk-forward evaluation harness in `..\autoresearch`.
+Phases 0-4 are complete. The next milestone is Phase 5: adding a Qwen-class model as a structured forecast candidate in the evaluation harness.
 
-### Claude Code autonomous-build reference
+### Completed phases
 
-For the repo-local autonomous build pattern and the known cross-agent harness bootstrap context, see:
-- `.claude/prompts/research-dataset-builder-launcher.md`
-- `.claude/skills/research-dataset-builder/SKILL.md`
+- **Phase 0**: renamed autoresearch → technical_ensemble
+- **Phase 1**: research dataset export in kraken-bot-v4 (`research/` module)
+- **Phase 2**: walk-forward evaluation harness in autoresearch (`trading_eval/` package)
+- **Phase 3**: baselines established (TA ensemble, logistic regression, GBT)
+- **Phase 4**: artifact contract defined, synced to kraken-bot-v4
 
-Those files were created for the Phase 1 dataset-export build, but they are the current reference for how to drive this repo's cross-agent harness from Claude Code.
+### Phase 2 deliverables (in autoresearch)
 
-### What exists
+- `trading_eval/config.py` — EvalConfig dataclass
+- `trading_eval/data.py` — manifest-validated Parquet loader
+- `trading_eval/splitter.py` — walk-forward time-series splitter
+- `trading_eval/candidate.py` — Candidate ABC with timestamp-keyed predictions
+- `trading_eval/backtest.py` — backtest engine with fees, slippage, abstain
+- `trading_eval/metrics.py` — direction accuracy, Brier, P&L, Sharpe, drawdown
+- `trading_eval/runner.py` — experiment orchestration
+- `trading_eval/storage.py` — structured experiment records with reproducibility metadata
+- `trading_eval/artifact.py` — artifact schema and promotion workflow
+- `trading_eval/cli.py` — CLI: run, list, compare, promote, artifacts
+- `trading_eval/baselines/ta_ensemble.py` — standalone 6-signal TA port
+- `trading_eval/baselines/sklearn_baseline.py` — LogReg + GBT baselines
+- `trading_eval/baselines/run_baselines.py` — baseline runner + comparison
+- 102 tests passing, 11 parity tests (skip on Python 3.10)
 
-- `docs/specs/autoresearch-trading-research-spec.md` — full spec for offline research loop
-- `docs/specs/autoresearch-trading-implementation-checklist.md` — phased checklist
-- Phase 0 complete: renamed `autoresearch_source` → `technical_ensemble_source`
-- **Phase 1 complete**: `research/` module exports versioned Parquet datasets with labels
+### Phase 4 deliverables
 
-### Phase 1 deliverables (done)
+- `trading_eval/artifact.py` — ArtifactManifest + promote_candidate()
+- `kraken-bot-v4/docs/specs/artifact-contract-v1.md` — consumer interface spec
 
-- `research/ohlcv_history.py` — paginated Kraken OHLCV fetch with timestamps
-- `research/db_reader.py` — SQLite reader for fills, orders, closed trades
-- `research/labels.py` — forward-looking labels (return_sign/bps 6h/12h, regime_label)
-- `research/dataset_builder.py` — orchestrates export to Parquet + manifest
-- `research/cli.py` — CLI: `python -m research.cli --pair DOGE/USD --since <ts>`
-- 34 tests covering determinism, point-in-time correctness, label computation
-- Output: `data/research/market_v1.parquet`, `labels_v1.parquet`, `manifest_v1.json`
+### Phase 5 scope
 
-### Phase 2 scope
-
-Build walk-forward evaluator in `..\autoresearch`:
-- Rolling train/validate windows (30-180 day train, 1-5 day validate)
-- Backtest scoring with fees, slippage, abstain support
-- Metrics: direction accuracy, Brier score, MAE, net P&L, max drawdown, Sharpe
+Add Qwen structured forecast candidate in autoresearch:
+- Structured inference format (direction, confidence, regime, horizon_hours)
+- Constrained JSON output, no free-form text
+- Evaluate prompt-only and fine-tuned variants separately
+- Calibrate confidence after raw model scoring
+- Only promote if it beats simpler baselines out of sample
 
 ### What the bot can do now
 
@@ -96,41 +103,48 @@ python main.py
 - **Research specs** ✅ Codex-authored integration spec + implementation checklist
 - **Phase 1** ✅ Research dataset export (OHLCV history, DB reader, labels, builder, CLI, 34 tests)
 
-## Session Commits (2026-03-25)
+## Session Commits (2026-03-25, Phase 2-4 build)
 
+### kraken-bot-v4
+```
+3682eb0 docs(phase-4): add artifact contract v1 for research model integration
+```
+
+### autoresearch
+```
+6398c0e build(phase-4): add artifact schema, promotion workflow, and CLI commands
+6aa2636 build(phase-3): add baseline runner script with comparison table
+f7f36f0 build(phase-3): add logistic regression and GBT baselines
+1fa40ab build(phase-3): add standalone TA ensemble baseline with parity test
+29f82c4 build(phase-2): add CLI with run/list/compare subcommands
+f6b7925 build(phase-2): add experiment storage with reproducibility metadata
+ac5badd build(phase-2): add experiment runner with walk-forward orchestration
+3869f5c build(phase-2): add metrics computation (accuracy, Brier, P&L, Sharpe, drawdown)
+5948bc3 build(phase-2): add backtest engine with fees, slippage, and abstain support
+4aca055 build(phase-2): add candidate protocol with timestamp-keyed predictions
+001ec27 build(phase-2): add walk-forward time-series splitter
+f9ce514 build(phase-2): add trading_eval package skeleton with config and data loader
+```
+
+### Previous sessions (kraken-bot-v4)
 ```
 0fd6afc build(phase-10): implement research dataset export module
 eb0cd77 build: add phase-10 manifest for research dataset export
 dcf75da fix: make build harness runner path configurable via CROSS_AGENT_RUNNER env
-72a8d0d docs: update continuation prompt after full session
 689c3c1 build: serve dashboard HTML + add autoresearch integration specs
 eca8508 refactor: rename autoresearch to technical_ensemble (Phase 0)
-48a8385 build: add spot inventory management for bearish DOGE sells
-a516332 build: wire live belief polling into runtime
-c4771b6 docs: update continuation prompt after reducer implementation
-2ec30ea build: implement reducer-driven runtime event handling
-```
-
-Previous session commits:
-```
-d6ee7da build: add ALLOWED_PAIRS whitelist, fix executor wiring, add runtime loop
-d2c1656-60da50b docs + manifests for phases 7-9
-66d336f-b3636fd build(phase-9): WebSocket v2
-fafad2b-f1b824b build(phase-8): SQLite writes
-b9d6ee8-43b86ad build(phase-7): Mutations
 ```
 
 ## Current State
 
-- **Branch**: master, at `0fd6afc`
-- **Tests**: 393 passed, ruff clean
-- **Kraken account**: ~5,522 DOGE, $0.009 USD (dust), 0 open orders
-- **Reducer**: LIVE — all 7 event handlers, spot inventory sell, structured PendingOrder
-- **Runtime**: Fully wired — effects dispatch, WS fills → reducer, belief polling
-- **Beliefs**: technical_ensemble (neutral 0.50 at last poll)
-- **Trading**: Will sell DOGE on bearish signal, buy on bullish with free USD
-- **Dashboard**: http://127.0.0.1:58392
-- **Unstaged**: AGENTS.md, CLAUDE.md (GitNexus section updates)
+- **kraken-bot-v4 branch**: master, at `3682eb0`
+- **autoresearch branch**: master, at `6398c0e`
+- **kraken-bot-v4 tests**: 393 passed, ruff clean
+- **autoresearch tests**: 102 passed, 11 skipped (parity tests, Python 3.10 vs 3.11)
+- **Trading bot**: unchanged, still live-capable with TA ensemble beliefs
+- **Evaluation harness**: fully operational in autoresearch
+- **Baselines**: TA ensemble, logistic regression, GBT — all runnable
+- **Artifact contract**: defined and synced to kraken-bot-v4
 
 ## Key Paths
 
