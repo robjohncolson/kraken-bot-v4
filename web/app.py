@@ -6,11 +6,16 @@ from collections.abc import AsyncIterator
 from dataclasses import asdict, dataclass
 from typing import Any
 
+from pathlib import Path
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 
 from web.sse import subscribe
+
+STATIC_DIR = Path(__file__).parent / "static"
 
 APP_VERSION = "0.1.0"
 PHASE_STATUS = "in_progress"
@@ -42,7 +47,13 @@ def create_app() -> FastAPI:
     )
     application.add_api_route("/api/health", healthcheck, methods=["GET"])
     application.add_api_route("/sse/updates", stream_updates, methods=["GET"])
+    application.add_api_route("/", serve_index, methods=["GET"])
+    application.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
     return application
+
+
+async def serve_index() -> FileResponse:
+    return FileResponse(STATIC_DIR / "index.html")
 
 
 async def healthcheck() -> dict[str, Any]:
