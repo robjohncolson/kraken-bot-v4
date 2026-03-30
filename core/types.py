@@ -172,6 +172,15 @@ class BeliefSnapshot:
     regime: MarketRegime = MarketRegime.UNKNOWN
     sources: tuple[BeliefSource, ...] = field(default_factory=tuple)
 
+@dataclass(frozen=True, slots=True)
+class DurationEstimate:
+    estimated_bear_hours: int
+    confidence: float
+    macd_bearish: bool
+    rsi_bearish: bool
+    ema_bearish: bool
+
+
 
 @dataclass(frozen=True, slots=True)
 class BotState:
