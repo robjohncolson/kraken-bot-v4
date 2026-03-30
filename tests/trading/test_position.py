@@ -8,7 +8,6 @@ from core.config import Settings, load_settings
 from core.types import (
     BeliefDirection,
     BeliefSnapshot,
-    ClosePosition,
     Position,
     PositionSide,
     UpdateStop,
@@ -103,7 +102,14 @@ def test_close_position_zeroes_out_open_state_and_emits_close_action() -> None:
     assert closed.stop_price == Decimal("0")
     assert closed.target_price == Decimal("0")
     assert closed.entry_price == opened.entry_price
-    assert actions == (ClosePosition(position_id="pos-1", reason="belief_flip"),)
+    assert len(actions) == 1
+    close_action = actions[0]
+    assert close_action.position_id == "pos-1"
+    assert close_action.reason == "belief_flip"
+    assert close_action.pair == "DOGE/USD"
+    assert close_action.side == PositionSide.LONG
+    assert close_action.quantity == opened.quantity
+    assert close_action.limit_price == opened.entry_price
 
 
 def test_update_stop_returns_new_position_and_update_action() -> None:

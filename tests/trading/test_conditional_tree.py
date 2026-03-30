@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from decimal import Decimal
 
 import pandas as pd
@@ -61,8 +61,9 @@ def test_maybe_plan_activates_rotation_for_bearish_doge_with_fitting_candidate()
     assert plan.chosen_candidate is not None
     assert plan.chosen_candidate.pair == "BTC/USD"
     assert plan.trigger_time == NOW
-    assert plan.expires_at == NOW + timedelta(hours=6)
-    assert plan.exit_deadline == NOW + timedelta(hours=6)
+    assert plan.expires_at is None
+    assert plan.exit_deadline is None
+    assert plan.planned_window_hours == 6
     assert scanner.calls == 1
 
 
@@ -112,8 +113,9 @@ def test_maybe_plan_filters_out_candidates_that_outlive_bear_window() -> None:
     assert plan.bear_estimate.estimated_bear_hours == 12
     assert plan.chosen_candidate is not None
     assert plan.chosen_candidate.pair == "ETH/USD"
-    assert plan.expires_at == NOW + timedelta(hours=6)
-    assert plan.exit_deadline == NOW + timedelta(hours=6)
+    assert plan.expires_at is None
+    assert plan.exit_deadline is None
+    assert plan.planned_window_hours == 6
 
 
 def test_maybe_plan_returns_none_when_no_candidate_fits_bear_window() -> None:

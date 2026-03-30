@@ -153,7 +153,14 @@ class PositionLifecycle:
         )
         return (
             closed,
-            (ClosePosition(position_id=position.position_id, reason=rendered_reason),),
+            (ClosePosition(
+                position_id=position.position_id,
+                reason=rendered_reason,
+                pair=position.pair,
+                side=position.side,
+                quantity=position.quantity,
+                limit_price=position.entry_price,
+            ),),
         )
 
     @staticmethod

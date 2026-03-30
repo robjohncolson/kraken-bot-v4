@@ -327,6 +327,10 @@ class UpdateTarget:
 class ClosePosition:
     position_id: PositionId
     reason: str
+    pair: str = ""
+    side: PositionSide = PositionSide.LONG
+    quantity: Decimal = ZERO_DECIMAL
+    limit_price: Decimal | None = None
     kind: ActionType = field(default=ActionType.CLOSE_POSITION, init=False)
 
 

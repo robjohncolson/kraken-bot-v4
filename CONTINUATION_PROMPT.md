@@ -142,6 +142,23 @@ Uses paginated `fetch_ohlcv_history` for outcome matching — covers the full sh
 
 **No further feature work, calibration, or model changes until shadow validation completes.**
 
+## Conditional rotation wiring fixes (completed 2026-03-30)
+
+Codex code review identified 3 HIGH and 2 MEDIUM gaps in the Layer 1-3 implementation. All HIGH issues fixed:
+
+1. **ClosePosition self-contained** — enriched with pair/side/quantity/limit_price so `_execute_close_position` no longer looks up already-mutated state. All emitters (position lifecycle, risk rules) populate fields.
+2. **Tree binding deferred to post-reducer** — `_maybe_bind_tree_to_position()` runs in `run_once()` after scheduler cycle, when the position actually exists in portfolio. Sets `position_id`, `opened_at`, and recomputes `expires_at` from actual open time.
+3. **Planner filters held pairs** — `_select_candidate()` excludes pairs with existing positions or pending orders, preventing guardian from accidentally expiring unrelated positions.
+4. **Tree cleared on any tracked exit** — scheduler clears `conditional_tree_state` on `StopTriggered`/`TargetHit` when `position_id` matches, not just on `WindowExpired`.
+5. **Risk rules enriched** — hard-drawdown `CloseAllPositions` now populates full `ClosePosition` fields.
+
+Known non-blocking caveats (acceptable for initial deployment):
+- `opened_at` uses cycle time (`utc_now()`) not exact fill timestamp (~30s drift on 6-24h windows)
+- Exit limit price is still entry_price (pre-existing placeholder)
+- Candidate exclusion uses bot_state only, not reconciled exchange state (restart edge case)
+
+484 tests pass, ruff clean.
+
 ## Goal for next session
 
 Review shadow metrics after 1+ week. If rollout gates pass, decide: tiny-size live rollout ($10 max position) or continue shadow.
@@ -158,12 +175,13 @@ Review shadow metrics after 1+ week. If rollout gates pass, decide: tiny-size li
 8. ~~**Probability calibration**~~ — Platt and isotonic both rejected; V1 uncalibrated wins
 9. ~~**Artifact promotion**~~ — V1 promoted with source provenance
 10. ~~**Integration**~~ — generic artifact loader, shadow mode, env vars, 457 tests pass
+11. ~~**Conditional rotation wiring**~~ — 5 fixes from CC+Codex review, 484 tests pass
 
 ## Remaining priorities
 
-1. **Wire artifact into live bot** behind feature flag / non-default model selector
-2. **Shadow/paper mode** validation on live data before real trading
-3. **Fix TA ensemble** prediction path (pass training tail to predict so it has enough history)
+1. **Shadow/paper mode** validation on live data before real trading
+2. **Fix TA ensemble** prediction path (pass training tail to predict so it has enough history)
+3. **Exit price improvement** — use trigger/current price instead of entry_price placeholder
 4. **Revisit LLM only** with fundamentally different inputs (news/sentiment, not raw OHLCV)
 
 ## Validation steps

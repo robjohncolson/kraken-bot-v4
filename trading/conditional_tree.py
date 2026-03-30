@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from decimal import Decimal
 from typing import Final
 
@@ -34,6 +34,9 @@ class ConditionalTreeState:
     chosen_candidate: BullCandidate | None = None
     expires_at: datetime | None = None
     exit_deadline: datetime | None = None
+    position_id: str | None = None
+    opened_at: datetime | None = None
+    planned_window_hours: float = 0
 
 
 class ConditionalTreeCoordinator:
@@ -79,9 +82,11 @@ class ConditionalTreeCoordinator:
         if bear_estimate.estimated_bear_hours <= 0:
             return None
 
+        excluded_pairs = _held_pairs(state)
         chosen_candidate = _select_candidate(
             self._pair_scanner.scan_bull_candidates(),
             max_peak_hours=bear_estimate.estimated_bear_hours,
+            excluded_pairs=excluded_pairs,
         )
         if chosen_candidate is None:
             return None
@@ -95,9 +100,9 @@ class ConditionalTreeCoordinator:
             trigger_time=now,
             bear_estimate=bear_estimate,
             chosen_candidate=chosen_candidate,
-            # L3.7 will move this from a planner-side placeholder into expiry handling.
-            expires_at=now + timedelta(hours=window_hours),
-            exit_deadline=now + timedelta(hours=window_hours),
+            expires_at=None,
+            exit_deadline=None,
+            planned_window_hours=window_hours,
         )
 
 
@@ -121,13 +126,26 @@ def _free_usd(state: SchedulerState) -> Decimal:
     return max(state.bot_state.portfolio.cash_usd - reserved, ZERO_DECIMAL)
 
 
+def _held_pairs(state: SchedulerState) -> set[str]:
+    pairs: set[str] = set()
+    for position in state.bot_state.portfolio.positions:
+        pairs.add(position.pair)
+    for pending in state.bot_state.pending_orders:
+        pairs.add(pending.pair)
+    return pairs
+
+
 def _select_candidate(
     candidates: tuple[BullCandidate, ...],
     *,
     max_peak_hours: int,
+    excluded_pairs: set[str] | None = None,
 ) -> BullCandidate | None:
+    excluded = excluded_pairs or set()
     for candidate in candidates:
         if candidate.pair == DOGE_PAIR:
+            continue
+        if candidate.pair in excluded:
             continue
         if candidate.estimated_peak_hours <= max_peak_hours:
             return candidate

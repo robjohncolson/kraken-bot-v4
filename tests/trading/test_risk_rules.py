@@ -299,8 +299,22 @@ def test_check_portfolio_rules_hard_drawdown_closes_all_positions() -> None:
     ]
     assert result.recommended_action == CloseAllPositions(
         actions=(
-            ClosePosition(position_id="btc-1", reason=HARD_DRAWDOWN_REASON),
-            ClosePosition(position_id="eth-1", reason=HARD_DRAWDOWN_REASON),
+            ClosePosition(
+                position_id="btc-1",
+                reason=HARD_DRAWDOWN_REASON,
+                pair="BTC/USD",
+                side=PositionSide.LONG,
+                quantity=Decimal("1"),
+                limit_price=Decimal("50"),
+            ),
+            ClosePosition(
+                position_id="eth-1",
+                reason=HARD_DRAWDOWN_REASON,
+                pair="ETH/USD",
+                side=PositionSide.LONG,
+                quantity=Decimal("1"),
+                limit_price=Decimal("50"),
+            ),
         )
     )
 

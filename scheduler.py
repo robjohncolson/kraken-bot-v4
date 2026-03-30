@@ -293,6 +293,10 @@ class Scheduler:
         next_state = replace(state, bot_state=merged_bot_state)
         if isinstance(event, WindowExpired):
             next_state = replace(next_state, conditional_tree_state=None)
+        elif isinstance(event, (StopTriggered, TargetHit)):
+            tree = next_state.conditional_tree_state
+            if tree is not None and tree.position_id == event.position_id:
+                next_state = replace(next_state, conditional_tree_state=None)
         return next_state, reducer_actions
 
 

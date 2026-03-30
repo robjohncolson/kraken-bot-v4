@@ -201,6 +201,10 @@ def check_portfolio_rules(
                 ClosePosition(
                     position_id=position.position_id,
                     reason=HARD_DRAWDOWN_REASON,
+                    pair=position.pair,
+                    side=position.side,
+                    quantity=position.quantity,
+                    limit_price=position.entry_price,
                 )
                 for position in portfolio.positions
             )

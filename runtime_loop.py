@@ -29,6 +29,7 @@ from core.types import (
     PlaceOrder,
     Position,
     PositionSide,
+    ZERO_DECIMAL,
 )
 from exchange.executor import KrakenExecutor
 from exchange.websocket import ConnectionState, FillConfirmed, KrakenWebSocketV2, PriceTick
@@ -264,6 +265,7 @@ class SchedulerRuntime:
 
         await self._ensure_websocket_connected()
         await self._ensure_subscriptions()
+        await self._maybe_bind_tree_to_position()
         await self._maybe_poll_beliefs(now)
         await self._handle_effects(effects)
         await self._maybe_plan_conditional_rotation(now)
@@ -323,6 +325,35 @@ class SchedulerRuntime:
             pending = self._state.pending_fills + (core_fill,)
             self._state = replace(self._state, pending_fills=pending)
 
+    async def _maybe_bind_tree_to_position(self) -> None:
+        """Bind conditional tree to its opened position after reducer creates it."""
+        tree = self._conditional_tree_state
+        if not tree.is_active or tree.position_id is not None:
+            return
+        if tree.chosen_candidate is None:
+            return
+
+        candidate_pair = tree.chosen_candidate.pair
+        position = next(
+            (p for p in self._state.bot_state.portfolio.positions if p.pair == candidate_pair),
+            None,
+        )
+        if position is None:
+            return
+
+        now = self._utc_now()
+        window = timedelta(hours=tree.planned_window_hours)
+        updated_tree = replace(
+            tree,
+            position_id=position.position_id,
+            opened_at=now,
+            expires_at=now + window,
+            exit_deadline=now + window,
+        )
+        async with self._state_lock:
+            self._conditional_tree_state = updated_tree
+            self._state = replace(self._state, conditional_tree_state=updated_tree)
+
     async def _handle_effects(self, effects: tuple[object, ...]) -> None:
         for effect in effects:
             if isinstance(effect, PlaceOrder):
@@ -363,27 +394,26 @@ class SchedulerRuntime:
             logger.error("Failed to cancel order %s: %s", cancel_target, exc)
 
     async def _execute_close_position(self, effect: ClosePosition) -> None:
-        position = self._find_position(effect.position_id)
-        if position is None:
+        if not effect.pair or effect.quantity <= 0:
             logger.warning(
-                "Close position %s (%s): position not found in portfolio",
+                "Close position %s (%s): effect missing pair/quantity",
                 effect.position_id, effect.reason,
             )
             return
-        close_side = OrderSide.SELL if position.side == PositionSide.LONG else OrderSide.BUY
+        close_side = OrderSide.SELL if effect.side == PositionSide.LONG else OrderSide.BUY
         order = OrderRequest(
-            pair=position.pair,
+            pair=effect.pair,
             side=close_side,
             order_type=OrderType.LIMIT,
-            quantity=position.quantity,
-            limit_price=position.entry_price,  # placeholder; market conditions may differ
+            quantity=effect.quantity,
+            limit_price=effect.limit_price or ZERO_DECIMAL,
         )
         try:
             order_id = self._executor.execute_order(order)
             logger.info(
                 "Close position %s (%s): placed %s order %s for %s qty=%s",
                 effect.position_id, effect.reason, close_side.value,
-                order_id, position.pair, position.quantity,
+                order_id, effect.pair, effect.quantity,
             )
         except (ExchangeError, SafeModeBlockedError) as exc:
             logger.error(
