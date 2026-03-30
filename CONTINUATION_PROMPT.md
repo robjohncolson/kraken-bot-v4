@@ -177,9 +177,21 @@ Backfill replay of V1 LogReg on full 180d CC-backed dataset (4,271 evaluable bar
 
 Tool: `python -m research.backfill_shadow --artifact-dir artifacts/logistic_regression_20260329_3f73bb8a --data-dir data/research-cc-180d`
 
+## Production readiness fixes (completed 2026-03-30)
+
+CC+Codex audit identified 5 blockers. 4 fixed this session, 1 deferred:
+
+1. **WebSocket re-enabled** — restored connect/reconnect logic for home laptop deployment
+2. **Reconciliation order source fixed** — uses exchange open orders (kraken_state) instead of bot_state for pending-order pruning
+3. **.env.example updated** — all new env vars documented (BELIEF_MODEL, EXIT_LIMIT_OFFSET_PCT, ENABLE_CONDITIONAL_TREE, etc.)
+4. **requirements.txt** — added python-dotenv
+5. **(deferred)** Position persistence across restart — acceptable for $10 test phase with operational rule: don't restart with live orders
+
+**Operational rule for $10 test phase**: do not restart with live pending orders or open positions. Only run when startup reconciliation is clean.
+
 ## Goal for next session
 
-Decide: tiny-size live rollout ($10 max position) or extended shadow on live data.
+Deploy to home laptop. Run: `pip install -r requirements.txt`, safe-mode smoke test, then $10 live test with DOGE/USD.
 
 ## Completed priorities
 

@@ -16,10 +16,15 @@ from core.types import (
     BotState,
     FillConfirmed,
     GridCycleComplete,
+    OrderSide,
+    OrderSnapshot,
+    OrderStatus,
+    OrderType,
     ReconciliationResult,
     StopTriggered,
     TargetHit,
     WindowExpired,
+    ZERO_DECIMAL,
 )
 from guardian import CurrentPrices, Guardian, GuardianAction, GuardianActionType, PriceSnapshot
 from trading.portfolio import mark_to_market
@@ -172,11 +177,14 @@ class Scheduler:
                 last_reconcile_at=working_state.now,
                 last_reconciliation_report=report,
             )
+            exchange_orders = _kraken_orders_to_snapshots(
+                working_state.kraken_state.open_orders,
+            )
             working_state, reducer_actions = self._apply_event(
                 working_state,
                 ReconciliationResult(
                     balances=working_state.kraken_state.balances,
-                    open_orders=working_state.bot_state.open_orders,
+                    open_orders=exchange_orders,
                     discrepancy_detected=report.discrepancy_detected,
                     summary=summary,
                 ),
@@ -370,6 +378,24 @@ def _upsert_belief(
     updated = [belief for belief in beliefs if belief.pair != new_belief.pair]
     updated.append(new_belief)
     return tuple(sorted(updated, key=lambda belief: belief.pair))
+
+
+def _kraken_orders_to_snapshots(
+    kraken_orders: tuple,
+) -> tuple[OrderSnapshot, ...]:
+    """Convert KrakenOrder objects to OrderSnapshot for the reducer."""
+    return tuple(
+        OrderSnapshot(
+            order_id=ko.order_id,
+            pair=ko.pair,
+            side=OrderSide.BUY,
+            order_type=OrderType.LIMIT,
+            status=OrderStatus.OPEN,
+            quantity=ZERO_DECIMAL,
+            client_order_id=ko.client_order_id,
+        )
+        for ko in kraken_orders
+    )
 
 
 def _extract_reference_prices(

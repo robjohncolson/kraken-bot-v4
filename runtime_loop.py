@@ -597,10 +597,13 @@ class SchedulerRuntime:
         await self._sleep(0)
 
     async def _ensure_websocket_connected(self) -> None:
-        # WS disabled: school network filters WSS connections to Kraken.
-        # REST price fallback in _maybe_poll_beliefs provides reference prices.
-        # TODO: re-enable WS when running on the home laptop (spare laptop deploy).
-        return
+        if self._websocket.state is not ConnectionState.DISCONNECTED:
+            return
+        try:
+            await self._websocket.connect()
+        except ExchangeError as exc:
+            logger.warning("Kraken WebSocket connect failed: %s", exc)
+            self._last_runtime_error = str(exc)
 
     async def _ensure_subscriptions(self) -> None:
         if self._websocket.state is not ConnectionState.CONNECTED:
