@@ -28,6 +28,9 @@ def test_load_settings_uses_spec_defaults() -> None:
     assert settings.telegram_chat_id is None
     assert settings.stats_normality_check is True
     assert settings.stats_fail_closed is True
+    assert settings.scanner_pair_discovery_ttl_sec == 3600
+    assert settings.scanner_max_concurrency == 4
+    assert settings.scanner_timeout_sec == 15.0
 
 
 @pytest.mark.parametrize("missing_name", sorted(REQUIRED_ENV))
@@ -56,3 +59,18 @@ def test_allowed_pairs_normalizes_kraken_format() -> None:
     env = {**REQUIRED_ENV, "ALLOWED_PAIRS": "xdgusd"}
     settings = load_settings(env)
     assert settings.allowed_pairs == frozenset({"DOGE/USD"})
+
+
+def test_scanner_settings_parse_from_environment() -> None:
+    env = {
+        **REQUIRED_ENV,
+        "SCANNER_PAIR_DISCOVERY_TTL_SEC": "120",
+        "SCANNER_MAX_CONCURRENCY": "2",
+        "SCANNER_TIMEOUT_SEC": "4.5",
+    }
+
+    settings = load_settings(env)
+
+    assert settings.scanner_pair_discovery_ttl_sec == 120
+    assert settings.scanner_max_concurrency == 2
+    assert settings.scanner_timeout_sec == 4.5

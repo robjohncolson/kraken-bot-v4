@@ -83,3 +83,18 @@ def test_get_trade_history_consumes_two_rest_points() -> None:
 
     assert request.endpoint == "/0/private/TradesHistory"
     assert client.rate_limiter.rest_snapshot().used_points == Decimal("2")
+
+
+def test_get_asset_pairs_uses_public_assetpairs_endpoint() -> None:
+    clock = ManualClock()
+    client = KrakenClient(
+        api_key="key",
+        api_secret="secret",
+        rate_limiter=KrakenRateLimiter(now=clock.now),
+    )
+
+    request = client.get_asset_pairs()
+
+    assert request.endpoint == "/0/public/AssetPairs"
+    assert dict(request.payload) == {}
+    assert client.rate_limiter.rest_snapshot().used_points == Decimal("1")

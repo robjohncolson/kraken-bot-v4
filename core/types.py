@@ -183,6 +183,15 @@ class DurationEstimate:
 
 
 @dataclass(frozen=True, slots=True)
+class BullCandidate:
+    pair: Pair
+    belief: BeliefSnapshot
+    confidence: float
+    reference_price_hint: Price
+    estimated_peak_hours: int
+
+
+@dataclass(frozen=True, slots=True)
 class BotState:
     portfolio: Portfolio = field(default_factory=Portfolio)
     balances: tuple[Balance, ...] = field(default_factory=tuple)

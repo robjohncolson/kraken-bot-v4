@@ -39,6 +39,9 @@ DEFAULT_STATS_FAIL_CLOSED = True
 DEFAULT_READ_ONLY_EXCHANGE = True
 DEFAULT_DISABLE_ORDER_MUTATIONS = True
 DEFAULT_STARTUP_RECONCILE_ONLY = True
+DEFAULT_SCANNER_PAIR_DISCOVERY_TTL_SEC = 3600
+DEFAULT_SCANNER_MAX_CONCURRENCY = 4
+DEFAULT_SCANNER_TIMEOUT_SEC = 15.0
 
 ALLOWED_KRAKEN_TIERS = frozenset({"starter", "intermediate", "pro"})
 TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
@@ -89,6 +92,9 @@ class Settings:
     disable_order_mutations: bool
     startup_reconcile_only: bool
     allowed_pairs: frozenset[str]
+    scanner_pair_discovery_ttl_sec: int
+    scanner_max_concurrency: int
+    scanner_timeout_sec: float
 
 
 def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
@@ -164,6 +170,21 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
             env, "STARTUP_RECONCILE_ONLY", DEFAULT_STARTUP_RECONCILE_ONLY
         ),
         allowed_pairs=_read_pairs(env, "ALLOWED_PAIRS"),
+        scanner_pair_discovery_ttl_sec=_read_int(
+            env,
+            "SCANNER_PAIR_DISCOVERY_TTL_SEC",
+            DEFAULT_SCANNER_PAIR_DISCOVERY_TTL_SEC,
+        ),
+        scanner_max_concurrency=_read_int(
+            env,
+            "SCANNER_MAX_CONCURRENCY",
+            DEFAULT_SCANNER_MAX_CONCURRENCY,
+        ),
+        scanner_timeout_sec=_read_float(
+            env,
+            "SCANNER_TIMEOUT_SEC",
+            DEFAULT_SCANNER_TIMEOUT_SEC,
+        ),
     )
 
 
