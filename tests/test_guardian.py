@@ -4,8 +4,18 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 from core.config import Settings, load_settings
-from core.types import Portfolio, Position, PositionSide
+from core.types import (
+    BeliefDirection,
+    BeliefSnapshot,
+    BeliefSource,
+    BullCandidate,
+    MarketRegime,
+    Portfolio,
+    Position,
+    PositionSide,
+)
 from guardian import Guardian, GuardianAction, GuardianActionType, PriceSnapshot
+from trading.conditional_tree import ConditionalTreeState
 from trading.risk_rules import BlockNewEntries, SoftDrawdownViolation
 
 
@@ -198,6 +208,38 @@ def test_check_positions_returns_no_actions_for_clean_portfolio() -> None:
     assert actions == []
 
 
+def test_check_positions_flags_window_expired_for_active_rotation() -> None:
+    as_of = datetime(2026, 3, 24, 12, 0, tzinfo=timezone.utc)
+    guardian = Guardian(clock=lambda: as_of)
+    portfolio = _portfolio(
+        cash_usd="900",
+        positions=(
+            _position(position_id="btc-1", pair="BTC/USD"),
+        ),
+    )
+
+    actions = guardian.check_positions(
+        {"BTC/USD": Decimal("104")},
+        portfolio,
+        _settings(),
+        conditional_tree_state=ConditionalTreeState(
+            is_active=True,
+            chosen_candidate=_candidate("BTC/USD"),
+            expires_at=as_of - timedelta(minutes=1),
+        ),
+    )
+
+    assert GuardianAction(
+        action_type=GuardianActionType.WINDOW_EXPIRED,
+        details={
+            "pair": "BTC/USD",
+            "position_id": "btc-1",
+            "trigger_price": Decimal("104"),
+            "expired_at": as_of - timedelta(minutes=1),
+        },
+    ) in actions
+
+
 def test_check_positions_accumulates_multiple_simultaneous_triggers() -> None:
     as_of = datetime(2026, 3, 24, 12, 0, tzinfo=timezone.utc)
     guardian = Guardian(clock=lambda: as_of)
@@ -248,4 +290,20 @@ def test_check_positions_accumulates_multiple_simultaneous_triggers() -> None:
             "violation_type": "SoftDrawdownViolation",
             "recommended_action": BlockNewEntries(),
         },
+    )
+
+
+def _candidate(pair: str) -> BullCandidate:
+    return BullCandidate(
+        pair=pair,
+        belief=BeliefSnapshot(
+            pair=pair,
+            direction=BeliefDirection.BULLISH,
+            confidence=0.9,
+            regime=MarketRegime.TRENDING,
+            sources=(BeliefSource.TECHNICAL_ENSEMBLE,),
+        ),
+        confidence=0.9,
+        reference_price_hint=Decimal("100"),
+        estimated_peak_hours=6,
     )

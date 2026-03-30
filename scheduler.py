@@ -4,7 +4,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from decimal import Decimal as _Decimal
-from typing import TypeAlias
+from typing import TYPE_CHECKING, TypeAlias
 
 from core.config import Settings
 from core.errors import KrakenBotError
@@ -19,10 +19,14 @@ from core.types import (
     ReconciliationResult,
     StopTriggered,
     TargetHit,
+    WindowExpired,
 )
 from guardian import CurrentPrices, Guardian, GuardianAction, GuardianActionType, PriceSnapshot
 from trading.portfolio import mark_to_market
 from trading.reconciler import KrakenState, ReconciliationReport, RecordedState, reconcile
+
+if TYPE_CHECKING:
+    from trading.conditional_tree import ConditionalTreeState
 
 Reducer: TypeAlias = Callable[[BotState, object, Settings], tuple[BotState, tuple[Action, ...]]]
 Reconciler: TypeAlias = Callable[..., ReconciliationReport]
@@ -90,6 +94,7 @@ class SchedulerState:
     current_prices: CurrentPrices = field(default_factory=dict)
     kraken_state: KrakenState = field(default_factory=KrakenState)
     recorded_state: RecordedState = field(default_factory=RecordedState)
+    conditional_tree_state: ConditionalTreeState | None = None
     pending_belief_signals: tuple[BeliefSnapshot, ...] = ()
     pending_fills: tuple[FillConfirmed, ...] = ()
     pending_grid_cycles: tuple[GridCycleComplete, ...] = ()
@@ -137,6 +142,7 @@ class Scheduler:
                     working_state.current_prices,
                     working_state.bot_state.portfolio,
                     self._settings,
+                    conditional_tree_state=working_state.conditional_tree_state,
                     as_of=working_state.now,
                 )
             )
@@ -284,7 +290,10 @@ class Scheduler:
             merged_bot_state,
             portfolio=mark_to_market(merged_bot_state.portfolio, doge_price_usd=doge_price),
         )
-        return replace(state, bot_state=merged_bot_state), reducer_actions
+        next_state = replace(state, bot_state=merged_bot_state)
+        if isinstance(event, WindowExpired):
+            next_state = replace(next_state, conditional_tree_state=None)
+        return next_state, reducer_actions
 
 
 def _require_positive_interval(field_name: str, raw_value: int) -> None:
@@ -316,7 +325,7 @@ def _belief_staleness_actions(
     return tuple(refresh_requests)
 
 
-def _guardian_event(guardian_action: GuardianAction) -> StopTriggered | TargetHit | None:
+def _guardian_event(guardian_action: GuardianAction) -> StopTriggered | TargetHit | WindowExpired | None:
     if guardian_action.action_type == GuardianActionType.STOP_TRIGGERED:
         return StopTriggered(
             position_id=str(guardian_action.details["position_id"]),
@@ -326,6 +335,13 @@ def _guardian_event(guardian_action: GuardianAction) -> StopTriggered | TargetHi
         return TargetHit(
             position_id=str(guardian_action.details["position_id"]),
             trigger_price=guardian_action.details["trigger_price"],  # type: ignore[arg-type]
+        )
+    if guardian_action.action_type == GuardianActionType.WINDOW_EXPIRED:
+        return WindowExpired(
+            pair=str(guardian_action.details["pair"]),
+            position_id=guardian_action.details["position_id"],  # type: ignore[arg-type]
+            trigger_price=guardian_action.details["trigger_price"],  # type: ignore[arg-type]
+            expired_at=guardian_action.details["expired_at"],  # type: ignore[arg-type]
         )
     return None
 

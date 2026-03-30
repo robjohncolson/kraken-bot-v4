@@ -28,6 +28,7 @@ from core.types import (
     ReconciliationResult,
     StopTriggered,
     TargetHit,
+    WindowExpired,
     ZERO_DECIMAL,
 )
 
@@ -171,6 +172,37 @@ def test_target_hit_position_not_found_returns_log() -> None:
     new_state, actions = reduce(state, event, _settings())
     assert new_state is state
     assert isinstance(actions[0], LogEvent)
+
+
+def test_window_expired_closes_rotated_position_without_cooldown() -> None:
+    pos = _position(pair="BTC/USD")
+    state = BotState(
+        portfolio=_portfolio(positions=(pos,)),
+        beliefs=_bullish_beliefs(pair="DOGE/USD"),
+        reference_prices=(("BTC/USD", Decimal("0.24")), ("DOGE/USD", DOGE_PRICE)),
+        as_of=NOW,
+    )
+    event = WindowExpired(
+        pair="BTC/USD",
+        position_id="pos-001",
+        trigger_price=Decimal("0.24"),
+        expired_at=NOW,
+    )
+    new_state, actions = reduce(state, event, _settings())
+    assert len(new_state.portfolio.positions) == 0
+    assert len(new_state.cooldowns) == 0
+    close_actions = [a for a in actions if isinstance(a, ClosePosition)]
+    assert len(close_actions) == 1
+    assert close_actions[0].reason == "window_expired"
+
+
+def test_window_expired_position_not_found_returns_log() -> None:
+    state = BotState(portfolio=_portfolio(), as_of=NOW)
+    event = WindowExpired(pair="BTC/USD", position_id="missing", expired_at=NOW)
+    new_state, actions = reduce(state, event, _settings())
+    assert new_state is state
+    assert isinstance(actions[0], LogEvent)
+    assert "not found" in actions[0].message
 
 
 # ---------------------------------------------------------------------------

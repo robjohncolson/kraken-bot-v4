@@ -9,6 +9,7 @@ from core.types import (
     BeliefSnapshot,
     BeliefSource,
     BotState,
+    BullCandidate,
     EventType,
     MarketRegime,
     Portfolio,
@@ -23,6 +24,7 @@ from scheduler import (
     SchedulerConfig,
     SchedulerState,
 )
+from trading.conditional_tree import ConditionalTreeState
 from trading.reconciler import (
     ForeignOrderClassification,
     KrakenOrder,
@@ -216,4 +218,52 @@ def test_run_cycle_consumes_pending_belief_signals_and_updates_bot_state() -> No
         cycle_count=1,
         emitted_at=NOW,
         next_cycle_due_at=NOW + timedelta(seconds=30),
+    )
+
+
+def test_run_cycle_expires_rotated_position_and_clears_conditional_tree_state() -> None:
+    scheduler = _scheduler()
+    position = _position(position_id="btc-1", pair="BTC/USD")
+    state = SchedulerState(
+        bot_state=BotState(portfolio=_portfolio(positions=(position,))),
+        current_prices={"BTC/USD": Decimal("108")},
+        conditional_tree_state=ConditionalTreeState(
+            is_active=True,
+            chosen_candidate=_candidate("BTC/USD"),
+            expires_at=NOW - timedelta(minutes=1),
+        ),
+        now=NOW,
+        last_reconcile_at=NOW,
+    )
+
+    new_state, actions = scheduler.run_cycle(state)
+
+    guardian_actions = [action for action in actions if isinstance(action, GuardianAction)]
+    assert GuardianAction(
+        action_type=GuardianActionType.WINDOW_EXPIRED,
+        details={
+            "pair": "BTC/USD",
+            "position_id": "btc-1",
+            "trigger_price": Decimal("108"),
+            "expired_at": NOW - timedelta(minutes=1),
+        },
+    ) in guardian_actions
+    assert new_state.conditional_tree_state is None
+    assert new_state.bot_state.last_event is EventType.WINDOW_EXPIRED
+    assert new_state.bot_state.portfolio.positions == ()
+
+
+def _candidate(pair: str) -> BullCandidate:
+    return BullCandidate(
+        pair=pair,
+        belief=BeliefSnapshot(
+            pair=pair,
+            direction=BeliefDirection.BULLISH,
+            confidence=0.9,
+            regime=MarketRegime.TRENDING,
+            sources=(BeliefSource.TECHNICAL_ENSEMBLE,),
+        ),
+        confidence=0.9,
+        reference_price_hint=Decimal("100"),
+        estimated_peak_hours=6,
     )

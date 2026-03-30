@@ -29,6 +29,7 @@ from core.types import (
     ReconciliationResult,
     StopTriggered,
     TargetHit,
+    WindowExpired,
     ZERO_DECIMAL,
 )
 from trading.portfolio import PortfolioManager
@@ -64,6 +65,8 @@ def reduce(state: BotState, event: Event, config: Settings) -> ReducerResult:
             return _handle_stop_triggered(state, event, config)
         case TargetHit():
             return _handle_target_hit(state, event, config)
+        case WindowExpired():
+            return _handle_window_expired(state, event, config)
         case BeliefUpdate():
             return _handle_belief_update(state, event, config)
         case ReconciliationResult():
@@ -179,6 +182,40 @@ def _handle_target_hit(
     return new_state, lifecycle_actions + portfolio_actions
 
 
+def _handle_window_expired(
+    state: BotState,
+    event: WindowExpired,
+    config: Settings,
+) -> ReducerResult:
+    position = (
+        _find_position(state.portfolio, event.position_id)
+        if event.position_id is not None
+        else _find_position_by_pair(state.portfolio, event.pair)
+    )
+    if position is None:
+        return state, (LogEvent(message=f"window_expired: position for {event.pair} not found"),)
+
+    _, lifecycle_actions = PositionLifecycle.close_position(position, reason="window_expired")
+
+    close_price = (
+        event.trigger_price
+        or _get_reference_price(state, position.pair)
+        or position.entry_price
+    )
+    doge_belief = _belief_for_pair(state.beliefs, "DOGE/USD")
+    doge_price = _doge_market_price(state, close_price, position.pair)
+    updated_portfolio, portfolio_actions = PortfolioManager.apply_close(
+        state.portfolio,
+        position_id=position.position_id,
+        close_price=close_price,
+        doge_belief=doge_belief,
+        doge_market_price=doge_price,
+    )
+
+    new_state = replace(state, portfolio=updated_portfolio)
+    return new_state, lifecycle_actions + portfolio_actions
+
+
 # ---------------------------------------------------------------------------
 # BeliefUpdate — consensus check, buy-side entry or sell-side inventory
 # ---------------------------------------------------------------------------
@@ -231,7 +268,12 @@ def _handle_belief_update(
     if ref_price is None or ref_price <= ZERO_DECIMAL:
         return state, (LogEvent(message=f"belief_update: no reference price for {pair}"),)
 
-    # Position sizing
+    # Bearish DOGE sell: doesn't need USD funds — sells existing inventory
+    if expected_side == PositionSide.SHORT and pair == "DOGE/USD":
+        sell_usd = Decimal(config.min_position_usd)
+        return _bearish_inventory_sell(state, pair, sell_usd, ref_price, config)
+
+    # Position sizing (buy-side entries)
     kelly_frac = ZERO_DECIMAL  # safe default until stats engine has enough samples
     min_usd = Decimal(config.min_position_usd)
     max_usd = Decimal(config.max_position_usd)
@@ -247,9 +289,6 @@ def _handle_belief_update(
         else:
             return state, (LogEvent(message=f"belief_update: insufficient funds for {pair}"),)
 
-    # Branch: bearish spot sell vs bullish buy
-    if expected_side == PositionSide.SHORT and pair == "DOGE/USD":
-        return _bearish_inventory_sell(state, pair, position_usd, ref_price, config)
     return _bullish_position_entry(state, pair, position_usd, ref_price, expected_side, config)
 
 

@@ -174,7 +174,7 @@ class SchedulerRuntime:
             settings=settings,
         )
         self._belief_refresh_handler = belief_refresh_handler
-        self._conditional_tree_state = ConditionalTreeState()
+        self._conditional_tree_state = _conditional_tree_state(initial_state)
         self._conditional_tree = None
         if settings.enable_conditional_tree:
             self._conditional_tree = conditional_tree or _build_conditional_tree(
@@ -249,6 +249,7 @@ class SchedulerRuntime:
                     )
                 new_state, effects = self._scheduler.run_cycle(state)
                 self._state = new_state
+                self._conditional_tree_state = _conditional_tree_state(new_state)
             self._last_runtime_error = None
         except (ExchangeError, KrakenBotError) as exc:
             self._last_runtime_error = str(exc)
@@ -439,7 +440,7 @@ class SchedulerRuntime:
 
         async with self._state_lock:
             state_snapshot = self._state
-            tree_state = self._conditional_tree_state
+            tree_state = _conditional_tree_state(self._state)
 
         planned_state = self._conditional_tree.maybe_plan(
             state=state_snapshot,
@@ -459,6 +460,7 @@ class SchedulerRuntime:
 
         async with self._state_lock:
             self._conditional_tree_state = planned_state
+            self._state = replace(self._state, conditional_tree_state=planned_state)
 
         await self.enqueue_belief(candidate.belief, observed_at=now)
 
@@ -627,6 +629,13 @@ def _build_conditional_tree(
         settings=settings,
         pair_scanner=PairScanner(client=client, settings=settings),
     )
+
+
+def _conditional_tree_state(state: SchedulerState) -> ConditionalTreeState:
+    tree_state = state.conditional_tree_state
+    if isinstance(tree_state, ConditionalTreeState):
+        return tree_state
+    return ConditionalTreeState()
 
 
 def _build_position_snapshots(

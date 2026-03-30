@@ -5,12 +5,15 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from enum import StrEnum
-from typing import TypeAlias
+from typing import TYPE_CHECKING, TypeAlias
 
 from core.config import Settings
 from core.errors import KrakenBotError
 from core.types import Pair, Portfolio, Position, PositionSide, Price, ZERO_DECIMAL
 from trading.risk_rules import RiskCheckResult, check_portfolio_rules
+
+if TYPE_CHECKING:
+    from trading.conditional_tree import ConditionalTreeState
 
 
 class GuardianError(KrakenBotError):
@@ -51,6 +54,7 @@ class GuardianActionType(StrEnum):
     LIMIT_EXIT_ATTEMPT = "limit_exit_attempt"
     STOP_TRIGGERED = "stop_triggered"
     TARGET_HIT = "target_hit"
+    WINDOW_EXPIRED = "window_expired"
     BELIEF_STALE = "belief_stale"
     RISK_VIOLATION = "risk_violation"
 
@@ -73,6 +77,7 @@ class Guardian:
         portfolio: Portfolio,
         config: Settings,
         *,
+        conditional_tree_state: ConditionalTreeState | None = None,
         as_of: datetime | None = None,
     ) -> list[GuardianAction]:
         reference_time = _normalize_timestamp(as_of or self._clock())
@@ -95,6 +100,15 @@ class Guardian:
                     )
                 )
 
+        window_expired = _window_expiry_action(
+            current_prices=current_prices,
+            portfolio=portfolio,
+            conditional_tree_state=conditional_tree_state,
+            reference_time=reference_time,
+        )
+        if window_expired is not None:
+            actions.append(window_expired)
+
         risk_result = check_portfolio_rules(portfolio, config=config)
         actions.extend(_risk_actions(risk_result))
         return actions
@@ -105,12 +119,14 @@ def check_positions(
     portfolio: Portfolio,
     config: Settings,
     *,
+    conditional_tree_state: ConditionalTreeState | None = None,
     as_of: datetime | None = None,
 ) -> list[GuardianAction]:
     return Guardian().check_positions(
         current_prices,
         portfolio,
         config,
+        conditional_tree_state=conditional_tree_state,
         as_of=as_of,
     )
 
@@ -188,6 +204,43 @@ def _belief_is_stale(
         return False
     stale_after = timedelta(hours=config.belief_stale_hours)
     return reference_time - _normalize_timestamp(belief_timestamp) >= stale_after
+
+
+def _window_expiry_action(
+    *,
+    current_prices: CurrentPrices,
+    portfolio: Portfolio,
+    conditional_tree_state: ConditionalTreeState | None,
+    reference_time: datetime,
+) -> GuardianAction | None:
+    if conditional_tree_state is None or not getattr(conditional_tree_state, "is_active", False):
+        return None
+
+    expires_at = getattr(conditional_tree_state, "expires_at", None)
+    chosen_candidate = getattr(conditional_tree_state, "chosen_candidate", None)
+    if expires_at is None or chosen_candidate is None:
+        return None
+
+    normalized_expiry = _normalize_timestamp(expires_at)
+    if reference_time < normalized_expiry:
+        return None
+
+    pair = chosen_candidate.pair
+    position = next((item for item in portfolio.positions if item.pair == pair), None)
+    trigger_price = None
+    raw_price = current_prices.get(pair)
+    if raw_price is not None:
+        trigger_price = _price_snapshot(current_prices, pair).price
+
+    return GuardianAction(
+        action_type=GuardianActionType.WINDOW_EXPIRED,
+        details={
+            "pair": pair,
+            "position_id": position.position_id if position is not None else None,
+            "trigger_price": trigger_price,
+            "expired_at": normalized_expiry,
+        },
+    )
 
 
 def _risk_actions(risk_result: RiskCheckResult) -> list[GuardianAction]:

@@ -32,6 +32,7 @@ class ConditionalTreeState:
     trigger_time: datetime | None = None
     bear_estimate: DurationEstimate | None = None
     chosen_candidate: BullCandidate | None = None
+    expires_at: datetime | None = None
     exit_deadline: datetime | None = None
 
 
@@ -95,6 +96,7 @@ class ConditionalTreeCoordinator:
             bear_estimate=bear_estimate,
             chosen_candidate=chosen_candidate,
             # L3.7 will move this from a planner-side placeholder into expiry handling.
+            expires_at=now + timedelta(hours=window_hours),
             exit_deadline=now + timedelta(hours=window_hours),
         )
 

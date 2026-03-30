@@ -78,6 +78,7 @@ class EventType(StrEnum):
     FILL_CONFIRMED = "fill_confirmed"
     STOP_TRIGGERED = "stop_triggered"
     TARGET_HIT = "target_hit"
+    WINDOW_EXPIRED = "window_expired"
     BELIEF_UPDATE = "belief_update"
     RECONCILIATION_RESULT = "reconciliation_result"
     GRID_CYCLE_COMPLETE = "grid_cycle_complete"
@@ -252,6 +253,15 @@ class TargetHit:
 
 
 @dataclass(frozen=True, slots=True)
+class WindowExpired:
+    pair: Pair
+    position_id: PositionId | None = None
+    trigger_price: Price | None = None
+    expired_at: datetime | None = None
+    kind: EventType = field(default=EventType.WINDOW_EXPIRED, init=False)
+
+
+@dataclass(frozen=True, slots=True)
 class BeliefUpdate:
     belief: BeliefSnapshot
     kind: EventType = field(default=EventType.BELIEF_UPDATE, init=False)
@@ -278,6 +288,7 @@ Event: TypeAlias = (
     | FillConfirmed
     | StopTriggered
     | TargetHit
+    | WindowExpired
     | BeliefUpdate
     | ReconciliationResult
     | GridCycleComplete
