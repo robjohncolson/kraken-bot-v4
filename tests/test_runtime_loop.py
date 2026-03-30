@@ -141,9 +141,8 @@ def test_start_connects_websocket_subscribes_and_publishes_dashboard_state() -> 
 
         await runtime.start()
         assert fake_websocket is not None
-        assert fake_websocket.connect_calls == 1
-        assert fake_websocket.ticker_subscriptions == [("DOGE/USD",)]
-        assert fake_websocket.execution_tokens == ["ws-token-123"]
+        # WS connect is deferred to run_once (skipped in start for network resilience)
+        assert fake_websocket.connect_calls == 0
         assert published[0]["event"] == "dashboard.update"
         assert set(published[0]["data"]) == {
             "portfolio",
@@ -153,7 +152,6 @@ def test_start_connects_websocket_subscribes_and_publishes_dashboard_state() -> 
             "stats",
             "reconciliation",
         }
-        assert heartbeats[0].websocket_connected is True
         await runtime.shutdown()
 
     asyncio.run(scenario())

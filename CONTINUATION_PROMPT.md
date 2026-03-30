@@ -11,9 +11,170 @@
 - **No Supabase** in runtime path (legacy code retained, not used)
 - **No Railway** (dashboard is local)
 
-## What to do NOW: Feature engineering and better baselines
+## Current state
 
-Phases 0-5a are complete. The LLM path is proven infrastructure but does not beat logistic regression. Next research effort should focus on feature engineering, calibration, and stronger baselines — not LLM tuning.
+Two benchmark lines exist, with explicit source provenance:
+
+**Kraken-native 30d hourly benchmark** (primary, `data/research/`, source: Kraken REST OHLC):
+- V1 baseline: -3,103 bps, 44.1% accuracy, Sharpe -22.6 (4-fold, 10d train / 1d val / 5d step, 693-row post-dedup dataset)
+- No profitable candidate on this short window. Momentum (A) has the best corrected lift (+2,032 bps vs V1).
+
+**CryptoCompare-backed 180d hourly benchmark** (separate track, `data/research-cc-180d/`, source: CryptoCompare `e=Kraken`):
+- V1 baseline: **+5,531 bps**, 47.2% accuracy, **Sharpe 11.3** (18-fold, 90d train / 1d val / 5d step, 4,320-row dataset)
+- Momentum (A): -52 bps. Combined (E): -3,291 bps. **Feature engineering hurts on the longer window.**
+- V1 is the clear winner — simpler features resist overfitting with more training data.
+
+**30-day overlap validation (passed)**: CryptoCompare `e=Kraken` vs Kraken-native on the same 693-row window shows close max diff 0.05%, volume mean diff 0.004%, perfect timestamp alignment (693/693). Source effect on V1 P&L: -303 bps (~10% of 30d loss) — small, not the driver.
+
+**Key conclusions**:
+- The 30d→180d swing (+8,937 bps) is driven by the longer training window, not the data source.
+- V1 with 90d training data is profitable and outperforms all feature-enhanced candidates.
+- Momentum and combined features should be deprioritized — they overfit on short windows.
+- Cross-TF is deprioritized: 75% of its hourly lift was lookahead artifact (fixed 2026-03-29), and it does not transfer to 4h.
+- **Research winner (180d CC-backed track): V1 uncalibrated** — +5,531 bps, Sharpe 11.3, 53.7% hit rate, 214 trades.
+- Isotonic calibration rejected: edge collapsed under TS-safe evaluation (+1,565 bps vs +5,531 uncalibrated). Non-TS-safe result (+11,479) was a calibration artifact.
+- Platt scaling also rejected: destroys trading performance (-2,326 bps).
+
+Other:
+- Historical pre-dedup Phase 5a result (+2,838 bps) was on a dataset with duplicate timestamps — preserved below.
+- LLM infrastructure works but does not outperform LogReg. Phase 5b paused.
+- Start work from `master` branch.
+
+## Research conclusion (accepted 2026-03-29)
+
+**V1 uncalibrated logistic regression is the accepted research winner** on the 180d CryptoCompare-backed hourly track.
+
+- **What won**: 7-feature V1 LogReg (ret_1, ret_6, ret_12, hl_range, co_range, vol_ratio, volatility). LogisticRegression(max_iter=1000, C=1.0, random_state=42), StandardScaler, threshold 0.55.
+- **No feature additions**: Every feature family tested (momentum, vol/regime, volume, cross-TF) degraded performance on the longer 180d window. Feature engineering overfits on short training windows.
+- **No calibration**: Platt scaling destroyed trading performance. Isotonic looked good under non-time-aware inner CV (+11,479 bps) but collapsed to +1,565 bps under TS-safe tail-holdout calibration — losing 12 of 18 folds. The simpler model wins.
+- **Source provenance**: CryptoCompare `histohour` with `e=Kraken`. 30-day overlap validation PASSED (close <0.05% diff, 693/693 timestamps). This does NOT replace the Kraken-native 30d line — both are maintained.
+- **Artifact**: `artifacts/logistic_regression_20260329_3f73bb8a/` (promoted, manifest includes `data_source.source=cryptocompare`, `data_source.exchange=Kraken`, overlap validation result).
+
+## Integration status (completed 2026-03-29)
+
+**Shadow mode is wired and ready to run.** TA ensemble remains primary. Research model runs in parallel, logging predictions (including raw `prob_up`) without affecting the reducer or trading decisions.
+
+### Artifact
+
+| Field | Value |
+|-------|-------|
+| Artifact ID | `logistic_regression_20260329_3f73bb8a` |
+| Model family | `logistic_regression` v1.0 |
+| Features | 7 V1 features (ret_1, ret_6, ret_12, hl_range, co_range, vol_ratio, volatility) |
+| Threshold | 0.55 (LONG if prob_up > 0.55, SHORT if < 0.45, else ABSTAIN) |
+| Calibration | none |
+| Data source | CryptoCompare `e=Kraken` (overlap validated) |
+| Training data | 4,314 rows from 180d CC-backed dataset |
+| Model files | `artifacts/.../model/scaler.pkl`, `model.pkl`, `meta.json` |
+
+### Environment variables
+
+| Var | Default | Purpose |
+|-----|---------|---------|
+| `BELIEF_MODEL` | `technical_ensemble` | Primary belief handler (`technical_ensemble` or `research_model`) |
+| `ACTIVE_ARTIFACT_ID` | none | Required when `BELIEF_MODEL=research_model` |
+| `SHADOW_ARTIFACT_ID` | none | Run research model in shadow mode (logs only, no reducer impact) |
+
+### Operator workflow
+
+```bash
+# Default: TA ensemble only
+python main.py
+
+# Shadow run (current recommended mode):
+SHADOW_ARTIFACT_ID=logistic_regression_20260329_3f73bb8a python main.py
+
+# Full swap (DO NOT USE YET — pending shadow validation):
+# BELIEF_MODEL=research_model ACTIVE_ARTIFACT_ID=logistic_regression_20260329_3f73bb8a python main.py
+```
+
+Shadow predictions appear in logs as:
+```
+shadow_prediction: pair=DOGE/USD direction=bearish confidence=0.1064 prob_up=0.4468 artifact=logistic_regression_20260329_3f73bb8a
+```
+
+### Shadow evaluation
+
+Run `python -m research.shadow_eval --log-file <path>` to compute daily metrics from shadow logs:
+- Prediction coverage (% of poll cycles that produced a prediction)
+- Abstain rate
+- 6h directional accuracy (matched against actual OHLCV outcomes)
+- Paper P&L and hit rate
+
+### Rollout gates (before full swap)
+
+| Gate | Threshold |
+|------|-----------|
+| No crashes / malformed outputs | Over full shadow period |
+| Stable belief cadence | >90% of poll cycles produce a prediction |
+| Shadow directional accuracy | >50% on live data over 1+ weeks |
+| No reconciliation / runtime regressions | Over shadow period |
+
+### New files added
+
+| File | Purpose |
+|------|---------|
+| `beliefs/research_model_source.py` | Generic artifact loader (BeliefAnalyzer protocol) |
+| `beliefs/research_model_handler.py` | Handler + shadow handler factories |
+| `research/ohlcv_cryptocompare.py` | CryptoCompare `e=Kraken` OHLCV fetcher |
+| `research/shadow_eval.py` | Shadow log evaluation utility |
+| `tests/test_research_model.py` | 10 tests for source + handler |
+
+### Tests
+
+457 total (447 existing + 10 new), zero failures.
+
+## Active phase: Shadow run (started 2026-03-29)
+
+**Default launch command:**
+```bash
+SHADOW_ARTIFACT_ID=logistic_regression_20260329_3f73bb8a python main.py
+```
+
+TA ensemble is primary. Research model logs shadow predictions only. Do not full-swap yet.
+
+**Daily evaluation:**
+```bash
+python -m research.shadow_eval --log-file <path-to-bot-log>
+```
+
+Uses paginated `fetch_ohlcv_history` for outcome matching — covers the full shadow window (Kraken retains ~30 days of hourly data). Each prediction is matched against the actual close 6h later.
+
+**No further feature work, calibration, or model changes until shadow validation completes.**
+
+## Goal for next session
+
+Review shadow metrics after 1+ week. If rollout gates pass, decide: tiny-size live rollout ($10 max position) or continue shadow.
+
+## Completed priorities
+
+1. ~~**Resolve benchmark parity**~~ — dataset dedup was the sole cause
+2. ~~**Feature engineering ablation**~~ — V1 wins on long window, features overfit
+3. ~~**Cross-TF lookahead fix**~~ — timestamp-aligned, lagged by 1 block
+4. ~~**4h robustness study**~~ — momentum transfers, cross-TF does not
+5. ~~**Temporal leakage audit**~~ — all clean except the fixed cross-TF bug
+6. ~~**Longer hourly evaluation**~~ — 180d via CryptoCompare e=Kraken; V1 wins
+7. ~~**30-day overlap validation**~~ — PASS (close <0.05%, source effect ~300 bps)
+8. ~~**Probability calibration**~~ — Platt and isotonic both rejected; V1 uncalibrated wins
+9. ~~**Artifact promotion**~~ — V1 promoted with source provenance
+10. ~~**Integration**~~ — generic artifact loader, shadow mode, env vars, 457 tests pass
+
+## Remaining priorities
+
+1. **Wire artifact into live bot** behind feature flag / non-default model selector
+2. **Shadow/paper mode** validation on live data before real trading
+3. **Fix TA ensemble** prediction path (pass training tail to predict so it has enough history)
+4. **Revisit LLM only** with fundamentally different inputs (news/sentiment, not raw OHLCV)
+
+## Validation steps
+
+After changes, run and report:
+- `pytest` in autoresearch (all tests green)
+- Backtest via `python -m trading_eval.cli run` — before/after metrics for modified candidates
+- `pytest` in kraken-bot-v4 (447+ tests passing)
+- Dashboard smoke check (`localhost:58392`) or TUI (`python -m tui`)
+
+Report: what changed, before/after metrics, any risks or follow-up work.
 
 ### TUI Operator Cockpit (v1, completed 2026-03-26)
 
@@ -68,12 +229,9 @@ Tests: 54 new tests (state parsers, SSE parser, theme helpers, Textual app navig
 - `trading_eval/artifact.py` — ArtifactManifest + promote_candidate()
 - `kraken-bot-v4/docs/specs/artifact-contract-v1.md` — consumer interface spec
 
-### Phase 5a result (evaluated 2026-03-26)
+### Phase 5a result — historical, pre-dedup (evaluated 2026-03-26)
 
-**Model**: qwen3:8b (Q4_K_M, 5.2GB) via IPEX-Ollama 0.9.3 with Intel Arc GPU (SYCL/oneAPI)
-**Runtime**: ~21s per inference call on Intel Arc iGPU, GPU-accelerated via IPEX-LLM
-**Contract**: direction/confidence/prob_up/horizon_hours=6, Ollama JSON mode
-**Decision cadence**: 6h (one prediction per horizon period, no overcounting)
+**Dataset**: 721-row DOGE/USD hourly OHLCV (manifest hash `ffe3cdacc876b51a`). This dataset contained 28 duplicate timestamps from Kraken API pagination boundary overlaps, fixed in commit `a584999`.
 
 Walk-forward results (5-fold, 10d train, 1d val, 5d step, DOGE/USD):
 
@@ -86,19 +244,183 @@ Walk-forward results (5-fold, 10d train, 1d val, 5d step, DOGE/USD):
 
 **Verdict**: Prompted LLM does not beat logistic regression. Infrastructure is proven (structured output works, GPU path viable, contract enforced), but there is no signal advantage. TA ensemble produces 0 trades on this window size (needs 40 bars history, validation window too short).
 
+**Note**: The +2,838 bps logistic regression result is **superseded** — it was achieved on a dataset with duplicate timestamps. See "Benchmark parity resolution" below for the corrected result.
+
+### Benchmark parity resolution (2026-03-28)
+
+**Root cause**: The Phase 5a canonical result (+2,838 bps) and the ablation control (-3,103 bps) used different datasets. Commit `a584999` fixed OHLCV timestamp deduplication (Kraken API pagination overlap), which changed the dataset from 721 rows to 693 rows.
+
+| | Pre-dedup (Phase 5a) | Post-dedup (corrected) |
+|---|---|---|
+| Manifest hash | `ffe3cdacc876b51a` | `90ec69cafddba724` |
+| Row count | 721 (28 duplicates) | 693 |
+| Date range | 2026-02-24 11:00 — 2026-03-26 11:00 | 2026-02-26 03:00 — 2026-03-26 23:00 |
+| Walk-forward folds | 5 (fold 4 degenerate: 1 val row, 0 trades) | 4 |
+| V1 LogReg P&L | +2,838 bps | -3,103 bps |
+
+The dedup shifted the dataset start by +40 hours, completely changing which market data falls into each fold's train/val window. The 5th fold in the old dataset was degenerate (1 validation row, 0 trades). Config, model hyperparameters, preprocessing, and seeds are identical across both runs.
+
+**Conclusion**: The corrected 693-row dataset is the canonical dataset. The old +2,838 bps result is a historical artifact of duplicate data.
+
+### Current benchmark — post-dedup V1 baseline (2026-03-28)
+
+**Dataset**: 693-row DOGE/USD hourly OHLCV (manifest hash `90ec69cafddba724`)
+**Config**: 4-fold walk-forward, 10d train / 1d val / 5d step, fee 10 bps, slippage 5 bps
+**Model**: LogisticRegression(max_iter=1000, C=1.0, random_state=42), StandardScaler, threshold 0.55
+
+| Metric | Value |
+|--------|-------|
+| Direction accuracy | 44.1% |
+| Net P&L | -3,103 bps |
+| Sharpe | -22.6 |
+| Hit rate | 44.1% |
+| Trades | 68 |
+| Brier | 0.343 |
+| Max drawdown | 4,846 bps |
+
+This is the canonical V1 reference for all feature ablation comparisons.
+
+### Feature engineering ablation — corrected (2026-03-28)
+
+V1 baseline feature pipeline (7 features):
+- `ret_1`: 1-bar close return
+- `ret_6`: 6-bar close return
+- `ret_12`: 12-bar close return
+- `hl_range`: `(high - low) / close`
+- `co_range`: `(close - open) / open`
+- `vol_ratio`: `volume / rolling_mean(volume, 20)`
+- `volatility`: `rolling_std(returns, 12)`
+
+Feature families tested (additive to V1):
+- **Momentum (+4)**: Williams %R 14, Stochastic K 14, ROC 3, ROC 24
+- **Vol/Regime (+4)**: Garman-Klass vol 12, vol percentile rank 24, vol ratio 6/24, range percentile rank 24
+- **Volume (+4)**: OBV slope 12, VWAP distance 24, A/D line slope 12, vol-price correlation 12
+- **Cross-Timeframe (+3)**: 4h aggregated return, 12h aggregated return, 4h volume ratio
+
+**Cross-TF lookahead bug (found and fixed 2026-03-29)**: The original cross-TF feature builder (`_build_features_ablation_cross_tf`) had a future information leak. It grouped bars into 4h/12h blocks using `np.arange(n) // 4`, then assigned the block's final close and total volume to ALL rows in the block — including early rows that would not yet know those values at decision time. Blocks were also index-anchored, not timestamp-aligned. Fix: use `timestamp // 14400` for alignment, lag values by 1 block so each row only sees the previous completed block. This affected candidates D, F, and E.
+
+Ablation results — **corrected** (4-fold walk-forward, 10d train / 1d val / 5d step, 693-row corrected dataset):
+
+| Candidate | Trades | Accuracy | Net P&L (bps) | Sharpe | Brier | MaxDD |
+|-----------|--------|----------|---------------|--------|-------|-------|
+| V1 baseline (control) | 68 | 44.1% | -3,103 | -22.6 | 0.343 | 4,846 |
+| V2 (18 features) | 88 | 40.9% | -4,417 | -21.6 | 0.441 | 7,202 |
+| A: +momentum | 90 | 50.0% | -1,071 | -5.2 | 0.333 | 3,928 |
+| B: +vol/regime | 77 | 44.2% | -2,807 | -16.3 | 0.324 | 4,778 |
+| C: +volume | 83 | 42.2% | -2,107 | -11.4 | 0.370 | 5,337 |
+| D: +cross-timeframe | 71 | 46.5% | -1,980 | -13.8 | 0.340 | 3,926 |
+| F: +cross-tf + momentum | 88 | 50.0% | -1,416 | -7.1 | 0.337 | 3,847 |
+| E: combined (all 4) | 88 | 54.5% | -192 | -0.9 | 0.335 | 4,809 |
+
+Lookahead impact (D, F, E — before vs after fix):
+
+| Candidate | Leaky P&L | Fixed P&L | Leak artifact | Fixed lift vs V1 |
+|-----------|-----------|-----------|---------------|------------------|
+| D: +cross-tf | +1,390 | -1,980 | -3,370 (75% of apparent lift) | +1,123 |
+| F: +cross-tf+mom | +1,794 | -1,416 | -3,210 | +1,687 |
+| E: combined | +2,634 | -192 | -2,826 | +2,912 |
+
+Key observations (corrected):
+- **Momentum is the strongest single family** (+2,032 bps lift vs V1). Consistent across hourly and 4h regimes.
+- **Cross-TF provides modest lift** (+1,123 bps) but ~75% of its previously apparent signal was lookahead.
+- **Combined (E) is best overall** (+2,912 bps lift), driven primarily by momentum and other families, not cross-TF.
+- **F (cross-TF + momentum) underperforms A (momentum alone)**: +1,687 vs +2,032. Cross-TF may be adding noise that hurts momentum.
+- All candidates remain unprofitable in absolute terms on this short window.
+- **Caution**: 4 folds on 693 rows is still a small evaluation window.
+
+### 4h robustness study — separate experiment (2026-03-28)
+
+**Purpose**: Test whether feature lift persists in a coarser, longer-window regime. This is NOT a replacement for the hourly benchmark — it is a separate robustness check.
+
+**Dataset**: 721-row DOGE/USD 4h OHLCV (manifest hash from `data/research-4h/`). Date range: 2025-11-29 to 2026-03-29 (120 days).
+
+**Important differences from hourly benchmark**:
+- Base resolution: 4h bars (not 1h)
+- "6h" label = `close.shift(-6)` = 6 bars ahead = **24h forward return** (not 6h)
+- Feature rolling windows cover 4x more clock time
+- Cross-TF features produce 16h/48h aggregation (not 4h/12h)
+- Cross-TF multi-resolution concept is preserved (base → longer blocks), but at coarser scales
+
+**Config**: 7-fold walk-forward, 90d train / 1d val / 5d step, fee 10 bps, slippage 5 bps
+
+Results (primary candidates):
+
+| Candidate | Trades | Accuracy | Net P&L (bps) | Sharpe | Brier | MaxDD |
+|-----------|--------|----------|---------------|--------|-------|-------|
+| V1 control | 32 | 28.1% | -2,623 | -19.7 | 0.320 | 5,113 |
+| A: +momentum | 30 | 33.3% | +95 | +0.7 | 0.311 | 2,906 |
+| B: +vol/regime | 19 | 42.1% | -138 | -1.6 | 0.308 | 1,931 |
+| D: +cross-tf | 32 | 28.1% | -2,862 | -20.4 | 0.311 | 4,261 |
+| F: +cross-tf + momentum | 31 | 29.0% | -2,050 | -14.5 | 0.308 | 3,689 |
+| E: combined (all 4) | 29 | 44.8% | -1,240 | -9.2 | 0.338 | 2,899 |
+
+Key findings:
+- **Cross-TF signal does NOT transfer to 4h**: D adds nothing over V1 (identical accuracy, worse P&L). The 4h/12h aggregation that worked on hourly data collapses when the base is already 4h.
+- **Momentum is the most robust feature family**: A is the only positive-P&L candidate (+95 bps). It transfers from hourly to 4h where cross-TF does not.
+- **Vol/regime improves at 4h**: B goes from weakest family on hourly to second-best on 4h (42.1% accuracy, near-zero P&L).
+- **E (combined) gets its 4h lift from momentum + vol/regime, not cross-TF**.
+- **F (cross-TF + momentum) underperforms A (momentum alone)** at 4h — cross-TF features are noise at this resolution.
+- **All candidates are unprofitable** except A (barely positive). This is a harder regime than the short hourly window.
+
+Implications for promotion:
+- Cross-TF signal appears resolution-specific (strong at 1h, absent at 4h)
+- Momentum signal is more robust across resolutions
+- No candidate is promotion-worthy from this study alone
+- The hourly cross-TF lift should be treated with caution — it may be fragile
+
+### CryptoCompare-backed 180d hourly benchmark — separate track (2026-03-29)
+
+**Purpose**: Longer hourly evaluation not possible with Kraken REST OHLC (720-candle limit). CryptoCompare `histohour` with `e=Kraken` provides 180 days of Kraken-specific hourly candles.
+
+**Dataset**: 4,320-row DOGE/USD 1h OHLCV (`data/research-cc-180d/`). Source: `cryptocompare`, exchange: `Kraken`. Date range: 2025-09-30 to 2026-03-29 (180 days).
+
+**30-day overlap validation (PASSED)**: Against Kraken-native 693-row dataset — close max diff 0.05%, volume mean diff 0.004%, timestamps 693/693 aligned perfectly. Source effect on V1 P&L: -303 bps (~10% of 30d loss), not the driver of longer-window improvement.
+
+**Config**: 18-fold walk-forward, 90d train / 1d val / 5d step, fee 10 bps, slippage 5 bps
+
+Feature selection results (180d, V1 vs feature families):
+
+| Candidate | Folds | Trades | Accuracy | Net P&L (bps) | Sharpe |
+|-----------|-------|--------|----------|---------------|--------|
+| V1 (7 features) | 18 | 214 | 47.2% | +5,531 | +11.3 |
+| A: +momentum (11) | 18 | 235 | 44.3% | -52 | -0.1 |
+| E: combined (22) | 18 | 292 | 43.8% | -3,291 | -4.5 |
+
+**V1 wins decisively on the longer window.** Feature engineering hurts — momentum and combined overfit on short training windows but fail with 90d of data. Simpler features resist overfitting.
+
+### V1 probability calibration (180d CC-backed track, 2026-03-29)
+
+**Protocol**: Same V1 7-feature pipeline, same walk-forward config. Calibration via `CalibratedClassifierCV` with inner 3-fold CV on training data only — calibrator never sees the outer validation fold. Leakage-safe by construction.
+
+| Candidate | Trades | Accuracy | P&L (bps) | Sharpe | Brier | LogLoss | Hit Rate | MaxDD |
+|-----------|--------|----------|-----------|--------|-------|---------|----------|-------|
+| V1 uncalibrated | 214 | 47.2% | +5,531 | +11.3 | 0.2551 | 0.7033 | 53.7% | 3,738 |
+| V1 + Platt | 171 | 43.3% | -2,326 | -6.6 | 0.2566 | 0.7064 | 47.4% | 4,633 |
+| **V1 + isotonic** | **243** | **50.2%** | **+11,479** | **+20.2** | **0.2548** | **0.7030** | **56.4%** | **2,902** |
+
+Delta vs V1 uncalibrated:
+
+| | dP&L | dSharpe | dBrier | dLogLoss | dTrades | dHitRate |
+|---|---|---|---|---|---|---|
+| V1 + Platt | -7,857 | -17.8 | +0.0015 | +0.0031 | -43 | -6.4pp |
+| **V1 + isotonic** | **+5,948** | **+9.0** | **-0.0003** | **-0.0003** | **+29** | **+2.6pp** |
+
 **Decision**:
-- Logistic regression is the incumbent research winner
-- LLM candidate remains as proven infrastructure for future use
-- Phase 5b (fine-tuning) is paused — not justified by current results
-- Next research effort: feature engineering, calibration, stronger baselines
+- **V1 + Platt: REJECT.** Destroys trading performance (-7,857 bps). Platt scaling makes predictions more conservative in the wrong direction — abstains on profitable trades.
+- **V1 + isotonic: RECOMMENDED.** P&L nearly doubles (+5,948 bps), Sharpe +9.0, hit rate +2.6pp, lower drawdown (-836 bps). Probability quality maintained (Brier/LogLoss essentially unchanged). More trades (243 vs 214) and the additional trades are net-profitable.
 
-### Recommended next research directions
+**Calibration verdict (2026-03-29)**:
 
-1. **Feature engineering**: add more engineered features to the sklearn baselines (momentum indicators, volatility regimes, volume profiles, cross-timeframe features)
-2. **Calibration**: apply Platt scaling or isotonic regression to baseline probability outputs
-3. **Longer evaluation windows**: run with more data (90d train, broader date range)
-4. **Fix TA ensemble**: pass training tail to predict() so it has enough history for signals
-5. **Only revisit LLM if**: feature-enriched prompt or news/sentiment data gives a fundamentally different input than raw OHLCV
+Non-TS-safe isotonic (random K-fold inner CV) showed +11,479 bps — but this was inflated by temporal leakage in the calibration split.
+
+Time-series-safe isotonic (tail holdout 80/20, `cv="prefit"`):
+
+| Candidate | Trades | Accuracy | P&L (bps) | Sharpe | Brier | Hit Rate | Fold W/L/T |
+|-----------|--------|----------|-----------|--------|-------|----------|------------|
+| V1 uncalibrated | 214 | 47.2% | +5,531 | +11.3 | 0.255 | 53.7% | — |
+| V1+isotonic (TS-safe) | 292 | 46.9% | +1,565 | +2.1 | 0.267 | 51.0% | 5/12/1 |
+
+**Decision: V1 uncalibrated is the research winner.** Isotonic calibration degrades P&L by -3,967 bps and Sharpe by -9.2 under time-series-safe conditions. It loses 12 of 18 folds. The non-TS-safe result was a calibration artifact — isotonic overfit when allowed to see "future" data within the training window via random K-fold. Platt scaling was already rejected (destroys trading performance).
 
 ### What the bot can do now
 
@@ -182,9 +504,15 @@ b732d54 build(phase-5a): add LLM candidate via Ollama with 6h decision cadence
 - **kraken-bot-v4 tests**: 447 passed (393 existing + 54 TUI), ruff clean
 - **autoresearch tests**: 119 passed, 11 skipped (parity tests, Python 3.10 vs 3.11)
 - **Trading bot**: unchanged, still live-capable with TA ensemble beliefs
-- **Evaluation harness**: fully operational with 4 candidates (TA, LogReg, GBT, LLM)
-- **Incumbent winner**: logistic regression (+2,838 bps, 67.6% accuracy, Sharpe 29.6)
+- **Evaluation harness**: fully operational with 8 ablation candidates + 4 original candidates; all results persisted as JSON experiment records
+- **Kraken-native 30d benchmark**: V1 -3,103 bps (4 folds, 10d train). No profitable candidate on short window.
+- **CC-backed 180d benchmark**: V1 **+5,531 bps, Sharpe 11.3** (18 folds, 90d train, source: CryptoCompare e=Kraken). Features overfit — A (-52 bps), E (-3,291 bps) both lose to V1.
+- **30d overlap validation**: PASSED (close <0.05% diff, timestamps 693/693, source effect ~300 bps)
+- **Hourly ablation (corrected 2026-03-29)**: Cross-TF lookahead bug fixed. Momentum strongest single family on short window; V1 wins on long window.
+- **4h robustness study (separate)**: Momentum only profitable family. Cross-TF does not transfer.
+- **Cross-TF deprioritized**: 75% of apparent lift was lookahead artifact.
 - **LLM path**: proven infrastructure, does not beat LogReg, Phase 5b paused
+- **Benchmark parity**: resolved — dataset dedup (commit a584999) was the sole cause of the mismatch
 - **Artifact contract**: defined and synced to kraken-bot-v4
 - **IPEX-Ollama**: working at `C:\Users\rober\ipex-ollama\` with Intel Arc GPU acceleration
 

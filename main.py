@@ -35,6 +35,7 @@ from persistence.sqlite import (
     open_database,
 )
 from beliefs.technical_ensemble_handler import technical_ensemble_belief_handler
+from beliefs.research_model_handler import make_research_model_handler, make_shadow_handler
 from runtime_loop import SchedulerRuntime, build_initial_scheduler_state
 from trading.reconciler import ReconciliationReport, RecordedState, reconcile
 
@@ -131,7 +132,11 @@ def _build_executor(settings: Settings) -> KrakenExecutor:
         tier=settings.kraken_tier,
     )
     transport = HttpKrakenTransport()
-    order_gate = OrderGate(client=client, allowed_pairs=settings.allowed_pairs)
+    order_gate = OrderGate(
+        client=client,
+        allowed_pairs=settings.allowed_pairs,
+        kraken_tier=settings.kraken_tier,
+    )
     return KrakenExecutor(
         client=client,
         transport=transport,
@@ -223,6 +228,24 @@ def _run_main_loop(
     if settings.disable_order_mutations:
         logger.info("Order mutations are DISABLED — AddOrder/CancelOrder blocked")
 
+    # Select primary belief handler
+    if settings.belief_model == "research_model":
+        if not settings.active_artifact_id:
+            raise SystemExit("ACTIVE_ARTIFACT_ID required when BELIEF_MODEL=research_model")
+        artifact_dir = Path("artifacts") / settings.active_artifact_id
+        belief_handler = make_research_model_handler(artifact_dir)
+        logger.info("Belief model: research_model (artifact=%s)", settings.active_artifact_id)
+    else:
+        belief_handler = technical_ensemble_belief_handler
+        logger.info("Belief model: technical_ensemble")
+
+    # Optional shadow handler (logs predictions, does not enqueue)
+    shadow_handler = None
+    if settings.shadow_artifact_id:
+        shadow_dir = Path("artifacts") / settings.shadow_artifact_id
+        shadow_handler = make_shadow_handler(shadow_dir)
+        logger.info("Shadow artifact: %s", settings.shadow_artifact_id)
+
     runtime = SchedulerRuntime(
         settings=settings,
         executor=executor,
@@ -233,7 +256,8 @@ def _run_main_loop(
             report=report,
             now=datetime.now(timezone.utc),
         ),
-        belief_refresh_handler=technical_ensemble_belief_handler,
+        belief_refresh_handler=belief_handler,
+        shadow_belief_handler=shadow_handler,
     )
     try:
         asyncio.run(runtime.run_forever())

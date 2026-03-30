@@ -41,6 +41,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--db-path", default=None,
         help="Path to SQLite database for trade data (optional)."
     )
+    parser.add_argument(
+        "--source", default="kraken", choices=["kraken", "cryptocompare"],
+        help="Data source: kraken (720-candle limit) or cryptocompare (e=Kraken, longer history)."
+    )
     return parser.parse_args(argv)
 
 
@@ -63,6 +67,7 @@ def main(argv: list[str] | None = None) -> int:
             since=args.since,
             until=args.until,
             db_reader=db_reader,
+            source=args.source,
         )
     except DatasetBuildError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)

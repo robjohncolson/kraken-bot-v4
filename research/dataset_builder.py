@@ -9,6 +9,7 @@ from typing import Any
 import pandas as pd
 
 from research.ohlcv_history import fetch_ohlcv_history
+from research.ohlcv_cryptocompare import fetch_ohlcv_cryptocompare
 from research.db_reader import ResearchReader
 from research.labels import compute_labels
 
@@ -37,21 +38,34 @@ class DatasetBuilder:
         since: int | None = None,
         until: int | None = None,
         db_reader: ResearchReader | None = None,
+        source: str = "kraken",
     ) -> dict[str, Any]:
         """Build and export the research dataset.
 
         Steps:
-        1. Fetch OHLCV history via fetch_ohlcv_history
+        1. Fetch OHLCV history via Kraken or CryptoCompare
         2. Optionally merge trade data from DB reader
         3. Compute labels
         4. Split into market features (point-in-time only) and labels
         5. Write market_v1.parquet, labels_v1.parquet, manifest_v1.json
 
+        Args:
+            source: ``"kraken"`` for Kraken REST API (720-candle limit),
+                ``"cryptocompare"`` for CryptoCompare histohour with
+                ``e=Kraken`` (longer history, research only).
+
         Returns:
             manifest dict with metadata about the export
         """
         # Fetch OHLCV
-        ohlcv_df = fetch_ohlcv_history(pair, interval, since=since or 0, until=until)
+        if source == "cryptocompare":
+            ohlcv_df = fetch_ohlcv_cryptocompare(
+                pair, interval, since=since, until=until, exchange="Kraken",
+            )
+        else:
+            ohlcv_df = fetch_ohlcv_history(
+                pair, interval, since=since or 0, until=until,
+            )
         if ohlcv_df.empty:
             raise DatasetBuildError(f"No OHLCV data for {pair}")
 
@@ -90,7 +104,7 @@ class DatasetBuilder:
         labels_df.to_parquet(labels_path, index=False)
 
         # Build manifest
-        manifest = {
+        manifest: dict[str, Any] = {
             "schema_version": f"research-dataset/{self._schema_version}",
             "pair": pair,
             "interval_minutes": interval,
@@ -99,10 +113,13 @@ class DatasetBuilder:
                 "start": int(market_df["timestamp"].iloc[0]),
                 "end": int(market_df["timestamp"].iloc[-1]),
             },
+            "source": source,
             "market_columns": list(float_market.columns),
             "label_columns": list(labels_df.columns),
             "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         }
+        if source == "cryptocompare":
+            manifest["exchange"] = "Kraken"
 
         manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
 

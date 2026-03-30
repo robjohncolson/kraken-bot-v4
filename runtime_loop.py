@@ -87,6 +87,7 @@ BeliefRefreshHandler = Callable[
     [BeliefRefreshRequest],
     BeliefSnapshot | None | Awaitable[BeliefSnapshot | None],
 ]
+ShadowBeliefHandler = Callable[[BeliefRefreshRequest], None]
 
 
 @dataclass(slots=True)
@@ -153,6 +154,7 @@ class SchedulerRuntime:
         scheduler_config: SchedulerConfig | None = None,
         websocket_factory: WebSocketFactory | None = None,
         belief_refresh_handler: BeliefRefreshHandler | None = None,
+        shadow_belief_handler: ShadowBeliefHandler | None = None,
         conditional_tree: ConditionalTreeCoordinator | None = None,
         serve_dashboard: bool = True,
         sse_publisher: SsePublisher = publish,
@@ -174,6 +176,7 @@ class SchedulerRuntime:
             settings=settings,
         )
         self._belief_refresh_handler = belief_refresh_handler
+        self._shadow_belief_handler = shadow_belief_handler
         self._conditional_tree_state = _conditional_tree_state(initial_state)
         self._conditional_tree = None
         if settings.enable_conditional_tree:
@@ -198,6 +201,7 @@ class SchedulerRuntime:
         self._last_runtime_error: str | None = None
         self._last_belief_poll_at: datetime | None = None
         self._belief_poll_interval_sec = settings.belief_stale_hours * 3600 // 2  # poll at half staleness
+        self._ws_backoff_until: datetime | None = None
         factory = websocket_factory or _default_websocket_factory
         self._websocket = factory(self._handle_price_tick, self._handle_fill_confirmed)
         self.app = build_runtime_app(state_provider=self._dashboard_store.snapshot)
@@ -209,8 +213,8 @@ class SchedulerRuntime:
     async def start(self) -> None:
         if self._serve_dashboard:
             await self._start_dashboard_server()
-        await self._ensure_websocket_connected()
-        await self._ensure_subscriptions()
+        # WS connect is deferred to run_once — skip here to avoid blocking
+        # startup on flaky/filtered networks. REST price fallback covers us.
         await self._publish_dashboard_update()
         self._write_heartbeat()
 
@@ -234,6 +238,7 @@ class SchedulerRuntime:
 
     async def run_once(self) -> tuple[object, ...]:
         now = self._utc_now()
+        logger.info("cycle_start: %s", now.isoformat())
         try:
             async with self._state_lock:
                 state = replace(self._state, now=now)
@@ -419,6 +424,32 @@ class SchedulerRuntime:
             if belief is not None:
                 await self.enqueue_belief(belief, observed_at=now)
 
+            # REST price fallback: if WS hasn't delivered a price yet,
+            # use the latest OHLCV close so the reducer has a reference price.
+            async with self._state_lock:
+                if pair not in self._state.current_prices:
+                    try:
+                        from exchange.ohlcv import fetch_ohlcv
+                        bars = fetch_ohlcv(pair, interval=60, count=1)
+                        if not bars.empty:
+                            last_close = Decimal(str(float(bars["close"].iloc[-1])))
+                            prices = dict(self._state.current_prices)
+                            prices[pair] = PriceSnapshot(
+                                price=last_close,
+                                belief_timestamp=self._belief_timestamps.get(pair),
+                            )
+                            self._state = replace(self._state, current_prices=prices)
+                            logger.info("REST price fallback for %s: %s", pair, last_close)
+                    except Exception:
+                        logger.warning("REST price fallback failed for %s", pair, exc_info=True)
+
+            # Shadow: log research model prediction without enqueueing
+            if self._shadow_belief_handler is not None:
+                try:
+                    self._shadow_belief_handler(dummy_request)
+                except Exception:
+                    logger.warning("Shadow belief handler error for %s", pair, exc_info=True)
+
     async def _maybe_refresh_belief(self, request: BeliefRefreshRequest) -> None:
         if self._belief_refresh_handler is None:
             logger.info(
@@ -532,13 +563,10 @@ class SchedulerRuntime:
         await self._sleep(0)
 
     async def _ensure_websocket_connected(self) -> None:
-        if self._websocket.state is not ConnectionState.DISCONNECTED:
-            return
-        try:
-            await self._websocket.connect()
-        except ExchangeError as exc:
-            logger.warning("Kraken WebSocket connect failed: %s", exc)
-            self._last_runtime_error = str(exc)
+        # WS disabled: school network filters WSS connections to Kraken.
+        # REST price fallback in _maybe_poll_beliefs provides reference prices.
+        # TODO: re-enable WS when running on the home laptop (spare laptop deploy).
+        return
 
     async def _ensure_subscriptions(self) -> None:
         if self._websocket.state is not ConnectionState.CONNECTED:

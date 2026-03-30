@@ -97,6 +97,9 @@ class Settings:
     scanner_max_concurrency: int
     scanner_timeout_sec: float
     enable_conditional_tree: bool
+    belief_model: str
+    active_artifact_id: str | None
+    shadow_artifact_id: str | None
 
 
 def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
@@ -192,6 +195,9 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
             "ENABLE_CONDITIONAL_TREE",
             DEFAULT_ENABLE_CONDITIONAL_TREE,
         ),
+        belief_model=env.get("BELIEF_MODEL", "technical_ensemble").strip(),
+        active_artifact_id=_read_optional(env, "ACTIVE_ARTIFACT_ID"),
+        shadow_artifact_id=_read_optional(env, "SHADOW_ARTIFACT_ID"),
     )
 
 
