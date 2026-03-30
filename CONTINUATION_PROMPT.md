@@ -180,9 +180,10 @@ Review shadow metrics after 1+ week. If rollout gates pass, decide: tiny-size li
 ## Remaining priorities
 
 1. **Shadow/paper mode** validation on live data before real trading
-2. **Fix TA ensemble** prediction path (pass training tail to predict so it has enough history)
+2. ~~**Fix TA ensemble**~~ — RESOLVED: v1.1 in autoresearch already stores training tail and prepends it in predict(). The Phase 5a 0-trade result was v1.0 (pre-fix, 24-bar val window < 40-bar minimum). v1.1 produces 85 trades (693-row) and 400 trades (1-day-step). Live bot path is unaffected (fetches 50 bars, DOGE/USD always has data).
 3. **Exit price improvement** — use trigger/current price instead of entry_price placeholder
 4. **Revisit LLM only** with fundamentally different inputs (news/sentiment, not raw OHLCV)
+5. **Run TA on 180d CC-backed dataset** — no autoresearch experiment exists for the 4,320-row dataset yet
 
 ## Validation steps
 
@@ -260,7 +261,7 @@ Walk-forward results (5-fold, 10d train, 1d val, 5d step, DOGE/USD):
 | GBT | 44.3% | -2,732 | -19.5 | 43.2% | 88 |
 | TA ensemble | 0% | 0 | 0 | 0% | 0 |
 
-**Verdict**: Prompted LLM does not beat logistic regression. Infrastructure is proven (structured output works, GPU path viable, contract enforced), but there is no signal advantage. TA ensemble produces 0 trades on this window size (needs 40 bars history, validation window too short).
+**Verdict**: Prompted LLM does not beat logistic regression. Infrastructure is proven (structured output works, GPU path viable, contract enforced), but there is no signal advantage. TA ensemble v1.0 produced 0 trades (needs 40 bars history, 24-bar validation window too short). Fixed in v1.1 (training tail prepended) — subsequent runs produce 85-400 trades.
 
 **Note**: The +2,838 bps logistic regression result is **superseded** — it was achieved on a dataset with duplicate timestamps. See "Benchmark parity resolution" below for the corrected result.
 
