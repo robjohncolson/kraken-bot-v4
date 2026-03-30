@@ -472,7 +472,9 @@ class SchedulerRuntime:
         if self._websocket.state is not ConnectionState.CONNECTED:
             return
 
-        active_pairs = sorted(_active_pairs(self._state))
+        active_pairs = sorted(
+            _active_pairs(self._state) | self._settings.allowed_pairs
+        )
         new_pairs = [pair for pair in active_pairs if pair not in self._subscribed_pairs]
         if new_pairs:
             try:
