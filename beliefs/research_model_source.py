@@ -81,6 +81,7 @@ class ResearchModelSource:
         self._scaler = self._load_pkl("scaler.pkl")
         self._model = self._load_pkl("model.pkl")
         self._threshold: float = self._meta.get("threshold", 0.55)
+        self.threshold = self._threshold
         logger.info(
             "Research model loaded: artifact=%s family=%s features=%d threshold=%.2f",
             self._manifest.get("artifact_id", "unknown"),

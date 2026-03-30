@@ -12,3 +12,6 @@ build/state/
 build/logs/
 state/
 __pycache__/
+.venv/
+.claude/settings.local.json
+artifacts/
