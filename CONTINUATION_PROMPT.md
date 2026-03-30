@@ -181,7 +181,7 @@ Review shadow metrics after 1+ week. If rollout gates pass, decide: tiny-size li
 
 1. **Shadow/paper mode** validation on live data before real trading
 2. ~~**Fix TA ensemble**~~ — RESOLVED: v1.1 in autoresearch already stores training tail and prepends it in predict(). The Phase 5a 0-trade result was v1.0 (pre-fix, 24-bar val window < 40-bar minimum). v1.1 produces 85 trades (693-row) and 400 trades (1-day-step). Live bot path is unaffected (fetches 50 bars, DOGE/USD always has data).
-3. **Exit price improvement** — use trigger/current price instead of entry_price placeholder
+3. ~~**Exit price improvement**~~ — RESOLVED: all close paths now pass trigger/reference price as exit_price. Runtime applies configurable marketable-limit offset (EXIT_LIMIT_OFFSET_PCT, default 0.1%) and quantizes to min 4dp. Covers stop, target, window expiry, belief change, and hard drawdown. 488 tests pass.
 4. **Revisit LLM only** with fundamentally different inputs (news/sentiment, not raw OHLCV)
 5. **Run TA on 180d CC-backed dataset** — no autoresearch experiment exists for the 4,320-row dataset yet
 

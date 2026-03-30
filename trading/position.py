@@ -140,6 +140,7 @@ class PositionLifecycle:
         position: Position,
         *,
         reason: str,
+        exit_price: Decimal | None = None,
     ) -> PositionLifecycleResult:
         _require_open_position(position)
         rendered_reason = reason.strip()
@@ -159,7 +160,7 @@ class PositionLifecycle:
                 pair=position.pair,
                 side=position.side,
                 quantity=position.quantity,
-                limit_price=position.entry_price,
+                limit_price=exit_price or position.entry_price,
             ),),
         )
 
@@ -202,8 +203,9 @@ def close_position(
     position: Position,
     *,
     reason: str,
+    exit_price: Decimal | None = None,
 ) -> PositionLifecycleResult:
-    return PositionLifecycle.close_position(position, reason=reason)
+    return PositionLifecycle.close_position(position, reason=reason, exit_price=exit_price)
 
 
 def update_stop(

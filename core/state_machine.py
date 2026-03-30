@@ -131,7 +131,9 @@ def _handle_stop_triggered(
     if position is None:
         return state, (LogEvent(message=f"stop_triggered: position {event.position_id} not found"),)
 
-    _, lifecycle_actions = PositionLifecycle.close_position(position, reason="stop_loss")
+    _, lifecycle_actions = PositionLifecycle.close_position(
+        position, reason="stop_loss", exit_price=event.trigger_price,
+    )
 
     doge_belief = _belief_for_pair(state.beliefs, "DOGE/USD")
     doge_price = _doge_market_price(state, event.trigger_price, position.pair)
@@ -166,7 +168,9 @@ def _handle_target_hit(
     if position is None:
         return state, (LogEvent(message=f"target_hit: position {event.position_id} not found"),)
 
-    _, lifecycle_actions = PositionLifecycle.close_position(position, reason="target_hit")
+    _, lifecycle_actions = PositionLifecycle.close_position(
+        position, reason="target_hit", exit_price=event.trigger_price,
+    )
 
     doge_belief = _belief_for_pair(state.beliefs, "DOGE/USD")
     doge_price = _doge_market_price(state, event.trigger_price, position.pair)
@@ -195,13 +199,16 @@ def _handle_window_expired(
     if position is None:
         return state, (LogEvent(message=f"window_expired: position for {event.pair} not found"),)
 
-    _, lifecycle_actions = PositionLifecycle.close_position(position, reason="window_expired")
-
-    close_price = (
+    exit_price = (
         event.trigger_price
         or _get_reference_price(state, position.pair)
         or position.entry_price
     )
+    _, lifecycle_actions = PositionLifecycle.close_position(
+        position, reason="window_expired", exit_price=exit_price,
+    )
+
+    close_price = exit_price
     doge_belief = _belief_for_pair(state.beliefs, "DOGE/USD")
     doge_price = _doge_market_price(state, close_price, position.pair)
     updated_portfolio, portfolio_actions = PortfolioManager.apply_close(
@@ -593,16 +600,17 @@ def _close_position_on_belief_change(
     config: Settings,
 ) -> ReducerResult:
     _ = consensus, config
+    exit_price = _get_reference_price(state, position.pair) or position.entry_price
     _, lifecycle_actions = PositionLifecycle.close_position(
-        position, reason="belief_change",
+        position, reason="belief_change", exit_price=exit_price,
     )
     doge_belief = _belief_for_pair(state.beliefs, "DOGE/USD")
     updated_portfolio, portfolio_actions = PortfolioManager.apply_close(
         state.portfolio,
         position_id=position.position_id,
-        close_price=position.entry_price,
+        close_price=exit_price,
         doge_belief=doge_belief,
-        doge_market_price=position.entry_price if position.pair == "DOGE/USD" else None,
+        doge_market_price=exit_price if position.pair == "DOGE/USD" else None,
     )
     new_state = replace(state, portfolio=updated_portfolio)
     return new_state, lifecycle_actions + portfolio_actions

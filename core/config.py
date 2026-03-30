@@ -43,6 +43,7 @@ DEFAULT_SCANNER_PAIR_DISCOVERY_TTL_SEC = 3600
 DEFAULT_SCANNER_MAX_CONCURRENCY = 4
 DEFAULT_SCANNER_TIMEOUT_SEC = 15.0
 DEFAULT_ENABLE_CONDITIONAL_TREE = False
+DEFAULT_EXIT_LIMIT_OFFSET_PCT = 0.1
 
 ALLOWED_KRAKEN_TIERS = frozenset({"starter", "intermediate", "pro"})
 TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
@@ -97,6 +98,7 @@ class Settings:
     scanner_max_concurrency: int
     scanner_timeout_sec: float
     enable_conditional_tree: bool
+    exit_limit_offset_pct: float
     belief_model: str
     active_artifact_id: str | None
     shadow_artifact_id: str | None
@@ -194,6 +196,11 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
             env,
             "ENABLE_CONDITIONAL_TREE",
             DEFAULT_ENABLE_CONDITIONAL_TREE,
+        ),
+        exit_limit_offset_pct=_read_float(
+            env,
+            "EXIT_LIMIT_OFFSET_PCT",
+            DEFAULT_EXIT_LIMIT_OFFSET_PCT,
         ),
         belief_model=env.get("BELIEF_MODEL", "technical_ensemble").strip(),
         active_artifact_id=_read_optional(env, "ACTIVE_ARTIFACT_ID"),

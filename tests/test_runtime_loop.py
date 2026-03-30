@@ -402,5 +402,38 @@ def test_run_once_seeds_candidate_price_subscribes_pair_and_enqueues_rotation_be
     asyncio.run(scenario())
 
 
+def test_apply_exit_offset_long_sell_goes_below_trigger() -> None:
+    from runtime_loop import _apply_exit_offset
+
+    price = Decimal("120")
+    result = _apply_exit_offset(price, PositionSide.LONG, 0.1)
+    assert result < price
+    assert result == Decimal("119.8800")
+
+
+def test_apply_exit_offset_short_buy_goes_above_trigger() -> None:
+    from runtime_loop import _apply_exit_offset
+
+    price = Decimal("0.18")
+    result = _apply_exit_offset(price, PositionSide.SHORT, 0.1)
+    assert result > price
+    assert result == Decimal("0.1802")
+
+
+def test_apply_exit_offset_zero_offset_returns_original() -> None:
+    from runtime_loop import _apply_exit_offset
+
+    price = Decimal("100")
+    assert _apply_exit_offset(price, PositionSide.LONG, 0.0) == price
+
+
+def test_apply_exit_offset_preserves_fine_precision() -> None:
+    from runtime_loop import _apply_exit_offset
+
+    price = Decimal("0.1234")
+    result = _apply_exit_offset(price, PositionSide.LONG, 0.1)
+    assert result == Decimal("0.1233")
+
+
 async def _noop_publish(*, event: str, data, event_id: str | None = None) -> None:
     del event, data, event_id

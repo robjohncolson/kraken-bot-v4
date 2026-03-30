@@ -401,12 +401,16 @@ class SchedulerRuntime:
             )
             return
         close_side = OrderSide.SELL if effect.side == PositionSide.LONG else OrderSide.BUY
+        raw_price = effect.limit_price or ZERO_DECIMAL
+        limit_price = _apply_exit_offset(
+            raw_price, effect.side, self._settings.exit_limit_offset_pct,
+        )
         order = OrderRequest(
             pair=effect.pair,
             side=close_side,
             order_type=OrderType.LIMIT,
             quantity=effect.quantity,
-            limit_price=effect.limit_price or ZERO_DECIMAL,
+            limit_price=limit_price,
         )
         try:
             order_id = self._executor.execute_order(order)
@@ -770,6 +774,32 @@ def _build_belief_entries(
                 )
             )
     return tuple(sorted(entries, key=lambda item: (item.pair, item.source.value)))
+
+
+def _apply_exit_offset(
+    price: Decimal,
+    position_side: PositionSide,
+    offset_pct: float,
+) -> Decimal:
+    """Apply a marketable-limit offset to improve exit fill probability.
+
+    Long exits (sells) go slightly below trigger; short exits (buys) go
+    slightly above. Result is quantized to at least the input precision
+    or 4 decimal places, whichever is finer.
+    """
+    if price <= 0 or offset_pct <= 0:
+        return price
+    if position_side == PositionSide.LONG:
+        multiplier = Decimal(str(1 - offset_pct / 100))
+    else:
+        multiplier = Decimal(str(1 + offset_pct / 100))
+    raw = price * multiplier
+    # Use the finer of input precision or 4 decimal places
+    input_exp = price.as_tuple().exponent
+    min_exp = -4
+    quant_exp = min(input_exp, min_exp)  # type: ignore[arg-type]
+    template = Decimal(10) ** quant_exp
+    return raw.quantize(template)
 
 
 def _active_pairs(state: SchedulerState) -> set[str]:
