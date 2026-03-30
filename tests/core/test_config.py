@@ -31,6 +31,7 @@ def test_load_settings_uses_spec_defaults() -> None:
     assert settings.scanner_pair_discovery_ttl_sec == 3600
     assert settings.scanner_max_concurrency == 4
     assert settings.scanner_timeout_sec == 15.0
+    assert settings.enable_conditional_tree is False
 
 
 @pytest.mark.parametrize("missing_name", sorted(REQUIRED_ENV))
@@ -74,3 +75,9 @@ def test_scanner_settings_parse_from_environment() -> None:
     assert settings.scanner_pair_discovery_ttl_sec == 120
     assert settings.scanner_max_concurrency == 2
     assert settings.scanner_timeout_sec == 4.5
+
+
+def test_enable_conditional_tree_parses_from_environment() -> None:
+    settings = load_settings({**REQUIRED_ENV, "ENABLE_CONDITIONAL_TREE": "true"})
+
+    assert settings.enable_conditional_tree is True

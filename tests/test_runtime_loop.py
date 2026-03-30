@@ -23,6 +23,7 @@ from guardian import PriceSnapshot
 from persistence.sqlite import ensure_schema
 from runtime_loop import SchedulerRuntime, build_initial_scheduler_state
 from scheduler import SchedulerConfig
+from trading.conditional_tree import ConditionalTreeState
 from trading.reconciler import RecordedPosition, RecordedState, ReconciliationReport
 
 NOW = datetime(2026, 3, 25, 12, 0, tzinfo=timezone.utc)
@@ -75,12 +76,13 @@ class FakeRuntimeWebSocket:
         await self._on_fill(fill)
 
 
-def _settings() -> Settings:
+def _settings(**overrides: str) -> Settings:
     return load_settings(
         {
             "KRAKEN_API_KEY": "key",
             "KRAKEN_API_SECRET": "secret",
             "WEB_PORT": "8081",
+            **overrides,
         }
     )
 
@@ -297,6 +299,107 @@ def test_belief_refresh_handler_enqueues_and_applies_belief_on_next_cycle() -> N
         await runtime.run_once()
         assert runtime.state.pending_belief_signals == ()
         assert runtime.state.bot_state.beliefs == (fresh_belief,)
+
+    asyncio.run(scenario())
+
+
+def test_run_once_seeds_candidate_price_subscribes_pair_and_enqueues_rotation_belief() -> None:
+    async def scenario() -> None:
+        fake_websocket: FakeRuntimeWebSocket | None = None
+        candidate_belief = BeliefSnapshot(
+            pair="BTC/USD",
+            direction=BeliefDirection.BULLISH,
+            confidence=0.88,
+            regime=MarketRegime.TRENDING,
+            sources=(BeliefSource.TECHNICAL_ENSEMBLE,),
+        )
+
+        class FakeConditionalTree:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def maybe_plan(self, *, state, tree_state, now):
+                del state, tree_state
+                self.calls += 1
+                return ConditionalTreeState(
+                    is_active=True,
+                    trigger_time=now,
+                    bear_estimate=None,
+                    chosen_candidate=type(
+                        "Candidate",
+                        (),
+                        {
+                            "pair": "BTC/USD",
+                            "belief": candidate_belief,
+                            "reference_price_hint": Decimal("101.25"),
+                            "estimated_peak_hours": 6,
+                        },
+                    )(),
+                    exit_deadline=now + timedelta(hours=6),
+                )
+
+        conditional_tree = FakeConditionalTree()
+
+        def websocket_factory(on_tick, on_fill) -> FakeRuntimeWebSocket:
+            nonlocal fake_websocket
+            fake_websocket = FakeRuntimeWebSocket(on_tick, on_fill)
+            fake_websocket.state = ConnectionState.CONNECTED
+            return fake_websocket
+
+        initial_state = build_initial_scheduler_state(
+            kraken_state=KrakenState(),
+            recorded_state=RecordedState(),
+            report=ReconciliationReport(),
+            now=NOW,
+        )
+        initial_state = replace(
+            initial_state,
+            bot_state=BotState(
+                portfolio=Portfolio(cash_usd=Decimal("25")),
+                beliefs=(
+                    BeliefSnapshot(
+                        pair="DOGE/USD",
+                        direction=BeliefDirection.BEARISH,
+                        confidence=0.9,
+                        regime=MarketRegime.TRENDING,
+                        sources=(BeliefSource.TECHNICAL_ENSEMBLE,),
+                    ),
+                ),
+            ),
+            last_guardian_check_at=NOW,
+            last_reconcile_at=NOW,
+        )
+
+        runtime = SchedulerRuntime(
+            settings=_settings(ENABLE_CONDITIONAL_TREE="true"),
+            executor=FakeExecutor(KrakenState()),
+            conn=_memory_db(),
+            initial_state=initial_state,
+            scheduler_config=SchedulerConfig(
+                cycle_interval_sec=1,
+                reconcile_interval_sec=9999,
+                guardian_interval_sec=9999,
+            ),
+            websocket_factory=websocket_factory,
+            conditional_tree=conditional_tree,
+            serve_dashboard=False,
+            sse_publisher=_noop_publish,
+            heartbeat_writer=lambda snapshot: None,
+            utc_now=lambda: NOW,
+        )
+
+        await runtime.run_once()
+
+        assert fake_websocket is not None
+        assert conditional_tree.calls == 1
+        assert fake_websocket.ticker_subscriptions == [("DOGE/USD",), ("BTC/USD",)]
+        assert runtime.state.pending_belief_signals == (candidate_belief,)
+        seeded = runtime.state.current_prices["BTC/USD"]
+        assert isinstance(seeded, PriceSnapshot)
+        assert seeded.price == Decimal("101.25")
+        assert runtime._conditional_tree_state.is_active is True
+        assert runtime._conditional_tree_state.chosen_candidate is not None
+        assert runtime._conditional_tree_state.chosen_candidate.pair == "BTC/USD"
 
     asyncio.run(scenario())
 

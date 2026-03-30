@@ -42,6 +42,7 @@ DEFAULT_STARTUP_RECONCILE_ONLY = True
 DEFAULT_SCANNER_PAIR_DISCOVERY_TTL_SEC = 3600
 DEFAULT_SCANNER_MAX_CONCURRENCY = 4
 DEFAULT_SCANNER_TIMEOUT_SEC = 15.0
+DEFAULT_ENABLE_CONDITIONAL_TREE = False
 
 ALLOWED_KRAKEN_TIERS = frozenset({"starter", "intermediate", "pro"})
 TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
@@ -95,6 +96,7 @@ class Settings:
     scanner_pair_discovery_ttl_sec: int
     scanner_max_concurrency: int
     scanner_timeout_sec: float
+    enable_conditional_tree: bool
 
 
 def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
@@ -184,6 +186,11 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
             env,
             "SCANNER_TIMEOUT_SEC",
             DEFAULT_SCANNER_TIMEOUT_SEC,
+        ),
+        enable_conditional_tree=_read_bool(
+            env,
+            "ENABLE_CONDITIONAL_TREE",
+            DEFAULT_ENABLE_CONDITIONAL_TREE,
         ),
     )
 

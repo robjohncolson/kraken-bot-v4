@@ -43,6 +43,8 @@ from scheduler import (
     SchedulerConfig,
     SchedulerState,
 )
+from trading.conditional_tree import ConditionalTreeCoordinator, ConditionalTreeState
+from trading.pair_scanner import PairScanner
 from trading.reconciler import KrakenState, ReconciliationReport, RecordedState
 from web.app import create_app
 from web.routes import (
@@ -151,6 +153,7 @@ class SchedulerRuntime:
         scheduler_config: SchedulerConfig | None = None,
         websocket_factory: WebSocketFactory | None = None,
         belief_refresh_handler: BeliefRefreshHandler | None = None,
+        conditional_tree: ConditionalTreeCoordinator | None = None,
         serve_dashboard: bool = True,
         sse_publisher: SsePublisher = publish,
         heartbeat_writer: HeartbeatWriter = write_heartbeat,
@@ -171,6 +174,13 @@ class SchedulerRuntime:
             settings=settings,
         )
         self._belief_refresh_handler = belief_refresh_handler
+        self._conditional_tree_state = ConditionalTreeState()
+        self._conditional_tree = None
+        if settings.enable_conditional_tree:
+            self._conditional_tree = conditional_tree or _build_conditional_tree(
+                settings=settings,
+                executor=executor,
+            )
         self._sleep = sleep
         self._utc_now = utc_now or _utcnow
         self._sse_publisher = sse_publisher
@@ -250,6 +260,7 @@ class SchedulerRuntime:
         await self._ensure_subscriptions()
         await self._maybe_poll_beliefs(now)
         await self._handle_effects(effects)
+        await self._maybe_plan_conditional_rotation(now)
         self._write_heartbeat()
         return effects
 
@@ -422,6 +433,65 @@ class SchedulerRuntime:
             return
         await self.enqueue_belief(belief, observed_at=request.checked_at)
 
+    async def _maybe_plan_conditional_rotation(self, now: datetime) -> None:
+        if self._conditional_tree is None or self._conditional_tree_state.is_active:
+            return
+
+        async with self._state_lock:
+            state_snapshot = self._state
+            tree_state = self._conditional_tree_state
+
+        planned_state = self._conditional_tree.maybe_plan(
+            state=state_snapshot,
+            tree_state=tree_state,
+            now=now,
+        )
+        if planned_state is None or planned_state.chosen_candidate is None:
+            return
+
+        candidate = planned_state.chosen_candidate
+        await self._seed_candidate_reference_price(
+            pair=candidate.pair,
+            reference_price=candidate.reference_price_hint,
+            observed_at=now,
+        )
+        await self._subscribe_candidate_pair(candidate.pair)
+
+        async with self._state_lock:
+            self._conditional_tree_state = planned_state
+
+        await self.enqueue_belief(candidate.belief, observed_at=now)
+
+    async def _seed_candidate_reference_price(
+        self,
+        *,
+        pair: str,
+        reference_price: Decimal,
+        observed_at: datetime,
+    ) -> None:
+        async with self._state_lock:
+            if pair in self._state.current_prices:
+                return
+            current_prices = dict(self._state.current_prices)
+            current_prices[pair] = PriceSnapshot(
+                price=reference_price,
+                belief_timestamp=observed_at,
+            )
+            self._state = replace(self._state, current_prices=current_prices)
+
+    async def _subscribe_candidate_pair(self, pair: str) -> None:
+        if self._websocket.state is not ConnectionState.CONNECTED:
+            return
+        if pair in self._subscribed_pairs:
+            return
+        try:
+            await self._websocket.subscribe_ticker((pair,))
+        except ExchangeError as exc:
+            logger.warning("Ticker subscription failed for %s: %s", pair, exc)
+            self._last_runtime_error = str(exc)
+        else:
+            self._subscribed_pairs.add(pair)
+
     async def _publish_dashboard_update(self) -> None:
         dashboard_state = self._build_dashboard_state(self._state)
         self._dashboard_store.update(dashboard_state)
@@ -541,6 +611,21 @@ def _default_websocket_factory(
     return KrakenWebSocketV2(
         ticker_handler=ticker_handler,
         fill_handler=fill_handler,
+    )
+
+
+def _build_conditional_tree(
+    *,
+    settings: Settings,
+    executor: KrakenExecutor,
+) -> ConditionalTreeCoordinator | None:
+    client = getattr(executor, "_client", None)
+    if client is None:
+        logger.warning("Conditional tree enabled but executor client is unavailable")
+        return None
+    return ConditionalTreeCoordinator(
+        settings=settings,
+        pair_scanner=PairScanner(client=client, settings=settings),
     )
 
 
