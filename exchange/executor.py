@@ -143,7 +143,7 @@ class KrakenExecutor:
     def execute_order(self, order: OrderRequest) -> str:
         self._ensure_mutations_enabled()
         prepared = self._order_gate.place_order(order)
-        client_order_id = _require_client_order_id(prepared)
+        client_order_id = prepared.payload.get("cl_ord_id")
 
         try:
             result = self._execute(prepared)
@@ -155,6 +155,10 @@ class KrakenExecutor:
             TimeoutError,
             URLError,
         ) as exc:
+            if not client_order_id:
+                raise ExchangeError(
+                    f"Order placement failed and cannot recover without cl_ord_id: {exc}"
+                ) from exc
             recovered_order = self._recover_open_order(
                 client_order_id=client_order_id,
                 failure=exc,
@@ -165,6 +169,11 @@ class KrakenExecutor:
                 recovered_order.order_id,
             )
             return recovered_order.order_id
+
+        # Starter tier: no cl_ord_id verification, trust the txid
+        if not client_order_id:
+            logger.info("Order placed (starter tier, no cl_ord_id): txid=%s", txid)
+            return txid
 
         verified_order = self._verify_open_order(
             txid=txid,

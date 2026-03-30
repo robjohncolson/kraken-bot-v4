@@ -43,6 +43,7 @@ def _make_executor(
     order_gate = OrderGate(
         client=client,
         sequence_source=iter((1,)).__next__,
+        kraken_tier="intermediate",
     )
     return KrakenExecutor(
         client=client,

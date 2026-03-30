@@ -159,12 +159,14 @@ class OrderGate:
         now: TimeSource | None = None,
         sequence_source: SequenceSource | None = None,
         allowed_pairs: frozenset[str] = frozenset(),
+        kraken_tier: str = "starter",
     ) -> None:
         self._client = client
         self._order_prefix = order_prefix
         self._sequence_source = count(1).__next__ if sequence_source is None else sequence_source
         self._breaker = OrderMutationCircuitBreaker(policy=breaker_policy, now=now)
         self._allowed_pairs = allowed_pairs
+        self._kraken_tier = kraken_tier
 
     @property
     def circuit_breaker(self) -> CircuitBreakerSnapshot:
@@ -216,11 +218,13 @@ class OrderGate:
     def build_order_payload(self, order: OrderRequest) -> Mapping[str, object]:
         client_order_id = order.client_order_id or self._next_client_order_id(order.pair)
         payload: dict[str, object] = {
-            "cl_ord_id": client_order_id,
             "ordertype": _render_order_type(order.order_type),
             "type": order.side.value,
             "volume": _render_decimal(order.quantity),
         }
+        # cl_ord_id is not supported on Kraken Starter tier
+        if self._kraken_tier != "starter":
+            payload["cl_ord_id"] = client_order_id
 
         if order.order_type is OrderType.LIMIT:
             if order.limit_price is None:

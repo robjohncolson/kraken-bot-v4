@@ -51,6 +51,7 @@ def test_place_order_generates_cl_ord_id_for_emitted_payloads() -> None:
     gate = OrderGate(
         client=KrakenClient(api_key="key", api_secret="secret"),
         sequence_source=iter((1,)).__next__,
+        kraken_tier="intermediate",
     )
     order = OrderRequest(
         pair="xxrpzusd",
