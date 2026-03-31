@@ -222,7 +222,7 @@ Bot running on WSL Athena pane via `/mnt/c/Python313/python.exe main.py`:
 
 ## Goal for next session
 
-Monitor first trades. If model stays neutral for extended period, investigate signal frequency on live data vs backtest. Get CryptoCompare API key for LLM sentiment Phase 1.
+Implement recursive rotation tree Phase R1 (data model + scanner generalization). Spec at `docs/specs/recursive-rotation-tree-spec.md`. This replaces the single-pair conditional tree with a denomination-agnostic recursive trading system.
 
 ## Completed priorities
 
