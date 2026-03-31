@@ -189,9 +189,31 @@ CC+Codex audit identified 5 blockers. 4 fixed this session, 1 deferred:
 
 **Operational rule for $10 test phase**: do not restart with live pending orders or open positions. Only run when startup reconciliation is clean.
 
+## TA Ensemble 180d Benchmark (completed 2026-03-30)
+
+| Metric | V1 LogReg | TA Ensemble | Winner |
+|--------|-----------|-------------|--------|
+| Trades | 214 | 380 | - |
+| Abstains | 218 | 52 | - |
+| Direction accuracy | 47.2% | 48.9% | TA (marginal) |
+| Net P&L | **+5,531 bps** | +257 bps | **LogReg** |
+| Sharpe | **11.3** | 0.27 | **LogReg** |
+| Hit rate | 53.7% | 49.5% | LogReg |
+| Brier | 0.255 | 0.365 | LogReg |
+
+**Conclusion**: V1 LogReg wins decisively. TA generates 1.8x more trades but with dramatically lower quality. LogReg's selective trading (higher abstain rate) produces much better risk-adjusted returns.
+
+## Bot deployment (live 2026-03-30)
+
+Bot running on WSL Athena pane via `/mnt/c/Python313/python.exe main.py`:
+- Belief model: research_model (V1 LogReg)
+- Current signal: neutral (model abstaining)
+- Portfolio: ~$502 (5,090 DOGE + $40 USD)
+- Dashboard: localhost:58392
+
 ## Goal for next session
 
-Deploy to home laptop. Run: `pip install -r requirements.txt`, safe-mode smoke test, then $10 live test with DOGE/USD.
+Monitor first trades. If model stays neutral for extended period, investigate signal frequency on live data vs backtest. Get CryptoCompare API key for LLM sentiment Phase 1.
 
 ## Completed priorities
 
@@ -212,8 +234,8 @@ Deploy to home laptop. Run: `pip install -r requirements.txt`, safe-mode smoke t
 1. ~~**Shadow/paper mode**~~ — RESOLVED via backfill: all rollout gates pass on 180d historical replay (+4,862 bps, 55.1% accuracy, 100% coverage)
 2. ~~**Fix TA ensemble**~~ — RESOLVED: v1.1 in autoresearch already stores training tail and prepends it in predict(). The Phase 5a 0-trade result was v1.0 (pre-fix, 24-bar val window < 40-bar minimum). v1.1 produces 85 trades (693-row) and 400 trades (1-day-step). Live bot path is unaffected (fetches 50 bars, DOGE/USD always has data).
 3. ~~**Exit price improvement**~~ — RESOLVED: all close paths now pass trigger/reference price as exit_price. Runtime applies configurable marketable-limit offset (EXIT_LIMIT_OFFSET_PCT, default 0.1%) and quantizes to min 4dp. Covers stop, target, window expiry, belief change, and hard drawdown. 493 tests pass.
-4. **Revisit LLM with news/sentiment** — spec at `docs/specs/llm-sentiment-revisit-spec.md`. Phased: data audit → news fetcher → candidate → evaluation → integration
-5. **Run TA on 180d CC-backed dataset** — spec at `docs/specs/ta-ensemble-180d-benchmark-spec.md`. Single autoresearch experiment run
+4. ~~**Run TA on 180d CC-backed dataset**~~ — DONE. TA ensemble: +257 bps, 48.9% accuracy, 380 trades, Sharpe 0.27. V1 LogReg wins decisively (+5,531 bps, Sharpe 11.3). TA kept as secondary benchmark only. Experiment: `autoresearch/experiments/ta_ensemble_6signal_cc3e0f0b.json`
+5. **Revisit LLM with news/sentiment** — BLOCKED pending: (a) CryptoCompare API key (news endpoint requires auth), (b) confirmation that free-tier key can access `/data/v2/news/`. Next steps: user signs up at cryptocompare.com, run one-call smoke test, proceed with Phase 1 density audit only if news endpoint works. Spec at `docs/specs/llm-sentiment-revisit-spec.md`
 
 ## Validation steps
 
