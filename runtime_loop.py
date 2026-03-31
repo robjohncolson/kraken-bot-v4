@@ -47,6 +47,8 @@ from scheduler import (
 )
 from trading.conditional_tree import ConditionalTreeCoordinator, ConditionalTreeState
 from trading.pair_scanner import PairScanner
+from trading.rotation_planner import RotationTreePlanner
+from trading.rotation_tree import cascade_close, expired_nodes
 from trading.reconciler import KrakenState, ReconciliationReport, RecordedState
 from web.app import create_app
 from web.routes import (
@@ -218,6 +220,34 @@ class SchedulerRuntime:
                 settings=settings,
                 executor=executor,
             )
+        # Rotation tree (denomination-agnostic recursive trading)
+        self._rotation_tree: RotationTreeState | None = None
+        self._rotation_planner: RotationTreePlanner | None = None
+        if settings.enable_rotation_tree:
+            from core.types import RotationTreeState
+            scanner = PairScanner(client=executor._client, settings=settings)
+            self._rotation_planner = RotationTreePlanner(
+                settings=settings, pair_scanner=scanner,
+            )
+            # Initialize root nodes from current balances
+            balances_dict = {
+                b.asset: b.available + b.held
+                for b in initial_state.kraken_state.balances
+            }
+            prices = {}
+            for pair_key, snap in initial_state.current_prices.items():
+                if "/" in pair_key:
+                    base = pair_key.split("/")[0]
+                    prices[base] = snap.price
+            prices["USD"] = Decimal("1")
+            self._rotation_tree = self._rotation_planner.initialize_roots(
+                balances_dict, prices_usd=prices,
+            )
+            logger.info(
+                "Rotation tree initialized: %d root nodes",
+                len(self._rotation_tree.root_node_ids),
+            )
+
         self._sleep = sleep
         self._utc_now = utc_now or _utcnow
         self._sse_publisher = sse_publisher
@@ -303,6 +333,7 @@ class SchedulerRuntime:
         await self._maybe_poll_beliefs(now)
         await self._handle_effects(effects)
         await self._maybe_plan_conditional_rotation(now)
+        await self._maybe_run_rotation_planner(now)
         self._write_heartbeat()
         return effects
 
@@ -620,6 +651,34 @@ class SchedulerRuntime:
             self._state = replace(self._state, conditional_tree_state=planned_state)
 
         await self.enqueue_belief(candidate.belief, observed_at=now)
+
+    async def _maybe_run_rotation_planner(self, now: datetime) -> None:
+        """Run the rotation tree planner cycle if enabled."""
+        if self._rotation_planner is None or self._rotation_tree is None:
+            return
+
+        # Check for expired nodes and cascade-close them
+        expired = expired_nodes(self._rotation_tree, now)
+        for node in expired:
+            self._rotation_tree = cascade_close(self._rotation_tree, node.node_id)
+            logger.info(
+                "Rotation node expired: %s (%s, depth=%d)",
+                node.node_id, node.asset, node.depth,
+            )
+
+        # Run planner to find new candidates
+        updated_tree = self._rotation_planner.plan_cycle(self._rotation_tree, now)
+
+        # Seed reference prices for newly planned nodes
+        for node in updated_tree.nodes:
+            if node.entry_pair and node.entry_price and node.entry_pair not in self._state.current_prices:
+                await self._seed_candidate_reference_price(
+                    pair=node.entry_pair,
+                    reference_price=node.entry_price,
+                    observed_at=now,
+                )
+
+        self._rotation_tree = updated_tree
 
     async def _seed_candidate_reference_price(
         self,
