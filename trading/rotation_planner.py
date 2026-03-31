@@ -1,0 +1,150 @@
+"""Rotation tree planner — scans leaf nodes for child rotation candidates.
+
+Pure function: takes tree state + market context, returns updated tree state
+with new planned children. Does NOT execute orders — the runtime handles that.
+"""
+
+from __future__ import annotations
+
+import logging
+from datetime import datetime
+from decimal import Decimal
+from typing import Final
+
+from core.config import Settings
+from core.types import (
+    RotationTreeState,
+    ZERO_DECIMAL,
+)
+from trading.pair_scanner import PairScanner
+from trading.rotation_tree import (
+    MIN_REMAINING_HOURS,
+    add_node,
+    build_root_nodes,
+    compute_child_allocations,
+    leaf_nodes,
+    live_nodes,
+    make_child_node,
+    remaining_hours,
+    update_node,
+)
+
+logger = logging.getLogger(__name__)
+
+PLAN_INTERVAL_SEC: Final[int] = 300  # Re-plan every 5 minutes
+
+
+class RotationTreePlanner:
+    """Plan child rotations for leaf nodes in the rotation tree."""
+
+    def __init__(
+        self,
+        *,
+        settings: Settings,
+        pair_scanner: PairScanner,
+    ) -> None:
+        self._settings = settings
+        self._pair_scanner = pair_scanner
+
+    def initialize_roots(
+        self,
+        balances: dict[str, Decimal],
+        prices_usd: dict[str, Decimal] | None = None,
+    ) -> RotationTreeState:
+        """Build initial tree from portfolio balances."""
+        roots = build_root_nodes(
+            balances,
+            min_value_usd=Decimal(str(self._settings.min_position_usd)),
+            prices_usd=prices_usd,
+        )
+        return RotationTreeState(
+            nodes=roots,
+            root_node_ids=tuple(r.node_id for r in roots),
+        )
+
+    def plan_cycle(
+        self,
+        tree: RotationTreeState,
+        now: datetime,
+    ) -> RotationTreeState:
+        """Scan leaf nodes and plan child rotations.
+
+        Returns updated tree with new PLANNED children and reserved parent qty.
+        """
+        if tree.last_planned_at is not None:
+            elapsed = (now - tree.last_planned_at).total_seconds()
+            if elapsed < PLAN_INTERVAL_SEC:
+                return tree
+
+        leaves = leaf_nodes(tree)
+        if not leaves:
+            return tree
+
+        updated_tree = tree
+        child_seq = len(tree.nodes)
+
+        for leaf in leaves:
+            if leaf.depth >= tree.max_depth:
+                continue
+            if leaf.quantity_free < Decimal(str(self._settings.min_position_usd)):
+                continue
+
+            # Check remaining time
+            hours_left = remaining_hours(leaf, now)
+            if hours_left is not None and hours_left < MIN_REMAINING_HOURS:
+                continue
+
+            # Scan for candidates
+            held_assets = frozenset(n.asset for n in live_nodes(updated_tree))
+            try:
+                candidates = self._pair_scanner.scan_rotation_candidates(
+                    leaf.asset,
+                    max_window_hours=hours_left,
+                    excluded_assets=held_assets,
+                )
+            except Exception as exc:
+                logger.warning("Rotation scan failed for %s: %s", leaf.asset, exc)
+                continue
+
+            if not candidates:
+                continue
+
+            # Compute allocations
+            allocations = compute_child_allocations(
+                leaf,
+                candidates,
+                min_position=Decimal(str(self._settings.min_position_usd)),
+            )
+
+            if not allocations:
+                continue
+
+            # Create child nodes and reserve parent qty
+            reserved = ZERO_DECIMAL
+            for candidate, qty in allocations:
+                child = make_child_node(leaf, candidate, qty, now, child_seq)
+                updated_tree = add_node(updated_tree, child)
+                reserved += qty
+                child_seq += 1
+                logger.info(
+                    "Planned rotation: %s → %s via %s (conf=%.2f, qty=%s, window=%.1fh)",
+                    candidate.from_asset, candidate.to_asset, candidate.pair,
+                    candidate.confidence, qty, candidate.estimated_window_hours,
+                )
+
+            # Reserve parent quantity
+            if reserved > 0:
+                new_free = max(ZERO_DECIMAL, leaf.quantity_free - reserved)
+                new_reserved = leaf.quantity_reserved + reserved
+                updated_tree = update_node(
+                    updated_tree,
+                    leaf.node_id,
+                    quantity_free=new_free,
+                    quantity_reserved=new_reserved,
+                )
+
+        from dataclasses import replace
+        return replace(updated_tree, last_planned_at=now)
+
+
+__all__ = ["RotationTreePlanner"]
