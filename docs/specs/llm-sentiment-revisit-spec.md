@@ -1,99 +1,118 @@
-# LLM Revisit: News/Sentiment Inputs
+# LLM Market Context Advisor (Revised)
 
 ## Background
 
-Phase 5a evaluated a prompted LLM (Qwen3 8B) on raw OHLCV features. Result: -167 bps, 50% hit rate, 8 trades. The LLM could not extract signal from tabular numeric data that LogReg already captures.
+Phase 5a evaluated a prompted LLM (Qwen3 8B) on raw OHLCV features. Result: -167 bps, 50% hit rate, 8 trades. The original spec proposed using CryptoCompare news/sentiment, but:
 
-**Hypothesis**: LLMs add value on unstructured text (news, social sentiment, on-chain narratives), not on structured numeric features where statistical models already work well. A revisit should use fundamentally different inputs.
+1. CryptoCompare News API requires a paid key
+2. Grid-bot-v3 (`not-school/doge-grid-bot`) proved a more effective approach: feed LLMs **structured market context** (not news), using **free-tier API providers** with majority voting
 
-## Proposed approach
+## V3's Proven Approach
 
-### Input sources (ranked by feasibility)
+Grid-bot-v3's `ai_advisor.py` (1900 lines) fed LLMs:
+- Current price + 1h/4h/24h changes
+- HMM regime signals (bearish/ranging/bullish across 1m/15m/1h)
+- Technical indicators (EMA, RSI, MACD, Bollinger)
+- Grid metrics (fill counts, position age distribution)
+- Capital allocation and throughput analysis
 
-1. **CryptoCompare News API** (`/data/v2/news/`)
-   - Free tier: 100k calls/month
-   - Returns: title, body, categories, source, published_at
-   - Filter by coin (DOGE) or category
-   - Available historically for backtesting
+Using a **multi-model council** with majority voting:
+- DeepSeek (primary reasoning model)
+- Groq (Llama 3.3 70B fallback)
+- SambaNova, Cerebras, NVIDIA (free-tier panel)
 
-2. **Reddit/Twitter sentiment aggregators**
-   - LunarCrush, Santiment, or The TIE APIs
-   - Pre-computed sentiment scores (bullish/bearish/neutral)
-   - Some have free tiers; others require paid plans
-   - Historical data varies by provider
+**No news APIs, no paid keys, no external sentiment data.**
 
-3. **On-chain metrics** (Glassnode, IntoTheBlock)
-   - Active addresses, exchange inflows/outflows, whale transactions
-   - Mostly paid; free tiers have limited history
-   - More relevant for BTC/ETH than DOGE
+## Proposed Architecture for V4
 
-### Prompt design
+### Input Context (structured JSON)
 
-The LLM receives a structured prompt with:
-- Last 24h of news headlines (5-10 most relevant)
-- Optional: sentiment scores from aggregator
-- Current OHLCV summary (1-line context, not full feature set)
-- Task: predict 6h direction (bullish/bearish/neutral) with confidence
+Build a `MarketContext` from existing V4 data sources:
 
+```python
+{
+    "pair": "DOGE/USD",
+    "price": 0.0918,
+    "changes": {"1h": -0.3, "4h": 1.2, "24h": -2.1},
+    "technical": {
+        "ema_crossover": false,
+        "rsi": 45.2,
+        "macd_histogram": -0.00012,
+        "bollinger_width": 0.034,
+        "momentum_12h": false,
+        "volatility": 0.018
+    },
+    "portfolio": {
+        "total_value_usd": 502,
+        "cash_usd": 40,
+        "doge_qty": 5089,
+        "open_positions": 0
+    },
+    "v1_model": {
+        "direction": "neutral",
+        "prob_up": 0.48,
+        "confidence": 0.04
+    }
+}
 ```
-You are a crypto market analyst. Based on recent news and market context,
-predict DOGE/USD direction over the next 6 hours.
 
-Recent news (last 24h):
-1. "Elon Musk tweets about Dogecoin..." (2h ago, source: CoinDesk)
-2. "DOGE whale moves 500M coins to exchange" (5h ago, source: Whale Alert)
-3. ...
+Data sources: `exchange/ohlcv.py` (OHLCV), `beliefs/technical_ensemble_source.py` (signals), `beliefs/research_model_source.py` (V1 prob_up), portfolio from bot state.
 
-Current market: DOGE/USD at $0.18, up 2.3% in 24h, RSI 55
+### LLM Council
 
-Respond with JSON: {"direction": "bullish"|"bearish"|"neutral", "confidence": 0.0-1.0, "reasoning": "..."}
-```
+#### Free-tier providers (no paid API keys):
 
-### Evaluation methodology
+| Provider | Model | Free Tier | Endpoint |
+|----------|-------|-----------|----------|
+| Groq | Llama 3.3 70B | Free (rate limited) | api.groq.com |
+| SambaNova | DeepSeek-R1 | Free | api.sambanova.ai |
+| Cerebras | Qwen3 235B | Free (1M tokens/day) | api.cerebras.ai |
+| Local Ollama | Qwen3 8B | Free (local GPU) | localhost:11434 |
 
-1. **Data collection**: Fetch historical news for the 180d window (CryptoCompare News API)
-2. **Candidate implementation**: New `LLMSentimentCandidate` in autoresearch that:
-   - Receives OHLCV market data (for timestamp alignment)
-   - Fetches corresponding news headlines for that timestamp window
-   - Constructs prompt, calls local Ollama model
-   - Parses structured output into Prediction
-3. **Walk-forward evaluation**: Same harness as V1 LogReg (90d train / 1d val / 5d step)
-   - Train phase: no training needed (prompted, not fine-tuned)
-   - Val phase: generate predictions, backtest against actual returns
-4. **Comparison**: Against V1 LogReg (+5,531 bps) and TA ensemble
+#### Voting mechanism:
+- Each panelist receives identical structured context
+- Returns JSON: `{"direction": "bullish"|"bearish"|"neutral", "conviction": 0.0-1.0, "reasoning": "..."}`
+- Majority vote determines consensus direction
+- If no majority: defaults to V1 model's signal
+- Circuit breaker: skip panelist after 3 consecutive failures
 
-### Integration with existing infrastructure
+### Integration
 
-- **Artifact contract**: Same `prediction/v1` output schema
-- **Shadow mode**: Same handler pattern as research_model_handler.py
-- **Model**: Qwen3 8B via local Ollama (IPEX-LLM on Intel Arc GPU)
+New belief source: `beliefs/llm_council_source.py`
+- Implements `BeliefAnalyzer` protocol
+- Polls every `LLM_COUNCIL_INTERVAL_SEC` (default: 1800 = 30min)
+- Returns `BeliefSnapshot` with `source=LLM_COUNCIL`
+- Can run as shadow (like research model) or as a third consensus voter
 
-## Risks
+### Evaluation
 
-- **News availability**: CryptoCompare may not have sufficient DOGE-specific news density
-- **Latency**: LLM inference (~2-5s per prediction) is slower than LogReg (~1ms)
-- **Reproducibility**: LLM outputs are stochastic; need temperature=0 or seed
-- **Cost**: Local inference is free but slow; cloud inference adds cost
+Use the existing walk-forward harness in autoresearch:
+- New `LLMCouncilCandidate` wraps the council logic
+- Backtest on 180d CC-backed dataset
+- Compare against V1 LogReg (+5,531 bps) and TA ensemble (+257 bps)
 
-## Phasing
+### Phasing
 
 | Phase | Deliverable | Effort |
 |-------|-------------|--------|
-| P1: Data audit | Check CryptoCompare news density for DOGE over 180d | 1 session |
-| P2: News fetcher | `research/news_cryptocompare.py` + paginated historical fetch | 1 session |
-| P3: Candidate | `LLMSentimentCandidate` in autoresearch | 1-2 sessions |
-| P4: Evaluation | Walk-forward on 180d dataset, compare to V1 LogReg | 1 session |
-| P5: Integration | Shadow handler if results are promising | 1 session |
+| P1: Provider setup | Sign up for Groq/SambaNova/Cerebras free keys | 30 min |
+| P2: Council module | `beliefs/llm_council_source.py` + structured context builder | 1 session |
+| P3: Shadow integration | Wire as shadow handler, log predictions | 30 min |
+| P4: Backtest candidate | `LLMCouncilCandidate` in autoresearch | 1 session |
+| P5: Evaluation | Walk-forward on 180d, compare to V1 LogReg | 1 session |
 
-## Decision gate
+### Decision Gate
 
-After P4, compare against V1 LogReg:
-- If LLM-sentiment outperforms: proceed to P5 (shadow integration)
-- If LLM-sentiment underperforms but shows complementary signal: investigate ensemble
-- If LLM-sentiment adds nothing: close the LLM research track
+After P5, compare against V1 LogReg:
+- If LLM council outperforms: promote as primary or ensemble member
+- If LLM council adds complementary signal: investigate weighted ensemble
+- If LLM council adds nothing: close the LLM track, V1 LogReg remains winner
 
-## Non-goals
+### Prerequisites
 
-- Fine-tuning the LLM (too much compute for marginal gains on this scale)
-- Real-time news streaming (batch evaluation first)
-- Multi-pair sentiment scanning (DOGE only for now)
+User needs to sign up for free API keys:
+- Groq: https://console.groq.com
+- SambaNova: https://cloud.sambanova.ai
+- Cerebras: https://cloud.cerebras.ai
+
+No paid subscriptions required. All offer free tiers sufficient for hourly polling.
