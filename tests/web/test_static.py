@@ -57,28 +57,29 @@ def test_static_shell_html_contains_required_dashboard_sections() -> None:
     }.issubset(parser.ids)
 
 
-def test_static_shell_html_references_local_assets_without_d3_modules() -> None:
+def test_static_shell_html_references_assets_with_d3_modules() -> None:
     parser = _DashboardHtmlParser()
     html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
     parser.feed(html)
 
-    assert parser.stylesheets == ["./styles.css"]
-    assert parser.scripts == ["./app.js"]
-    assert "d3-" not in html
-    assert "d3.js" not in html
+    assert parser.stylesheets == ["/static/styles.css"]
+    assert "/static/app.js" in parser.scripts
+    assert "/static/d3-grid.js" in parser.scripts
+    assert "/static/d3-beliefs.js" in parser.scripts
 
 
-def test_app_js_connects_to_sse_and_dispatches_placeholder_updates() -> None:
+def test_app_js_connects_to_sse_and_renders_data() -> None:
     javascript = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
 
     assert 'new EventSource("/sse/updates")' in javascript
     assert "function dispatchUpdate(type, payload, eventId)" in javascript
-    assert "function updatePortfolio(payload)" in javascript
+    assert "function updatePortfolio(data)" in javascript
     assert "function updateGrid(payload)" in javascript
     assert "function updateBeliefs(payload)" in javascript
-    assert "function updateStats(payload)" in javascript
-    assert "function updateReconciliation(payload)" in javascript
+    assert "function updateStats(data)" in javascript
+    assert "function updateReconciliation(data)" in javascript
     assert "function updateAlerts(payload)" in javascript
+    assert "function fetchInitialState()" in javascript
 
 
 def test_styles_css_provides_responsive_dashboard_layout() -> None:
