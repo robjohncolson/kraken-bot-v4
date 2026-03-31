@@ -220,9 +220,19 @@ Bot running on WSL Athena pane via `/mnt/c/Python313/python.exe main.py`:
 - Portfolio: ~$502 (5,090 DOGE + $40 USD)
 - Dashboard: localhost:58392
 
+## Recursive rotation tree (implemented 2026-03-31)
+
+All 4 phases complete:
+- **R1**: RotationNode/RotationCandidate/RotationTreeState types + generalized PairScanner for any asset
+- **R2**: RotationTreePlanner with confidence-weighted sizing (squared scoring, 80% deploy, 60% max child)
+- **R3**: Runtime wiring — root init from balances, planner each cycle, expired node cascade-close
+- **R4**: SQLite persistence (rotation_nodes table) + auto-save after planner cycles
+
+Activate: `ENABLE_ROTATION_TREE=true` in .env. Runs alongside existing conditional tree (separate flags).
+
 ## Goal for next session
 
-Implement recursive rotation tree Phase R1 (data model + scanner generalization). Spec at `docs/specs/recursive-rotation-tree-spec.md`. This replaces the single-pair conditional tree with a denomination-agnostic recursive trading system.
+Enable rotation tree on live bot. Monitor first recursive rotation candidates. Tune confidence thresholds and timing based on live behavior.
 
 ## Completed priorities
 
