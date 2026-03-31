@@ -244,7 +244,7 @@ Monitor first trades. If model stays neutral for extended period, investigate si
 2. ~~**Fix TA ensemble**~~ — RESOLVED: v1.1 in autoresearch already stores training tail and prepends it in predict(). The Phase 5a 0-trade result was v1.0 (pre-fix, 24-bar val window < 40-bar minimum). v1.1 produces 85 trades (693-row) and 400 trades (1-day-step). Live bot path is unaffected (fetches 50 bars, DOGE/USD always has data).
 3. ~~**Exit price improvement**~~ — RESOLVED: all close paths now pass trigger/reference price as exit_price. Runtime applies configurable marketable-limit offset (EXIT_LIMIT_OFFSET_PCT, default 0.1%) and quantizes to min 4dp. Covers stop, target, window expiry, belief change, and hard drawdown. 493 tests pass.
 4. ~~**Run TA on 180d CC-backed dataset**~~ — DONE. TA ensemble: +257 bps, 48.9% accuracy, 380 trades, Sharpe 0.27. V1 LogReg wins decisively (+5,531 bps, Sharpe 11.3). TA kept as secondary benchmark only. Experiment: `autoresearch/experiments/ta_ensemble_6signal_cc3e0f0b.json`
-5. **LLM market context advisor** — PIVOTED from news/sentiment to v3-style structured market context + free-tier LLM council (Groq/SambaNova/Cerebras). No paid APIs needed. Prerequisite: sign up for free API keys at Groq, SambaNova, Cerebras. Spec at `docs/specs/llm-sentiment-revisit-spec.md`
+5. ~~**LLM Council (CC+Codex)**~~ — V1 IMPLEMENTED. CC and Codex are the council, communicating via tmux-bridge file-based messaging. Handler writes request files, sidecar broker dispatches to agent panes, collects responses, computes consensus. `BELIEF_MODEL=llm_council` to activate. Run broker: `python scripts/llm_council_broker.py`
 
 ## Validation steps
 

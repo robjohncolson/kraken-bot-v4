@@ -35,6 +35,7 @@ class BeliefSource(StrEnum):
     CODEX = "codex"
     TECHNICAL_ENSEMBLE = "technical_ensemble"
     RESEARCH_MODEL = "research_model"
+    LLM_COUNCIL = "llm_council"
 
 
 class MarketRegime(StrEnum):
