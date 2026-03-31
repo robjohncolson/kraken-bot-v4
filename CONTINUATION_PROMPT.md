@@ -228,11 +228,18 @@ All 4 phases complete:
 - **R3**: Runtime wiring — root init from balances, planner each cycle, expired node cascade-close
 - **R4**: SQLite persistence (rotation_nodes table) + auto-save after planner cycles
 
-Activate: `ENABLE_ROTATION_TREE=true` in .env. Runs alongside existing conditional tree (separate flags).
+**NOT ready for live trading yet** (Codex review). Foundation is solid but execution layer needs:
+1. Reducer bridge: PLANNED nodes → PlaceOrder effects (don't treat PLANNED as holdings)
+2. Fill settlement: bind fills to rotation nodes, convert qty to destination denomination
+3. Expiry → real ClosePosition effects (currently in-memory only)
+4. Root init needs REST price fetch for non-USD assets at startup
+5. Generalize portfolio accounting beyond cash_usd/cash_doge
+
+Activate with `ENABLE_ROTATION_TREE=true` once execution wiring is complete.
 
 ## Goal for next session
 
-Enable rotation tree on live bot. Monitor first recursive rotation candidates. Tune confidence thresholds and timing based on live behavior.
+Wire rotation tree execution layer: reducer bridge for entries/exits, fill settlement with denomination conversion, expiry → real close orders.
 
 ## Completed priorities
 
