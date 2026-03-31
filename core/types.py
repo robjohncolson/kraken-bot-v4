@@ -373,6 +373,85 @@ Action: TypeAlias = (
 )
 
 
+# ---------------------------------------------------------------------------
+# Rotation Tree — denomination-agnostic recursive trading
+# ---------------------------------------------------------------------------
+
+
+class RotationNodeStatus(StrEnum):
+    PLANNED = "planned"
+    OPEN = "open"
+    CLOSING = "closing"
+    CLOSED = "closed"
+    EXPIRED = "expired"
+    CANCELLED = "cancelled"
+
+
+class RotationExitReason(StrEnum):
+    TIMER = "timer"
+    BELIEF_FLIP = "belief_flip"
+    STOP = "stop"
+    TARGET = "target"
+    PARENT_EXPIRED = "parent_expired"
+    RECONCILIATION = "reconciliation"
+
+
+@dataclass(frozen=True, slots=True)
+class RotationNode:
+    """A single node in the recursive rotation tree."""
+
+    node_id: str
+    parent_node_id: str | None
+    depth: int
+
+    asset: str
+    quantity_total: Decimal
+    quantity_free: Decimal
+    quantity_reserved: Decimal = ZERO_DECIMAL
+
+    entry_pair: Pair | None = None
+    from_asset: str | None = None
+    order_side: OrderSide | None = None
+    entry_price: Price | None = None
+
+    position_id: str | None = None
+
+    opened_at: datetime | None = None
+    deadline_at: datetime | None = None
+    window_hours: float | None = None
+    confidence: float = 0.0
+
+    status: RotationNodeStatus = RotationNodeStatus.PLANNED
+
+
+@dataclass(frozen=True, slots=True)
+class RotationCandidate:
+    """A potential rotation: sell from_asset, buy to_asset via pair."""
+
+    pair: Pair
+    from_asset: str
+    to_asset: str
+    order_side: OrderSide
+
+    confidence: float
+    reference_price_hint: Price
+    estimated_window_hours: float
+
+    depth: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class RotationTreeState:
+    """Flat representation of the full rotation tree."""
+
+    nodes: tuple[RotationNode, ...] = field(default_factory=tuple)
+    root_node_ids: tuple[str, ...] = field(default_factory=tuple)
+    pending_entries: tuple[RotationCandidate, ...] = field(default_factory=tuple)
+    pending_exit_node_ids: tuple[str, ...] = field(default_factory=tuple)
+    max_depth: int = 2
+    last_planned_at: datetime | None = None
+
+
 __all__ = [
     "Action",
     "ActionType",
@@ -416,6 +495,11 @@ __all__ = [
     "Quantity",
     "ReconciliationResult",
     "RedistributeGridProfits",
+    "RotationCandidate",
+    "RotationExitReason",
+    "RotationNode",
+    "RotationNodeStatus",
+    "RotationTreeState",
     "StopTriggered",
     "TargetHit",
     "UpdateStop",

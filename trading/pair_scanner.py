@@ -14,7 +14,7 @@ import pandas as pd
 from beliefs.technical_ensemble_source import TechnicalEnsembleSource
 from core.config import Settings
 from core.errors import ExchangeError
-from core.types import BeliefDirection, BeliefSnapshot, BullCandidate
+from core.types import BeliefDirection, BullCandidate, OrderSide, RotationCandidate
 from exchange.client import KrakenClient
 from exchange.ohlcv import OHLCVFetchError, fetch_ohlcv
 from exchange.symbols import SymbolNormalizationError, normalize_asset_symbol, normalize_pair, split_normalized_pair
@@ -177,6 +177,189 @@ class PairScanner:
             reference_price_hint=reference_price_hint,
             estimated_peak_hours=estimated_peak_hours,
         )
+
+
+    def discover_asset_pairs(self, source_asset: str) -> tuple[tuple[str, str, str], ...]:
+        """Discover all spot pairs involving source_asset.
+
+        Returns tuples of (normalized_pair, base, quote) where source_asset
+        is either base or quote.
+        """
+        now = self._time_source()
+        cached = self._pair_cache
+        if cached is None or now >= cached.expires_at:
+            raw_pairs = self._asset_pairs_fetcher(
+                self._client,
+                self._settings.scanner_timeout_sec,
+            )
+            all_pairs = _normalize_all_spot_pairs(raw_pairs)
+            self._pair_cache = _PairDiscoveryCacheEntry(
+                pairs=tuple(p for p, _, _ in all_pairs),
+                expires_at=now + self._settings.scanner_pair_discovery_ttl_sec,
+            )
+            self._all_pairs_cache = all_pairs
+        else:
+            all_pairs = getattr(self, "_all_pairs_cache", ())
+
+        return tuple(
+            (pair, base, quote) for pair, base, quote in all_pairs
+            if base == source_asset or quote == source_asset
+        )
+
+    def scan_rotation_candidates(
+        self,
+        source_asset: str,
+        *,
+        max_window_hours: float | None = None,
+        excluded_assets: frozenset[str] = frozenset(),
+    ) -> tuple[RotationCandidate, ...]:
+        """Scan for rotation candidates from a given source asset."""
+        try:
+            asset_pairs = self.discover_asset_pairs(source_asset)
+        except PairScannerError as exc:
+            logger.warning("Rotation scan aborted for %s: %s", source_asset, exc)
+            return ()
+
+        if not asset_pairs:
+            return ()
+
+        candidates: list[RotationCandidate] = []
+        max_workers = max(1, self._settings.scanner_max_concurrency)
+        executor = ThreadPoolExecutor(max_workers=max_workers)
+        futures: dict[Future[RotationCandidate | None], str] = {}
+
+        try:
+            for pair, base, quote in asset_pairs:
+                # Determine destination asset and order side
+                if base == source_asset:
+                    dest_asset = quote
+                    side = OrderSide.SELL  # Sell base to get quote
+                else:
+                    dest_asset = base
+                    side = OrderSide.BUY   # Buy base with quote
+
+                if dest_asset in excluded_assets:
+                    continue
+
+                future = executor.submit(
+                    self._scan_rotation_pair, pair, source_asset, dest_asset, side,
+                    max_window_hours,
+                )
+                futures[future] = pair
+
+            for future in as_completed(futures, timeout=self._settings.scanner_timeout_sec):
+                result = future.result()
+                if result is not None:
+                    candidates.append(result)
+        except FuturesTimeoutError:
+            logger.warning("Rotation scan timed out for %s", source_asset)
+            executor.shutdown(wait=False, cancel_futures=True)
+            return ()
+        finally:
+            if not any(f.cancelled() for f in futures):
+                executor.shutdown(wait=True, cancel_futures=False)
+
+        return tuple(sorted(
+            candidates,
+            key=lambda c: (-c.confidence, c.estimated_window_hours, c.pair),
+        ))
+
+    def _scan_rotation_pair(
+        self,
+        pair: str,
+        source_asset: str,
+        dest_asset: str,
+        side: OrderSide,
+        max_window_hours: float | None,
+    ) -> RotationCandidate | None:
+        """Evaluate a single pair as a rotation candidate."""
+        try:
+            bars = self._ohlcv_fetcher(
+                pair,
+                interval=SCAN_INTERVAL_MINUTES,
+                count=max(SCAN_BAR_COUNT, self._technical_source.min_bars),
+                timeout=self._settings.scanner_timeout_sec,
+            )
+        except OHLCVFetchError:
+            return None
+
+        if len(bars) < self._technical_source.min_bars:
+            return None
+
+        try:
+            belief = self._technical_source.analyze(pair, bars)
+        except Exception:
+            return None
+
+        # For a BUY rotation (buying dest), we want dest to be bullish
+        # For a SELL rotation (selling source for quote), we want source to be bearish
+        if side == OrderSide.BUY and belief.direction is not BeliefDirection.BULLISH:
+            return None
+        if side == OrderSide.SELL and belief.direction is not BeliefDirection.BEARISH:
+            return None
+
+        try:
+            window_hours = _estimate_bull_peak_hours(bars)
+        except ValueError:
+            return None
+
+        if window_hours <= 0:
+            return None
+        if max_window_hours is not None and window_hours > max_window_hours:
+            return None
+
+        price = Decimal(str(pd.to_numeric(bars["close"], errors="raise").iloc[-1]))
+        return RotationCandidate(
+            pair=pair,
+            from_asset=source_asset,
+            to_asset=dest_asset,
+            order_side=side,
+            confidence=belief.confidence,
+            reference_price_hint=price,
+            estimated_window_hours=window_hours,
+        )
+
+
+def _normalize_all_spot_pairs(raw_pairs: Mapping[str, object]) -> tuple[tuple[str, str, str], ...]:
+    """Normalize all spot pairs. Returns (pair, base, quote) tuples."""
+    result: list[tuple[str, str, str]] = []
+
+    for raw_name, metadata in raw_pairs.items():
+        if not isinstance(metadata, Mapping):
+            continue
+        if not _looks_like_any_spot_pair(raw_name, metadata):
+            continue
+
+        raw_symbol = _raw_pair_symbol(raw_name, metadata)
+        if raw_symbol is None:
+            continue
+
+        try:
+            normalized_pair = normalize_pair(raw_symbol)
+            split = split_normalized_pair(normalized_pair)
+        except SymbolNormalizationError:
+            continue
+
+        result.append((split.pair, split.base, split.quote))
+
+    return tuple(sorted(set(result)))
+
+
+def _looks_like_any_spot_pair(raw_name: str, metadata: Mapping[str, object]) -> bool:
+    """Check if a raw pair looks like a spot pair (any quote currency)."""
+    aclass_base = metadata.get("aclass_base")
+    aclass_quote = metadata.get("aclass_quote")
+    if aclass_base not in (None, "currency") or aclass_quote not in (None, "currency"):
+        return False
+
+    for key in ("wsname", "altname"):
+        value = metadata.get(key)
+        if isinstance(value, str) and ".d" in value.lower():
+            return False
+    if ".d" in raw_name.lower():
+        return False
+
+    return True
 
 
 def _fetch_asset_pairs_http(client: KrakenClient, timeout_sec: float) -> Mapping[str, object]:
