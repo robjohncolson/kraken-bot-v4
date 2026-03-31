@@ -246,6 +246,18 @@ def _run_main_loop(
         shadow_handler = make_shadow_handler(shadow_dir)
         logger.info("Shadow artifact: %s", settings.shadow_artifact_id)
 
+    # Rehydrate persisted state
+    reader = SqliteReader(conn)
+    persisted_positions = reader.fetch_open_positions()
+    persisted_pending = reader.fetch_open_orders()
+    persisted_cooldowns = reader.fetch_cooldowns()
+    if persisted_positions:
+        logger.info("Rehydrated %d open positions from SQLite", len(persisted_positions))
+    if persisted_pending:
+        logger.info("Rehydrated %d pending orders from SQLite", len(persisted_pending))
+    if persisted_cooldowns:
+        logger.info("Rehydrated %d cooldowns from SQLite", len(persisted_cooldowns))
+
     runtime = SchedulerRuntime(
         settings=settings,
         executor=executor,
@@ -255,6 +267,9 @@ def _run_main_loop(
             recorded_state=recorded_state,
             report=report,
             now=datetime.now(timezone.utc),
+            persisted_positions=persisted_positions,
+            persisted_pending_orders=persisted_pending,
+            persisted_cooldowns=persisted_cooldowns,
         ),
         belief_refresh_handler=belief_handler,
         shadow_belief_handler=shadow_handler,

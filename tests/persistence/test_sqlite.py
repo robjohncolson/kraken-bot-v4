@@ -4,8 +4,10 @@ import sqlite3
 from decimal import Decimal
 from pathlib import Path
 
+from core.types import Position, PositionSide
 from persistence.sqlite import (
     SqliteReader,
+    SqliteWriter,
     ensure_schema,
     open_database,
 )
@@ -223,3 +225,126 @@ def test_fetch_recorded_state_empty_db() -> None:
 
     assert state.positions == ()
     assert state.orders == ()
+
+
+# ── Rehydration persistence tests ──────────────────────────────
+
+
+def test_upsert_and_fetch_position() -> None:
+    conn = _memory_db()
+    writer = SqliteWriter(conn)
+    reader = SqliteReader(conn)
+
+    pos = Position(
+        position_id="kbv4-1",
+        pair="DOGE/USD",
+        side=PositionSide.LONG,
+        quantity=Decimal("100"),
+        entry_price=Decimal("0.09"),
+        stop_price=Decimal("0.085"),
+        target_price=Decimal("0.10"),
+    )
+    writer.upsert_position(pos)
+    positions = reader.fetch_open_positions()
+
+    assert len(positions) == 1
+    assert positions[0].position_id == "kbv4-1"
+    assert positions[0].pair == "DOGE/USD"
+    assert positions[0].side == PositionSide.LONG
+    assert positions[0].quantity == Decimal("100")
+    assert positions[0].entry_price == Decimal("0.09")
+    assert positions[0].stop_price == Decimal("0.085")
+    assert positions[0].target_price == Decimal("0.10")
+
+
+def test_upsert_position_updates_on_conflict() -> None:
+    conn = _memory_db()
+    writer = SqliteWriter(conn)
+    reader = SqliteReader(conn)
+
+    pos = Position(
+        position_id="kbv4-1", pair="DOGE/USD", side=PositionSide.LONG,
+        quantity=Decimal("100"), entry_price=Decimal("0.09"),
+        stop_price=Decimal("0.085"), target_price=Decimal("0.10"),
+    )
+    writer.upsert_position(pos)
+
+    from dataclasses import replace
+    updated = replace(pos, stop_price=Decimal("0.086"), quantity=Decimal("50"))
+    writer.upsert_position(updated)
+
+    positions = reader.fetch_open_positions()
+    assert len(positions) == 1
+    assert positions[0].quantity == Decimal("50")
+    assert positions[0].stop_price == Decimal("0.086")
+
+
+def test_closed_position_not_in_open_positions() -> None:
+    conn = _memory_db()
+    writer = SqliteWriter(conn)
+    reader = SqliteReader(conn)
+
+    pos = Position(
+        position_id="kbv4-1", pair="DOGE/USD", side=PositionSide.LONG,
+        quantity=Decimal("100"), entry_price=Decimal("0.09"),
+        stop_price=Decimal("0.085"), target_price=Decimal("0.10"),
+    )
+    writer.upsert_position(pos)
+    writer.update_position_closed("kbv4-1")
+
+    assert reader.fetch_open_positions() == ()
+
+
+def test_cooldown_set_and_fetch() -> None:
+    conn = _memory_db()
+    writer = SqliteWriter(conn)
+    reader = SqliteReader(conn)
+
+    writer.set_cooldown("DOGE/USD", "2026-03-30T12:00:00")
+    cooldowns = reader.fetch_cooldowns()
+
+    assert len(cooldowns) == 1
+    assert cooldowns[0] == ("DOGE/USD", "2026-03-30T12:00:00")
+
+
+def test_cooldown_clear() -> None:
+    conn = _memory_db()
+    writer = SqliteWriter(conn)
+    reader = SqliteReader(conn)
+
+    writer.set_cooldown("DOGE/USD", "2026-03-30T12:00:00")
+    writer.clear_cooldown("DOGE/USD")
+
+    assert reader.fetch_cooldowns() == ()
+
+
+def test_upsert_order_and_fetch_open() -> None:
+    conn = _memory_db()
+    writer = SqliteWriter(conn)
+    reader = SqliteReader(conn)
+
+    writer.upsert_order(
+        "ord-1", "DOGE/USD", "cl-1",
+        kind="position_entry", side="buy",
+        base_qty=Decimal("100"), quote_qty=Decimal("9"),
+        exchange_order_id="EX-001",
+    )
+    orders = reader.fetch_open_orders()
+
+    assert len(orders) == 1
+    po, exch_oid = orders[0]
+    assert po.client_order_id == "cl-1"
+    assert po.kind == "position_entry"
+    assert po.base_qty == Decimal("100")
+    assert exch_oid == "EX-001"
+
+
+def test_close_order_removes_from_open() -> None:
+    conn = _memory_db()
+    writer = SqliteWriter(conn)
+    reader = SqliteReader(conn)
+
+    writer.upsert_order("ord-1", "DOGE/USD", "cl-1", kind="position_entry", side="buy")
+    writer.close_order("ord-1")
+
+    assert reader.fetch_open_orders() == ()

@@ -12,6 +12,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from core.errors import KrakenBotError
+from core.types import PendingOrder, Position, PositionSide, ZERO_DECIMAL
 from trading.reconciler import RecordedOrder, RecordedPosition, RecordedState
 
 logger = logging.getLogger(__name__)
@@ -47,7 +48,32 @@ CREATE TABLE IF NOT EXISTS ledger (
     created_at TEXT DEFAULT current_timestamp
 )"""
 
-SCHEMA_STATEMENTS = (POSITIONS_DDL, ORDERS_DDL, LEDGER_DDL)
+COOLDOWNS_DDL = """\
+CREATE TABLE IF NOT EXISTS cooldowns (
+    pair           TEXT PRIMARY KEY,
+    cooldown_until TEXT NOT NULL
+)"""
+
+SCHEMA_STATEMENTS = (POSITIONS_DDL, ORDERS_DDL, LEDGER_DDL, COOLDOWNS_DDL)
+
+# Columns added after initial schema — safe to run repeatedly.
+_POSITION_MIGRATIONS = (
+    ("side", "TEXT DEFAULT 'long'"),
+    ("quantity", "TEXT DEFAULT '0'"),
+    ("entry_price", "TEXT DEFAULT '0'"),
+    ("stop_price", "TEXT DEFAULT '0'"),
+    ("target_price", "TEXT DEFAULT '0'"),
+)
+
+_ORDER_MIGRATIONS = (
+    ("kind", "TEXT DEFAULT ''"),
+    ("side", "TEXT DEFAULT ''"),
+    ("base_qty", "TEXT DEFAULT '0'"),
+    ("filled_qty", "TEXT DEFAULT '0'"),
+    ("quote_qty", "TEXT DEFAULT '0'"),
+    ("limit_price", "TEXT"),
+    ("status", "TEXT DEFAULT 'open'"),
+)
 
 
 class SqlitePersistenceError(KrakenBotError):
@@ -97,14 +123,28 @@ def open_database(path: Path) -> sqlite3.Connection:
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
-    """Create positions, orders, and ledger tables if they don't exist."""
+    """Create tables and run column migrations."""
     try:
         for ddl in SCHEMA_STATEMENTS:
             conn.execute(ddl)
+        _migrate_columns(conn, "positions", _POSITION_MIGRATIONS)
+        _migrate_columns(conn, "orders", _ORDER_MIGRATIONS)
         conn.commit()
-        logger.info("SQLite schema verified (positions, orders, ledger)")
+        logger.info("SQLite schema verified (positions, orders, ledger, cooldowns)")
     except sqlite3.Error as exc:
         raise SqliteSchemaError(f"Schema bootstrap failed: {exc}") from exc
+
+
+def _migrate_columns(
+    conn: sqlite3.Connection,
+    table: str,
+    columns: tuple[tuple[str, str], ...],
+) -> None:
+    existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+    for col_name, col_def in columns:
+        if col_name not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {col_name} {col_def}")
+            logger.info("Migrated %s: added column %s", table, col_name)
 
 
 class SqliteReader:
@@ -152,6 +192,72 @@ class SqliteReader:
             )
         except sqlite3.Error as exc:
             raise SqliteReadError(f"Failed to read orders: {exc}") from exc
+
+    def fetch_open_positions(self) -> tuple[Position, ...]:
+        """Fetch open positions with full runtime fields for rehydration."""
+        try:
+            cursor = self._conn.execute(
+                "SELECT position_id, pair, side, quantity, entry_price, "
+                "stop_price, target_price FROM positions WHERE closed_at IS NULL "
+                "ORDER BY position_id"
+            )
+            return tuple(
+                Position(
+                    position_id=row["position_id"],
+                    pair=row["pair"],
+                    side=PositionSide(row["side"]) if row["side"] else PositionSide.LONG,
+                    quantity=Decimal(row["quantity"]) if row["quantity"] else ZERO_DECIMAL,
+                    entry_price=Decimal(row["entry_price"]) if row["entry_price"] else ZERO_DECIMAL,
+                    stop_price=Decimal(row["stop_price"]) if row["stop_price"] else ZERO_DECIMAL,
+                    target_price=Decimal(row["target_price"]) if row["target_price"] else ZERO_DECIMAL,
+                )
+                for row in cursor
+            )
+        except sqlite3.Error as exc:
+            raise SqliteReadError(f"Failed to read open positions: {exc}") from exc
+
+    def fetch_open_orders(self) -> tuple[tuple[PendingOrder, str | None], ...]:
+        """Fetch tracked open orders for rehydration.
+
+        Returns (PendingOrder, exchange_order_id) pairs so startup can
+        match against Kraken open orders by exchange ID (Starter tier
+        has no cl_ord_id).
+        """
+        try:
+            cursor = self._conn.execute(
+                "SELECT order_id, pair, position_id, client_order_id, "
+                "exchange_order_id, kind, side, base_qty, filled_qty, "
+                "quote_qty, limit_price "
+                "FROM orders WHERE status = 'open' ORDER BY order_id"
+            )
+            return tuple(
+                (
+                    PendingOrder(
+                        client_order_id=row["client_order_id"] or row["order_id"],
+                        kind=row["kind"] or "position_entry",
+                        pair=row["pair"],
+                        side=row["side"] or "buy",
+                        base_qty=Decimal(row["base_qty"]) if row["base_qty"] else ZERO_DECIMAL,
+                        filled_qty=Decimal(row["filled_qty"]) if row["filled_qty"] else ZERO_DECIMAL,
+                        quote_qty=Decimal(row["quote_qty"]) if row["quote_qty"] else ZERO_DECIMAL,
+                        position_id=row["position_id"] or "",
+                    ),
+                    row["exchange_order_id"],
+                )
+                for row in cursor
+            )
+        except sqlite3.Error as exc:
+            raise SqliteReadError(f"Failed to read open orders: {exc}") from exc
+
+    def fetch_cooldowns(self) -> tuple[tuple[str, str], ...]:
+        """Fetch active cooldowns."""
+        try:
+            cursor = self._conn.execute(
+                "SELECT pair, cooldown_until FROM cooldowns ORDER BY pair"
+            )
+            return tuple((row["pair"], row["cooldown_until"]) for row in cursor)
+        except sqlite3.Error as exc:
+            raise SqliteReadError(f"Failed to read cooldowns: {exc}") from exc
 
     def fetch_recorded_state(self) -> RecordedState:
         """Fetch positions and orders as a RecordedState for reconciliation."""
@@ -232,6 +338,110 @@ class SqliteWriter:
         except sqlite3.Error as exc:
             self._conn.rollback()
             raise SqliteWriteError(f"Failed to insert ledger entry for {pair!r}: {exc}") from exc
+
+    def upsert_position(self, position: Position) -> None:
+        """Insert or update a full position record."""
+        try:
+            self._conn.execute(
+                "INSERT INTO positions (position_id, pair, side, quantity, "
+                "entry_price, stop_price, target_price) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(position_id) DO UPDATE SET "
+                "quantity=excluded.quantity, stop_price=excluded.stop_price, "
+                "target_price=excluded.target_price",
+                (
+                    position.position_id,
+                    position.pair,
+                    position.side.value,
+                    str(position.quantity),
+                    str(position.entry_price),
+                    str(position.stop_price),
+                    str(position.target_price),
+                ),
+            )
+            self._conn.commit()
+        except sqlite3.Error as exc:
+            self._conn.rollback()
+            raise SqliteWriteError(
+                f"Failed to upsert position {position.position_id!r}: {exc}"
+            ) from exc
+
+    def upsert_order(
+        self,
+        order_id: str,
+        pair: str,
+        client_order_id: str,
+        *,
+        kind: str = "",
+        side: str = "",
+        base_qty: Decimal | str = ZERO_DECIMAL,
+        filled_qty: Decimal | str = ZERO_DECIMAL,
+        quote_qty: Decimal | str = ZERO_DECIMAL,
+        limit_price: Decimal | str | None = None,
+        position_id: str | None = None,
+        exchange_order_id: str | None = None,
+    ) -> None:
+        """Insert or update a tracked order."""
+        try:
+            self._conn.execute(
+                "INSERT INTO orders (order_id, pair, position_id, exchange_order_id, "
+                "client_order_id, kind, side, base_qty, filled_qty, quote_qty, "
+                "limit_price, status) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open') "
+                "ON CONFLICT(order_id) DO UPDATE SET "
+                "filled_qty=excluded.filled_qty, status=excluded.status",
+                (
+                    order_id,
+                    pair,
+                    position_id,
+                    exchange_order_id,
+                    client_order_id,
+                    kind,
+                    side,
+                    str(base_qty),
+                    str(filled_qty),
+                    str(quote_qty),
+                    str(limit_price) if limit_price is not None else None,
+                ),
+            )
+            self._conn.commit()
+        except sqlite3.Error as exc:
+            self._conn.rollback()
+            raise SqliteWriteError(f"Failed to upsert order {order_id!r}: {exc}") from exc
+
+    def close_order(self, order_id: str) -> None:
+        """Mark an order as filled/closed."""
+        try:
+            self._conn.execute(
+                "UPDATE orders SET status = 'filled' WHERE order_id = ?",
+                (order_id,),
+            )
+            self._conn.commit()
+        except sqlite3.Error as exc:
+            self._conn.rollback()
+            raise SqliteWriteError(f"Failed to close order {order_id!r}: {exc}") from exc
+
+    def set_cooldown(self, pair: str, cooldown_until: str) -> None:
+        """Upsert a cooldown for a pair."""
+        try:
+            self._conn.execute(
+                "INSERT INTO cooldowns (pair, cooldown_until) VALUES (?, ?) "
+                "ON CONFLICT(pair) DO UPDATE SET cooldown_until=excluded.cooldown_until",
+                (pair, cooldown_until),
+            )
+            self._conn.commit()
+        except sqlite3.Error as exc:
+            self._conn.rollback()
+            raise SqliteWriteError(f"Failed to set cooldown for {pair!r}: {exc}") from exc
+
+    def clear_cooldown(self, pair: str) -> None:
+        """Remove a cooldown for a pair."""
+        try:
+            self._conn.execute("DELETE FROM cooldowns WHERE pair = ?", (pair,))
+            self._conn.commit()
+        except sqlite3.Error as exc:
+            self._conn.rollback()
+            raise SqliteWriteError(f"Failed to clear cooldown for {pair!r}: {exc}") from exc
 
     def update_position_closed(self, position_id: str) -> None:
         """Mark an existing position closed with the current UTC timestamp."""

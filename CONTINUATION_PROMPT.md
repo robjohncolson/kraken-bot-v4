@@ -187,7 +187,16 @@ CC+Codex audit identified 5 blockers. 4 fixed this session, 1 deferred:
 4. **requirements.txt** — added python-dotenv
 5. **(deferred)** Position persistence across restart — acceptable for $10 test phase with operational rule: don't restart with live orders
 
-**Operational rule for $10 test phase**: do not restart with live pending orders or open positions. Only run when startup reconciliation is clean.
+## Position persistence (completed 2026-03-30)
+
+Positions, pending orders, and cooldowns now survive restart via SQLite:
+
+- Schema migration: positions table gains side/qty/entry/stop/target columns; orders table gains kind/side/qty/status; new cooldowns table
+- Runtime hooks: `_persist_state_changes()` diffs old vs new bot_state each cycle, upserts positions, closes removed ones, persists cooldowns. Orders persisted on placement with full PendingOrder metadata. Orders closed on fill.
+- Startup rehydration: `main.py` loads persisted positions/orders/cooldowns, filters pending orders against Kraken open orders (matches by exchange_order_id for Starter tier), derives `next_position_seq` from existing IDs.
+- 500 tests pass.
+
+Known caveat: exit closure is still optimistic (position removed before exchange confirms close order). This matches pre-existing in-memory behavior.
 
 ## TA Ensemble 180d Benchmark (completed 2026-03-30)
 

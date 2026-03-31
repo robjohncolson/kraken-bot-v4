@@ -26,6 +26,7 @@ from core.types import (
     OrderRequest,
     OrderSide,
     OrderType,
+    PendingOrder,
     PlaceOrder,
     Position,
     PositionSide,
@@ -117,9 +118,12 @@ def build_initial_scheduler_state(
     recorded_state: RecordedState,
     report: ReconciliationReport,
     now: datetime | None = None,
+    persisted_positions: tuple[Position, ...] = (),
+    persisted_pending_orders: tuple[tuple[PendingOrder, str | None], ...] = (),
+    persisted_cooldowns: tuple[tuple[str, str], ...] = (),
 ) -> SchedulerState:
     effective_now = _utcnow() if now is None else _normalize_timestamp(now)
-    from core.types import Portfolio, ZERO_DECIMAL
+    from core.types import Portfolio
 
     usd = sum(
         (b.available + b.held for b in kraken_state.balances if b.asset == "USD"),
@@ -129,10 +133,39 @@ def build_initial_scheduler_state(
         (b.available + b.held for b in kraken_state.balances if b.asset == "DOGE"),
         start=ZERO_DECIMAL,
     )
-    portfolio = Portfolio(cash_usd=usd, cash_doge=doge)
+    portfolio = Portfolio(
+        cash_usd=usd,
+        cash_doge=doge,
+        positions=persisted_positions,
+    )
+
+    # Derive next_position_seq from existing position IDs (format: kbv4-slug-000001)
+    seq = 0
+    for pos in persisted_positions:
+        if pos.position_id.startswith("kbv4-"):
+            try:
+                seq = max(seq, int(pos.position_id.rsplit("-", 1)[-1]))
+            except (IndexError, ValueError):
+                pass
+
+    # Filter pending orders against Kraken open orders
+    # Match by client_order_id OR by exchange_order_id stored in the DB
+    exchange_coids = {o.client_order_id for o in kraken_state.open_orders if o.client_order_id}
+    exchange_oids = {o.order_id for o in kraken_state.open_orders}
+    # fetch_open_orders returns (PendingOrder, exchange_order_id) pairs
+    live_pending = tuple(
+        po for po, exch_oid in persisted_pending_orders
+        if po.client_order_id in exchange_coids or (exch_oid and exch_oid in exchange_oids)
+    )
 
     return SchedulerState(
-        bot_state=BotState(balances=kraken_state.balances, portfolio=portfolio),
+        bot_state=BotState(
+            balances=kraken_state.balances,
+            portfolio=portfolio,
+            pending_orders=live_pending,
+            cooldowns=persisted_cooldowns,
+            next_position_seq=seq + 1,
+        ),
         kraken_state=kraken_state,
         recorded_state=recorded_state,
         now=effective_now,
@@ -266,6 +299,7 @@ class SchedulerRuntime:
         await self._ensure_websocket_connected()
         await self._ensure_subscriptions()
         await self._maybe_bind_tree_to_position()
+        await self._persist_state_changes(state, new_state)
         await self._maybe_poll_beliefs(now)
         await self._handle_effects(effects)
         await self._maybe_plan_conditional_rotation(now)
@@ -324,6 +358,12 @@ class SchedulerRuntime:
         async with self._state_lock:
             pending = self._state.pending_fills + (core_fill,)
             self._state = replace(self._state, pending_fills=pending)
+        # Mark the tracked order as filled in persistence
+        if fill.order_id:
+            try:
+                self._writer.close_order(fill.order_id)
+            except Exception:
+                logger.debug("Could not close tracked order %s", fill.order_id)
 
     async def _maybe_bind_tree_to_position(self) -> None:
         """Bind conditional tree to its opened position after reducer creates it."""
@@ -354,6 +394,39 @@ class SchedulerRuntime:
             self._conditional_tree_state = updated_tree
             self._state = replace(self._state, conditional_tree_state=updated_tree)
 
+    async def _persist_state_changes(
+        self, old_state: SchedulerState, new_state: SchedulerState,
+    ) -> None:
+        """Diff old vs new bot state and persist changes to SQLite."""
+        old_positions = {p.position_id: p for p in old_state.bot_state.portfolio.positions}
+        new_positions = {p.position_id: p for p in new_state.bot_state.portfolio.positions}
+
+        # Persist new or updated positions
+        for pid, pos in new_positions.items():
+            old_pos = old_positions.get(pid)
+            if old_pos is None or old_pos != pos:
+                try:
+                    self._writer.upsert_position(pos)
+                except Exception:
+                    logger.debug("Failed to persist position %s", pid)
+
+        # Close removed positions
+        for pid in old_positions:
+            if pid not in new_positions:
+                try:
+                    self._writer.update_position_closed(pid)
+                except Exception:
+                    logger.debug("Failed to close position %s", pid)
+
+        # Persist cooldown changes
+        old_cooldowns = set(old_state.bot_state.cooldowns)
+        new_cooldowns = set(new_state.bot_state.cooldowns)
+        for pair, ts in new_cooldowns - old_cooldowns:
+            try:
+                self._writer.set_cooldown(pair, ts)
+            except Exception:
+                logger.debug("Failed to persist cooldown for %s", pair)
+
     async def _handle_effects(self, effects: tuple[object, ...]) -> None:
         for effect in effects:
             if isinstance(effect, PlaceOrder):
@@ -381,6 +454,25 @@ class SchedulerRuntime:
         try:
             order_id = self._executor.execute_order(effect.order)
             logger.info("Placed order %s for %s", order_id, effect.order.pair)
+            # Find matching PendingOrder from bot state for rich metadata
+            pending = next(
+                (po for po in self._state.bot_state.pending_orders
+                 if po.client_order_id == getattr(effect.order, "client_order_id", "")),
+                None,
+            )
+            self._writer.upsert_order(
+                order_id=order_id,
+                pair=effect.order.pair,
+                client_order_id=pending.client_order_id if pending else order_id,
+                kind=pending.kind if pending else "position_entry",
+                side=pending.side if pending else effect.order.side.value,
+                base_qty=pending.base_qty if pending else effect.order.quantity,
+                filled_qty=pending.filled_qty if pending else ZERO_DECIMAL,
+                quote_qty=pending.quote_qty if pending else ZERO_DECIMAL,
+                limit_price=effect.order.limit_price,
+                position_id=pending.position_id if pending else None,
+                exchange_order_id=order_id,
+            )
         except (ExchangeError, SafeModeBlockedError) as exc:
             logger.error("Failed to place order for %s: %s", effect.order.pair, exc)
 
