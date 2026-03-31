@@ -680,6 +680,12 @@ class SchedulerRuntime:
 
         self._rotation_tree = updated_tree
 
+        # Persist tree state
+        try:
+            self._writer.save_rotation_tree(updated_tree)
+        except Exception:
+            logger.debug("Failed to persist rotation tree")
+
     async def _seed_candidate_reference_price(
         self,
         *,

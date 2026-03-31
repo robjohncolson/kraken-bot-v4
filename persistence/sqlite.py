@@ -8,11 +8,21 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 
 from core.errors import KrakenBotError
-from core.types import PendingOrder, Position, PositionSide, ZERO_DECIMAL
+from core.types import (
+    OrderSide,
+    PendingOrder,
+    Position,
+    PositionSide,
+    RotationNode,
+    RotationNodeStatus,
+    RotationTreeState,
+    ZERO_DECIMAL,
+)
 from trading.reconciler import RecordedOrder, RecordedPosition, RecordedState
 
 logger = logging.getLogger(__name__)
@@ -48,13 +58,35 @@ CREATE TABLE IF NOT EXISTS ledger (
     created_at TEXT DEFAULT current_timestamp
 )"""
 
+ROTATION_NODES_DDL = """\
+CREATE TABLE IF NOT EXISTS rotation_nodes (
+    node_id         TEXT PRIMARY KEY,
+    parent_node_id  TEXT,
+    depth           INTEGER NOT NULL DEFAULT 0,
+    asset           TEXT NOT NULL,
+    quantity_total  TEXT NOT NULL DEFAULT '0',
+    quantity_free   TEXT NOT NULL DEFAULT '0',
+    quantity_reserved TEXT NOT NULL DEFAULT '0',
+    entry_pair      TEXT,
+    from_asset      TEXT,
+    order_side      TEXT,
+    entry_price     TEXT,
+    position_id     TEXT,
+    opened_at       TEXT,
+    deadline_at     TEXT,
+    window_hours    REAL,
+    confidence      REAL DEFAULT 0.0,
+    status          TEXT NOT NULL DEFAULT 'planned',
+    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+)"""
+
 COOLDOWNS_DDL = """\
 CREATE TABLE IF NOT EXISTS cooldowns (
     pair           TEXT PRIMARY KEY,
     cooldown_until TEXT NOT NULL
 )"""
 
-SCHEMA_STATEMENTS = (POSITIONS_DDL, ORDERS_DDL, LEDGER_DDL, COOLDOWNS_DDL)
+SCHEMA_STATEMENTS = (POSITIONS_DDL, ORDERS_DDL, LEDGER_DDL, COOLDOWNS_DDL, ROTATION_NODES_DDL)
 
 # Columns added after initial schema — safe to run repeatedly.
 _POSITION_MIGRATIONS = (
@@ -259,6 +291,44 @@ class SqliteReader:
         except sqlite3.Error as exc:
             raise SqliteReadError(f"Failed to read cooldowns: {exc}") from exc
 
+    def fetch_rotation_tree(self) -> RotationTreeState:
+        """Fetch persisted rotation tree state."""
+        try:
+            cursor = self._conn.execute(
+                "SELECT * FROM rotation_nodes WHERE status IN ('planned', 'open', 'closing') "
+                "ORDER BY depth, node_id"
+            )
+            nodes: list[RotationNode] = []
+            root_ids: list[str] = []
+            for row in cursor:
+                node = RotationNode(
+                    node_id=row["node_id"],
+                    parent_node_id=row["parent_node_id"],
+                    depth=row["depth"],
+                    asset=row["asset"],
+                    quantity_total=Decimal(row["quantity_total"]),
+                    quantity_free=Decimal(row["quantity_free"]),
+                    quantity_reserved=Decimal(row["quantity_reserved"] or "0"),
+                    entry_pair=row["entry_pair"],
+                    from_asset=row["from_asset"],
+                    order_side=OrderSide(row["order_side"]) if row["order_side"] else None,
+                    entry_price=Decimal(row["entry_price"]) if row["entry_price"] else None,
+                    position_id=row["position_id"],
+                    deadline_at=datetime.fromisoformat(row["deadline_at"]) if row["deadline_at"] else None,
+                    window_hours=row["window_hours"],
+                    confidence=row["confidence"] or 0.0,
+                    status=RotationNodeStatus(row["status"]),
+                )
+                nodes.append(node)
+                if node.parent_node_id is None:
+                    root_ids.append(node.node_id)
+            return RotationTreeState(
+                nodes=tuple(nodes),
+                root_node_ids=tuple(root_ids),
+            )
+        except sqlite3.Error as exc:
+            raise SqliteReadError(f"Failed to read rotation tree: {exc}") from exc
+
     def fetch_recorded_state(self) -> RecordedState:
         """Fetch positions and orders as a RecordedState for reconciliation."""
         positions = self.fetch_positions()
@@ -442,6 +512,51 @@ class SqliteWriter:
         except sqlite3.Error as exc:
             self._conn.rollback()
             raise SqliteWriteError(f"Failed to clear cooldown for {pair!r}: {exc}") from exc
+
+    def save_rotation_tree(self, tree: RotationTreeState) -> None:
+        """Persist the full rotation tree state (replace all live nodes)."""
+        try:
+            # Clear stale live nodes
+            self._conn.execute(
+                "DELETE FROM rotation_nodes WHERE status IN ('planned', 'open', 'closing')"
+            )
+            for node in tree.nodes:
+                if node.status not in (
+                    RotationNodeStatus.PLANNED,
+                    RotationNodeStatus.OPEN,
+                    RotationNodeStatus.CLOSING,
+                ):
+                    continue
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO rotation_nodes ("
+                    "node_id, parent_node_id, depth, asset, quantity_total, "
+                    "quantity_free, quantity_reserved, entry_pair, from_asset, "
+                    "order_side, entry_price, position_id, deadline_at, "
+                    "window_hours, confidence, status"
+                    ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        node.node_id,
+                        node.parent_node_id,
+                        node.depth,
+                        node.asset,
+                        str(node.quantity_total),
+                        str(node.quantity_free),
+                        str(node.quantity_reserved),
+                        node.entry_pair,
+                        node.from_asset,
+                        node.order_side.value if node.order_side else None,
+                        str(node.entry_price) if node.entry_price else None,
+                        node.position_id,
+                        node.deadline_at.isoformat() if node.deadline_at else None,
+                        node.window_hours,
+                        node.confidence,
+                        node.status.value,
+                    ),
+                )
+            self._conn.commit()
+        except sqlite3.Error as exc:
+            self._conn.rollback()
+            raise SqliteWriteError(f"Failed to save rotation tree: {exc}") from exc
 
     def update_position_closed(self, position_id: str) -> None:
         """Mark an existing position closed with the current UTC timestamp."""
