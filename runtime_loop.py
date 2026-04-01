@@ -758,7 +758,16 @@ class SchedulerRuntime:
                 rotation_node_id=node.node_id,
             )
 
-            # Add PendingOrder to bot state
+            # Try to place the order first — only add PendingOrder on success
+            try:
+                order_id = self._executor.execute_order(order)
+            except (ExchangeError, SafeModeBlockedError) as exc:
+                logger.warning(
+                    "Rotation entry blocked for %s: %s", node.node_id, exc,
+                )
+                continue
+
+            # Order placed — now track it
             async with self._state_lock:
                 self._state = replace(
                     self._state,
@@ -767,13 +776,23 @@ class SchedulerRuntime:
                         pending_orders=self._state.bot_state.pending_orders + (pending,),
                     ),
                 )
-
-            # Execute
-            await self._execute_place_order(PlaceOrder(order=order))
+            self._writer.upsert_order(
+                order_id=order_id,
+                pair=node.entry_pair,
+                client_order_id=client_order_id,
+                kind="rotation_entry",
+                side=node.order_side.value,
+                base_qty=base_qty,
+                filled_qty=ZERO_DECIMAL,
+                quote_qty=pending.quote_qty,
+                limit_price=node.entry_price,
+                exchange_order_id=order_id,
+                rotation_node_id=node.node_id,
+            )
             logger.info(
-                "Rotation entry: %s %s qty=%s @ %s (node=%s)",
+                "Rotation entry: %s %s qty=%s @ %s (node=%s, order=%s)",
                 node.order_side.value, node.entry_pair, base_qty,
-                node.entry_price, node.node_id,
+                node.entry_price, node.node_id, order_id,
             )
 
     async def _settle_rotation_fills(self, now: datetime) -> None:
@@ -921,7 +940,21 @@ class SchedulerRuntime:
             rotation_node_id=node.node_id,
         )
 
-        # Add PendingOrder and mark node as CLOSING
+        # Try to place exit order first — only track on success
+        try:
+            order_id = self._executor.execute_order(order)
+        except (ExchangeError, SafeModeBlockedError) as exc:
+            logger.warning(
+                "Rotation exit blocked for %s (%s): %s — marking expired",
+                node.node_id, reason, exc,
+            )
+            self._rotation_tree = update_node(
+                self._rotation_tree, node.node_id,
+                status=RotationNodeStatus.EXPIRED,
+            )
+            return
+
+        # Order placed — track PendingOrder and mark CLOSING
         async with self._state_lock:
             self._state = replace(
                 self._state,
@@ -934,12 +967,23 @@ class SchedulerRuntime:
             self._rotation_tree, node.node_id,
             status=RotationNodeStatus.CLOSING,
         )
-
-        await self._execute_place_order(PlaceOrder(order=order))
+        self._writer.upsert_order(
+            order_id=order_id,
+            pair=node.entry_pair,
+            client_order_id=client_order_id,
+            kind="rotation_exit",
+            side=exit_side.value,
+            base_qty=base_qty,
+            filled_qty=ZERO_DECIMAL,
+            quote_qty=ZERO_DECIMAL,
+            limit_price=current_price,
+            exchange_order_id=order_id,
+            rotation_node_id=node.node_id,
+        )
         logger.info(
-            "Rotation exit: %s %s qty=%s @ %s (node=%s, reason=%s)",
+            "Rotation exit: %s %s qty=%s @ %s (node=%s, reason=%s, order=%s)",
             exit_side.value, node.entry_pair, base_qty,
-            current_price, node.node_id, reason,
+            current_price, node.node_id, reason, order_id,
         )
 
     async def _cancel_rotation_entry(self, node) -> None:
