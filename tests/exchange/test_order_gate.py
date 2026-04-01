@@ -98,3 +98,46 @@ def test_circuit_breaker_blocks_mutations_after_repeated_failures() -> None:
         gate.cancel_order("dogeusd", "tx-1", order_age_seconds=10.0)
 
     assert client.cancel_calls == 0
+
+
+class RateLimitingClient:
+    """Client that always raises RateLimitExceededError."""
+
+    def __init__(self) -> None:
+        self.place_calls = 0
+
+    def place_order(self, pair: str, payload: dict[str, object]) -> PreparedKrakenRequest:
+        del pair, payload
+        self.place_calls += 1
+        from core.errors import RateLimitExceededError
+        raise RateLimitExceededError("rate limit hit")
+
+    def cancel_order(self, pair: str, order_id: str, *, order_age_seconds: float) -> PreparedKrakenRequest:
+        from core.errors import RateLimitExceededError
+        raise RateLimitExceededError("rate limit hit")
+
+
+def test_rate_limit_does_not_trip_circuit_breaker() -> None:
+    """Repeated RateLimitExceededError keeps circuit breaker CLOSED."""
+    client = RateLimitingClient()
+    clock = ManualClock(0.0)
+    gate = OrderGate(client=client, now=clock.now)
+
+    order = OrderRequest(
+        pair="DOGE/USD",
+        side=OrderSide.BUY,
+        order_type=OrderType.LIMIT,
+        quantity=Decimal("100"),
+        limit_price=Decimal("0.09"),
+    )
+
+    from core.errors import RateLimitExceededError
+    for _ in range(5):
+        with pytest.raises(RateLimitExceededError):
+            gate.place_order(order)
+
+    snapshot = gate.circuit_breaker
+
+    assert client.place_calls == 5
+    assert snapshot.state == CircuitBreakerState.CLOSED
+    assert snapshot.failure_count == 0

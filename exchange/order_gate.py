@@ -14,7 +14,7 @@ from core.config import (
     DEFAULT_CIRCUIT_BREAKER_THRESHOLD,
     DEFAULT_CIRCUIT_BREAKER_WINDOW_SEC,
 )
-from core.errors import ExchangeError
+from core.errors import ExchangeError, RateLimitExceededError
 from core.types import CircuitBreakerState, OrderRequest, OrderType
 from exchange.client import PreparedKrakenRequest
 from exchange.symbols import normalize_pair
@@ -185,6 +185,8 @@ class OrderGate:
         payload = self.build_order_payload(order)
         try:
             request = self._client.place_order(order.pair, payload)
+        except RateLimitExceededError:
+            raise  # Rate limits don't count toward circuit breaker
         except ExchangeError:
             self._breaker.record_failure()
             raise
@@ -209,6 +211,8 @@ class OrderGate:
                 order_id,
                 order_age_seconds=order_age_seconds,
             )
+        except RateLimitExceededError:
+            raise  # Rate limits don't count toward circuit breaker
         except ExchangeError:
             self._breaker.record_failure()
             raise

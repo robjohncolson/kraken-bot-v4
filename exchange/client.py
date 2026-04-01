@@ -16,6 +16,7 @@ STARTER_MATCHING_ENGINE_MAX_PER_PAIR: Final[int] = 60
 STARTER_CANCEL_PENALTY_THRESHOLD_SECONDS: Final[Decimal] = Decimal("5")
 STARTER_CANCEL_PENALTY_POINTS: Final[int] = 8
 STARTER_MATCHING_ENGINE_COST: Final[int] = 1
+STARTER_MATCHING_ENGINE_DECAY_PER_SECOND: Final[Decimal] = Decimal("1")
 
 TimeSource = Callable[[], float]
 PairNormalizer = Callable[[str], str]
@@ -46,6 +47,7 @@ class KrakenRateLimitPolicy:
     cancel_penalty_threshold_seconds: Decimal = STARTER_CANCEL_PENALTY_THRESHOLD_SECONDS
     cancel_penalty_points: int = STARTER_CANCEL_PENALTY_POINTS
     matching_engine_cost: int = STARTER_MATCHING_ENGINE_COST
+    matching_engine_decay_per_second: Decimal = STARTER_MATCHING_ENGINE_DECAY_PER_SECOND
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,6 +86,7 @@ class KrakenRateLimiter:
         self._rest_used = Decimal("0")
         self._rest_updated_at = _decimal_seconds(self._now())
         self._matching_engine_usage: dict[str, int] = {}
+        self._matching_engine_updated_at: dict[str, Decimal] = {}
 
     def consume_rest(self, *, cost: int = 1) -> RestRateLimitSnapshot:
         now = _decimal_seconds(self._now())
@@ -111,6 +114,8 @@ class KrakenRateLimiter:
         cost: int = STARTER_MATCHING_ENGINE_COST,
     ) -> MatchingEngineLimitSnapshot:
         normalized_pair = normalize_pair(pair)
+        now = _decimal_seconds(self._now())
+        self._apply_matching_engine_decay(normalized_pair, now)
         current_points = self._matching_engine_usage.get(normalized_pair, 0)
         projected = current_points + cost
         if projected > self._policy.matching_engine_max_per_pair:
@@ -118,6 +123,7 @@ class KrakenRateLimiter:
                 f"Starter matching engine rate limit exceeded for {normalized_pair}."
             )
         self._matching_engine_usage[normalized_pair] = projected
+        self._matching_engine_updated_at[normalized_pair] = now
         return self.matching_engine_snapshot(normalized_pair)
 
     def consume_cancel(
@@ -137,6 +143,8 @@ class KrakenRateLimiter:
 
     def matching_engine_snapshot(self, pair: str) -> MatchingEngineLimitSnapshot:
         normalized_pair = normalize_pair(pair)
+        now = _decimal_seconds(self._now())
+        self._apply_matching_engine_decay(normalized_pair, now)
         used_points = self._matching_engine_usage.get(normalized_pair, 0)
         return MatchingEngineLimitSnapshot(
             pair=normalized_pair,
@@ -151,6 +159,20 @@ class KrakenRateLimiter:
         decay = elapsed * self._policy.rest_decay_per_second
         self._rest_used = max(Decimal("0"), self._rest_used - decay)
         self._rest_updated_at = now
+
+    def _apply_matching_engine_decay(self, pair: str, now: Decimal) -> None:
+        last = self._matching_engine_updated_at.get(pair)
+        if last is None:
+            self._matching_engine_updated_at[pair] = now
+            return
+        elapsed = now - last
+        if elapsed <= 0:
+            return
+        decay = int(elapsed * self._policy.matching_engine_decay_per_second)
+        if decay > 0:
+            current = self._matching_engine_usage.get(pair, 0)
+            self._matching_engine_usage[pair] = max(0, current - decay)
+            self._matching_engine_updated_at[pair] = now
 
 
 class KrakenClient:

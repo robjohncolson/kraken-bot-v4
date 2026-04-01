@@ -24,7 +24,7 @@ Bot running on WSL Athena pane with **rotation tree LIVE**:
 | ALLOWED_PAIRS | Empty (all pairs enabled for rotation) |
 | Scanner timeout | 45s (`SCANNER_TIMEOUT_SEC=45`) |
 | Dashboard | `http://10.0.0.24:58392` |
-| Tests | 555 passing |
+| Tests | 560 passing |
 
 ### Active rotation tree (observed 2026-04-01)
 
@@ -100,6 +100,7 @@ Backfill validation: +4,862 bps, 55.1% accuracy, 100% coverage, all rollout gate
 | D3 dashboard | Wired — portfolio cards, positions table, belief heatmap, reconciliation |
 | TUI | 8 screens (incl. rotation tree), live SSE, keyboard navigation |
 | Rotation tree | **LIVE** — scanning, ordering, settling across all Kraken pairs |
+| Rotation resilience | Retry budget (3x), rate limit bypass, matching engine decay, auto-cancel on insufficient funds |
 | Conditional tree (v1) | Built, disabled by default (`ENABLE_CONDITIONAL_TREE`) |
 | Backfill shadow eval | `python -m research.backfill_shadow` |
 
@@ -159,7 +160,7 @@ Monitor rotation tree live performance + council beliefs:
 ## Validation
 
 ```bash
-python -m pytest                    # 555 tests
+python -m pytest                    # 560 tests
 python -m ruff check .              # clean
 curl http://127.0.0.1:58392/api/health         # dashboard up
 curl http://127.0.0.1:58392/api/rotation-tree  # rotation tree state

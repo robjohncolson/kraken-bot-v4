@@ -14,7 +14,13 @@ from typing import Protocol
 from fastapi.encoders import jsonable_encoder
 
 from core.config import Settings
-from core.errors import ExchangeError, KrakenBotError, SafeModeBlockedError
+from core.errors import (
+    ExchangeError,
+    InsufficientFundsError,
+    KrakenBotError,
+    RateLimitExceededError,
+    SafeModeBlockedError,
+)
 from core.types import (
     BeliefSnapshot,
     BeliefSource,
@@ -51,6 +57,7 @@ from trading.conditional_tree import ConditionalTreeCoordinator, ConditionalTree
 from trading.pair_scanner import PairScanner
 from trading.rotation_planner import RotationTreePlanner
 from trading.rotation_tree import (
+    cancel_planned_node,
     cascade_close,
     destination_quantity,
     entry_base_quantity,
@@ -80,6 +87,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_CYCLE_INTERVAL_SEC = 30
 DEFAULT_GUARDIAN_INTERVAL_SEC = 120
+ROTATION_ENTRY_MAX_RETRIES = 3
 
 SsePublisher = Callable[..., Awaitable[None]]
 HeartbeatWriter = Callable[[HeartbeatSnapshot], None]
@@ -237,6 +245,7 @@ class SchedulerRuntime:
         self._rotation_tree: RotationTreeState | None = None
         self._rotation_planner: RotationTreePlanner | None = None
         self._rotation_fill_queue: list[tuple[str, Decimal, Decimal, str]] = []
+        self._rotation_entry_retry_counts: dict[str, int] = {}
         if settings.enable_rotation_tree:
             scanner = PairScanner(client=executor._client, settings=settings)
             self._rotation_planner = RotationTreePlanner(
@@ -761,13 +770,40 @@ class SchedulerRuntime:
             # Try to place the order first — only add PendingOrder on success
             try:
                 order_id = self._executor.execute_order(order)
-            except (ExchangeError, SafeModeBlockedError) as exc:
-                logger.warning(
-                    "Rotation entry blocked for %s: %s", node.node_id, exc,
-                )
+            except RateLimitExceededError as exc:
+                # Rate limits: skip without retry count or circuit breaker impact
+                logger.info("Rotation entry rate-limited for %s: %s", node.node_id, exc)
+                continue
+            except InsufficientFundsError as exc:
+                # Insufficient funds: cancel immediately, return capital to parent
+                logger.warning("Rotation entry cancelled (insufficient funds) for %s: %s", node.node_id, exc)
+                self._rotation_tree = cancel_planned_node(self._rotation_tree, node.node_id)
+                self._rotation_entry_retry_counts.pop(node.node_id, None)
+                continue
+            except SafeModeBlockedError as exc:
+                # Safe mode: skip without retry count (intentional block, not error)
+                logger.info("Rotation entry safe-mode blocked for %s: %s", node.node_id, exc)
+                continue
+            except ExchangeError as exc:
+                # Other exchange errors: increment retry count, cancel after max retries
+                retries = self._rotation_entry_retry_counts.get(node.node_id, 0) + 1
+                self._rotation_entry_retry_counts[node.node_id] = retries
+                if retries >= ROTATION_ENTRY_MAX_RETRIES:
+                    logger.warning(
+                        "Rotation entry retries exhausted for %s (%d/%d): %s",
+                        node.node_id, retries, ROTATION_ENTRY_MAX_RETRIES, exc,
+                    )
+                    self._rotation_tree = cancel_planned_node(self._rotation_tree, node.node_id)
+                    self._rotation_entry_retry_counts.pop(node.node_id, None)
+                else:
+                    logger.warning(
+                        "Rotation entry blocked for %s (retry %d/%d): %s",
+                        node.node_id, retries, ROTATION_ENTRY_MAX_RETRIES, exc,
+                    )
                 continue
 
-            # Order placed — now track it
+            # Order placed — clear any stale retry count and track it
+            self._rotation_entry_retry_counts.pop(node.node_id, None)
             async with self._state_lock:
                 self._state = replace(
                     self._state,
@@ -1007,21 +1043,9 @@ class SchedulerRuntime:
                     bot_state=replace(self._state.bot_state, pending_orders=remaining),
                 )
 
-        # Return reserved quantity to parent
-        if node.parent_node_id:
-            parent = node_by_id(self._rotation_tree, node.parent_node_id)
-            if parent:
-                self._rotation_tree = update_node(
-                    self._rotation_tree, parent.node_id,
-                    quantity_free=parent.quantity_free + node.quantity_total,
-                    quantity_reserved=max(ZERO_DECIMAL, parent.quantity_reserved - node.quantity_total),
-                )
-
-        # Mark node as CANCELLED
-        self._rotation_tree = update_node(
-            self._rotation_tree, node.node_id,
-            status=RotationNodeStatus.CANCELLED,
-        )
+        # Return reserved quantity to parent and mark CANCELLED
+        self._rotation_tree = cancel_planned_node(self._rotation_tree, node.node_id)
+        self._rotation_entry_retry_counts.pop(node.node_id, None)
 
     async def _seed_candidate_reference_price(
         self,

@@ -193,3 +193,58 @@ def test_add_and_update_node() -> None:
     assert len(tree.nodes) == 1
     tree = update_node(tree, "root-usd", quantity_free=Decimal("50"))
     assert tree.nodes[0].quantity_free == Decimal("50")
+
+
+# ---------------------------------------------------------------------------
+# cancel_planned_node tests
+# ---------------------------------------------------------------------------
+
+def test_cancel_planned_node_returns_reserved_qty_to_parent() -> None:
+    from trading.rotation_tree import cancel_planned_node
+
+    parent = RotationNode(
+        node_id="root-usd", parent_node_id=None, depth=0,
+        asset="USD", quantity_total=Decimal("100"),
+        quantity_free=Decimal("40"), quantity_reserved=Decimal("60"),
+        status=RotationNodeStatus.OPEN,
+    )
+    child = RotationNode(
+        node_id="child-eth", parent_node_id="root-usd", depth=1,
+        asset="ETH", quantity_total=Decimal("60"),
+        quantity_free=Decimal("60"),
+        status=RotationNodeStatus.PLANNED,
+    )
+    tree = RotationTreeState(nodes=(parent, child))
+
+    tree = cancel_planned_node(tree, "child-eth")
+
+    updated_parent = node_by_id(tree, "root-usd")
+    updated_child = node_by_id(tree, "child-eth")
+
+    assert updated_parent.quantity_free == Decimal("100")
+    assert updated_parent.quantity_reserved == Decimal("0")
+    assert updated_child.status == RotationNodeStatus.CANCELLED
+
+
+def test_cancel_planned_node_is_noop_for_non_planned_node() -> None:
+    from trading.rotation_tree import cancel_planned_node
+
+    parent = RotationNode(
+        node_id="root-usd", parent_node_id=None, depth=0,
+        asset="USD", quantity_total=Decimal("100"),
+        quantity_free=Decimal("40"), quantity_reserved=Decimal("60"),
+        status=RotationNodeStatus.OPEN,
+    )
+    child = RotationNode(
+        node_id="child-eth", parent_node_id="root-usd", depth=1,
+        asset="ETH", quantity_total=Decimal("60"),
+        quantity_free=Decimal("60"),
+        status=RotationNodeStatus.OPEN,  # NOT PLANNED
+    )
+    tree = RotationTreeState(nodes=(parent, child))
+    original_tree = tree
+
+    tree = cancel_planned_node(tree, "child-eth")
+
+    # No changes — node is not PLANNED
+    assert tree is original_tree

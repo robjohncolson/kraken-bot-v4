@@ -98,3 +98,47 @@ def test_get_asset_pairs_uses_public_assetpairs_endpoint() -> None:
     assert request.endpoint == "/0/public/AssetPairs"
     assert dict(request.payload) == {}
     assert client.rate_limiter.rest_snapshot().used_points == Decimal("1")
+
+
+# ---------------------------------------------------------------------------
+# Matching engine decay tests
+# ---------------------------------------------------------------------------
+
+def test_matching_engine_limit_decays_over_time() -> None:
+    """Consume to cap, advance 1 second, one more consume succeeds."""
+    clock = ManualClock(0.0)
+    rl = KrakenRateLimiter(now=clock.now)
+
+    # Fill to capacity (60 points)
+    for _ in range(60):
+        rl.consume_matching_engine("DOGE/USD")
+
+    # Next consume should fail
+    with pytest.raises(RateLimitExceededError):
+        rl.consume_matching_engine("DOGE/USD")
+
+    # Advance 1 second — 1 point decays
+    clock.advance(1.0)
+
+    # Now one more consume should succeed
+    snap = rl.consume_matching_engine("DOGE/USD")
+    assert snap.used_points == 60  # 59 after decay + 1 new = 60
+
+
+def test_matching_engine_decay_is_per_pair() -> None:
+    """Decay on DOGE pair does not affect BTC pair."""
+    clock = ManualClock(0.0)
+    rl = KrakenRateLimiter(now=clock.now)
+
+    # Use 50 points on each pair
+    for _ in range(50):
+        rl.consume_matching_engine("DOGE/USD")
+        rl.consume_matching_engine("BTC/USD")
+
+    clock.advance(10.0)  # 10 points decay on each pair independently
+
+    doge_snap = rl.matching_engine_snapshot("DOGE/USD")
+    btc_snap = rl.matching_engine_snapshot("BTC/USD")
+
+    assert doge_snap.used_points == 40  # 50 - 10
+    assert btc_snap.used_points == 40  # 50 - 10

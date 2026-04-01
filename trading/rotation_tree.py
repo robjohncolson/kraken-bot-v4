@@ -265,6 +265,31 @@ def update_node(tree: RotationTreeState, node_id: str, **kwargs) -> RotationTree
     return replace(tree, nodes=nodes)
 
 
+def cancel_planned_node(tree: RotationTreeState, node_id: str) -> RotationTreeState:
+    """Cancel a PLANNED node and return its allocated capital to the parent.
+
+    No-op if the node is missing or not PLANNED.
+    """
+    node = node_by_id(tree, node_id)
+    if node is None or node.status != RotationNodeStatus.PLANNED:
+        return tree
+
+    # Return capital to parent
+    if node.parent_node_id is not None:
+        parent = node_by_id(tree, node.parent_node_id)
+        if parent is not None:
+            tree = update_node(
+                tree,
+                parent.node_id,
+                quantity_free=parent.quantity_free + node.quantity_total,
+                quantity_reserved=max(
+                    Decimal("0"), parent.quantity_reserved - node.quantity_total,
+                ),
+            )
+
+    return close_node(tree, node_id, status=RotationNodeStatus.CANCELLED)
+
+
 def _descendants(tree: RotationTreeState, node_id: str) -> set[str]:
     """Find all descendant node IDs (recursive)."""
     result: set[str] = set()
@@ -282,6 +307,7 @@ __all__ = [
     "MIN_CONFIDENCE",
     "add_node",
     "build_root_nodes",
+    "cancel_planned_node",
     "cascade_close",
     "children_of",
     "close_node",
