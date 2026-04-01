@@ -6,11 +6,15 @@ from typing import Final
 from core.errors import ExchangeError
 
 _ASSET_ALIASES: Final[dict[str, str]] = {
+    "AUD": "AUD",
     "BTC": "BTC",
+    "CAD": "CAD",
+    "CHF": "CHF",
     "DOGE": "DOGE",
     "ETH": "ETH",
     "EUR": "EUR",
     "GBP": "GBP",
+    "JPY": "JPY",
     "USD": "USD",
     "USDC": "USDC",
     "USDT": "USDT",
@@ -21,8 +25,12 @@ _ASSET_ALIASES: Final[dict[str, str]] = {
     "XXBT": "BTC",
     "XXDG": "DOGE",
     "XXRP": "XRP",
+    "ZAUD": "AUD",
+    "ZCAD": "CAD",
+    "ZCHF": "CHF",
     "ZEUR": "EUR",
     "ZGBP": "GBP",
+    "ZJPY": "JPY",
     "ZUSD": "USD",
 }
 _QUOTE_SUFFIXES: Final[tuple[str, ...]] = (
@@ -31,12 +39,21 @@ _QUOTE_SUFFIXES: Final[tuple[str, ...]] = (
     "ZUSD",
     "ZEUR",
     "ZGBP",
+    "ZAUD",
+    "ZCAD",
+    "ZCHF",
+    "ZJPY",
     "USD",
     "EUR",
     "GBP",
+    "AUD",
+    "CAD",
+    "CHF",
+    "JPY",
     "XXBT",
     "XBT",
     "BTC",
+    "ETH",
 )
 
 

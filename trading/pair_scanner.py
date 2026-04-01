@@ -252,9 +252,11 @@ class PairScanner:
                 if result is not None:
                     candidates.append(result)
         except FuturesTimeoutError:
-            logger.warning("Rotation scan timed out for %s", source_asset)
+            logger.warning(
+                "Rotation scan timed out for %s (%d candidates found so far)",
+                source_asset, len(candidates),
+            )
             executor.shutdown(wait=False, cancel_futures=True)
-            return ()
         finally:
             if not any(f.cancelled() for f in futures):
                 executor.shutdown(wait=True, cancel_futures=False)
