@@ -77,6 +77,34 @@ class ReconciliationSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
+class RotationNodeSnapshot:
+    node_id: str
+    parent_node_id: str | None
+    depth: int
+    asset: str
+    quantity_total: str  # Decimal as string
+    quantity_free: str
+    quantity_reserved: str
+    status: str
+    entry_pair: str | None = None
+    from_asset: str | None = None
+    order_side: str | None = None
+    entry_price: str | None = None
+    confidence: float = 0.0
+    deadline_at: str | None = None
+    opened_at: str | None = None
+    window_hours: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RotationTreeSnapshot:
+    nodes: tuple[RotationNodeSnapshot, ...] = field(default_factory=tuple)
+    root_node_ids: tuple[str, ...] = field(default_factory=tuple)
+    max_depth: int = 2
+    last_planned_at: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class DashboardState:
     portfolio: Portfolio = field(default_factory=Portfolio)
     positions: tuple[PositionSnapshot, ...] = field(default_factory=tuple)
@@ -84,6 +112,7 @@ class DashboardState:
     beliefs: tuple[BeliefEntry, ...] = field(default_factory=tuple)
     stats: StrategyStatsSnapshot = field(default_factory=StrategyStatsSnapshot)
     reconciliation: ReconciliationSnapshot = field(default_factory=ReconciliationSnapshot)
+    rotation_tree: RotationTreeSnapshot = field(default_factory=RotationTreeSnapshot)
 
 
 class DashboardStateProvider(Protocol):
@@ -122,6 +151,10 @@ def create_router(*, state_provider: DashboardStateProvider) -> APIRouter:
     @router.get("/reconciliation")
     def read_reconciliation(state: DashboardState = Depends(get_state)) -> dict[str, Any]:
         return _serialize_reconciliation(state.reconciliation)
+
+    @router.get("/rotation-tree")
+    def read_rotation_tree(state: DashboardState = Depends(get_state)) -> dict[str, Any]:
+        return _encode_payload(state.rotation_tree)
 
     return router
 

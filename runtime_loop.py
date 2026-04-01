@@ -30,6 +30,8 @@ from core.types import (
     PlaceOrder,
     Position,
     PositionSide,
+    RotationNodeStatus,
+    RotationTreeState,
     ZERO_DECIMAL,
 )
 from exchange.executor import KrakenExecutor
@@ -48,7 +50,16 @@ from scheduler import (
 from trading.conditional_tree import ConditionalTreeCoordinator, ConditionalTreeState
 from trading.pair_scanner import PairScanner
 from trading.rotation_planner import RotationTreePlanner
-from trading.rotation_tree import cascade_close, expired_nodes
+from trading.rotation_tree import (
+    cascade_close,
+    destination_quantity,
+    entry_base_quantity,
+    exit_base_quantity,
+    exit_proceeds,
+    expired_nodes,
+    node_by_id,
+    update_node,
+)
 from trading.reconciler import KrakenState, ReconciliationReport, RecordedState
 from web.app import create_app
 from web.routes import (
@@ -58,6 +69,8 @@ from web.routes import (
     GridStatusSnapshot,
     PositionSnapshot,
     ReconciliationSnapshot,
+    RotationNodeSnapshot,
+    RotationTreeSnapshot,
     StrategyStatsSnapshot,
     create_router,
 )
@@ -223,8 +236,8 @@ class SchedulerRuntime:
         # Rotation tree (denomination-agnostic recursive trading)
         self._rotation_tree: RotationTreeState | None = None
         self._rotation_planner: RotationTreePlanner | None = None
+        self._rotation_fill_queue: list[tuple[str, Decimal, Decimal, str]] = []
         if settings.enable_rotation_tree:
-            from core.types import RotationTreeState
             scanner = PairScanner(client=executor._client, settings=settings)
             self._rotation_planner = RotationTreePlanner(
                 settings=settings, pair_scanner=scanner,
@@ -234,12 +247,7 @@ class SchedulerRuntime:
                 b.asset: b.available + b.held
                 for b in initial_state.kraken_state.balances
             }
-            prices = {}
-            for pair_key, snap in initial_state.current_prices.items():
-                if "/" in pair_key:
-                    base = pair_key.split("/")[0]
-                    prices[base] = snap.price
-            prices["USD"] = Decimal("1")
+            prices = _collect_root_prices(initial_state.current_prices, balances_dict)
             self._rotation_tree = self._rotation_planner.initialize_roots(
                 balances_dict, prices_usd=prices,
             )
@@ -378,6 +386,21 @@ class SchedulerRuntime:
                 recorded_state=self._reader.fetch_recorded_state(),
                 last_reconcile_at=None,
             )
+        # Stash rotation fill details before the reducer consumes the PendingOrder
+        rotation_po = next(
+            (po for po in self._state.bot_state.pending_orders
+             if po.rotation_node_id
+             and po.client_order_id == fill.client_order_id),
+            None,
+        )
+        if rotation_po:
+            self._rotation_fill_queue.append((
+                rotation_po.rotation_node_id,
+                fill.quantity,
+                fill.price,
+                rotation_po.kind,
+            ))
+
         # Enqueue core FillConfirmed for reducer processing on next cycle
         core_fill = CoreFillConfirmed(
             order_id=fill.order_id,
@@ -503,6 +526,7 @@ class SchedulerRuntime:
                 limit_price=effect.order.limit_price,
                 position_id=pending.position_id if pending else None,
                 exchange_order_id=order_id,
+                rotation_node_id=pending.rotation_node_id if pending else None,
             )
         except (ExchangeError, SafeModeBlockedError) as exc:
             logger.error("Failed to place order for %s: %s", effect.order.pair, exc)
@@ -657,19 +681,16 @@ class SchedulerRuntime:
         if self._rotation_planner is None or self._rotation_tree is None:
             return
 
-        # Check for expired nodes and cascade-close them
-        expired = expired_nodes(self._rotation_tree, now)
-        for node in expired:
-            self._rotation_tree = cascade_close(self._rotation_tree, node.node_id)
-            logger.info(
-                "Rotation node expired: %s (%s, depth=%d)",
-                node.node_id, node.asset, node.depth,
-            )
+        # 1. Handle expired nodes with real exchange orders
+        await self._handle_rotation_expiry(now)
 
-        # Run planner to find new candidates
+        # 2. Settle any queued rotation fills
+        await self._settle_rotation_fills(now)
+
+        # 3. Run planner to find new candidates
         updated_tree = self._rotation_planner.plan_cycle(self._rotation_tree, now)
 
-        # Seed reference prices for newly planned nodes
+        # 4. Seed reference prices for newly planned nodes
         for node in updated_tree.nodes:
             if node.entry_pair and node.entry_price and node.entry_pair not in self._state.current_prices:
                 await self._seed_candidate_reference_price(
@@ -680,11 +701,283 @@ class SchedulerRuntime:
 
         self._rotation_tree = updated_tree
 
-        # Persist tree state
+        # 5. Execute entry orders for PLANNED child nodes
+        await self._execute_rotation_entries(now)
+
+        # 6. Persist tree state
         try:
-            self._writer.save_rotation_tree(updated_tree)
+            self._writer.save_rotation_tree(self._rotation_tree)
         except Exception:
             logger.debug("Failed to persist rotation tree")
+
+    async def _execute_rotation_entries(self, now: datetime) -> None:
+        """Place exchange orders for PLANNED child nodes (non-root)."""
+        tree = self._rotation_tree
+        if tree is None:
+            return
+
+        # Build set of node IDs that already have pending orders
+        pending_node_ids = {
+            po.rotation_node_id
+            for po in self._state.bot_state.pending_orders
+            if po.rotation_node_id
+        }
+
+        for node in tree.nodes:
+            if node.status != RotationNodeStatus.PLANNED:
+                continue
+            if node.depth == 0:  # roots are not traded
+                continue
+            if node.node_id in pending_node_ids:
+                continue
+            if not node.entry_pair or node.order_side is None or not node.entry_price:
+                continue
+
+            # Compute base-asset quantity for the order
+            base_qty = entry_base_quantity(node.order_side, node.quantity_total, node.entry_price)
+            if base_qty <= ZERO_DECIMAL:
+                continue
+
+            client_order_id = f"kbv4-rot-{node.node_id}-entry"
+
+            order = OrderRequest(
+                pair=node.entry_pair,
+                side=node.order_side,
+                order_type=OrderType.LIMIT,
+                quantity=base_qty,
+                limit_price=node.entry_price,
+                client_order_id=client_order_id,
+            )
+            pending = PendingOrder(
+                client_order_id=client_order_id,
+                kind="rotation_entry",
+                pair=node.entry_pair,
+                side=node.order_side,
+                base_qty=base_qty,
+                quote_qty=node.quantity_total if node.order_side == OrderSide.BUY else ZERO_DECIMAL,
+                rotation_node_id=node.node_id,
+            )
+
+            # Add PendingOrder to bot state
+            async with self._state_lock:
+                self._state = replace(
+                    self._state,
+                    bot_state=replace(
+                        self._state.bot_state,
+                        pending_orders=self._state.bot_state.pending_orders + (pending,),
+                    ),
+                )
+
+            # Execute
+            await self._execute_place_order(PlaceOrder(order=order))
+            logger.info(
+                "Rotation entry: %s %s qty=%s @ %s (node=%s)",
+                node.order_side.value, node.entry_pair, base_qty,
+                node.entry_price, node.node_id,
+            )
+
+    async def _settle_rotation_fills(self, now: datetime) -> None:
+        """Apply queued rotation fills to the tree."""
+        if self._rotation_tree is None:
+            return
+
+        fills = list(self._rotation_fill_queue)
+        self._rotation_fill_queue.clear()
+
+        for node_id, fill_qty, fill_price, kind in fills:
+            node = node_by_id(self._rotation_tree, node_id)
+            if node is None:
+                logger.warning("Rotation fill for unknown node %s", node_id)
+                continue
+
+            if kind == "rotation_entry":
+                if node.order_side is None:
+                    continue
+                dest_qty = destination_quantity(node.order_side, fill_qty, fill_price)
+                # Transition PLANNED → OPEN with converted quantity
+                self._rotation_tree = update_node(
+                    self._rotation_tree, node_id,
+                    status=RotationNodeStatus.OPEN,
+                    quantity_total=dest_qty,
+                    quantity_free=dest_qty,
+                    quantity_reserved=ZERO_DECIMAL,
+                    entry_price=fill_price,
+                    opened_at=now,
+                )
+                # Release parent's reserved quantity
+                if node.parent_node_id:
+                    parent = node_by_id(self._rotation_tree, node.parent_node_id)
+                    if parent:
+                        new_reserved = max(ZERO_DECIMAL, parent.quantity_reserved - node.quantity_total)
+                        self._rotation_tree = update_node(
+                            self._rotation_tree, parent.node_id,
+                            quantity_reserved=new_reserved,
+                        )
+                logger.info(
+                    "Rotation fill settled: node=%s OPEN, dest_qty=%s %s",
+                    node_id, dest_qty, node.asset,
+                )
+
+            elif kind == "rotation_exit":
+                if node.order_side is None:
+                    continue
+                proceeds = exit_proceeds(node.order_side, fill_qty, fill_price)
+                # Mark node as CLOSED
+                self._rotation_tree = update_node(
+                    self._rotation_tree, node_id,
+                    status=RotationNodeStatus.CLOSED,
+                )
+                # Return proceeds to parent
+                if node.parent_node_id:
+                    parent = node_by_id(self._rotation_tree, node.parent_node_id)
+                    if parent:
+                        self._rotation_tree = update_node(
+                            self._rotation_tree, parent.node_id,
+                            quantity_free=parent.quantity_free + proceeds,
+                        )
+                logger.info(
+                    "Rotation exit settled: node=%s CLOSED, proceeds=%s → parent=%s",
+                    node_id, proceeds, node.parent_node_id,
+                )
+
+    async def _handle_rotation_expiry(self, now: datetime) -> None:
+        """Handle expired rotation nodes with real exchange effects."""
+        if self._rotation_tree is None:
+            return
+
+        expired = expired_nodes(self._rotation_tree, now)
+        if not expired:
+            return
+
+        # Sort by depth descending — close children before parents
+        expired_sorted = sorted(expired, key=lambda n: n.depth, reverse=True)
+
+        for node in expired_sorted:
+            logger.info(
+                "Rotation node expired: %s (%s, depth=%d, status=%s)",
+                node.node_id, node.asset, node.depth, node.status,
+            )
+
+            if node.status == RotationNodeStatus.OPEN and node.depth > 0:
+                # OPEN node with holdings — place exit order
+                await self._close_rotation_node(node, reason="expired", now=now)
+            elif node.status == RotationNodeStatus.PLANNED and node.depth > 0:
+                # PLANNED but not yet filled — cancel pending order, return reserved
+                await self._cancel_rotation_entry(node)
+            else:
+                # Root or already closing — just mark expired
+                self._rotation_tree = cascade_close(
+                    self._rotation_tree, node.node_id,
+                    status=RotationNodeStatus.EXPIRED,
+                )
+
+    async def _close_rotation_node(
+        self, node, *, reason: str, now: datetime,
+    ) -> None:
+        """Place exit order for an OPEN rotation node."""
+        if node.order_side is None or not node.entry_pair:
+            self._rotation_tree = update_node(
+                self._rotation_tree, node.node_id,
+                status=RotationNodeStatus.EXPIRED,
+            )
+            return
+
+        # Get current price for the pair
+        price_snap = self._state.current_prices.get(node.entry_pair)
+        current_price = price_snap.price if price_snap else node.entry_price
+        if not current_price or current_price <= ZERO_DECIMAL:
+            self._rotation_tree = update_node(
+                self._rotation_tree, node.node_id,
+                status=RotationNodeStatus.EXPIRED,
+            )
+            return
+
+        # Compute exit order
+        exit_side = OrderSide.SELL if node.order_side == OrderSide.BUY else OrderSide.BUY
+        base_qty = exit_base_quantity(node.order_side, node.quantity_total, current_price)
+        if base_qty <= ZERO_DECIMAL:
+            self._rotation_tree = update_node(
+                self._rotation_tree, node.node_id,
+                status=RotationNodeStatus.EXPIRED,
+            )
+            return
+
+        client_order_id = f"kbv4-rot-{node.node_id}-exit"
+        order = OrderRequest(
+            pair=node.entry_pair,
+            side=exit_side,
+            order_type=OrderType.LIMIT,
+            quantity=base_qty,
+            limit_price=current_price,
+            client_order_id=client_order_id,
+        )
+        pending = PendingOrder(
+            client_order_id=client_order_id,
+            kind="rotation_exit",
+            pair=node.entry_pair,
+            side=exit_side,
+            base_qty=base_qty,
+            quote_qty=ZERO_DECIMAL,
+            rotation_node_id=node.node_id,
+        )
+
+        # Add PendingOrder and mark node as CLOSING
+        async with self._state_lock:
+            self._state = replace(
+                self._state,
+                bot_state=replace(
+                    self._state.bot_state,
+                    pending_orders=self._state.bot_state.pending_orders + (pending,),
+                ),
+            )
+        self._rotation_tree = update_node(
+            self._rotation_tree, node.node_id,
+            status=RotationNodeStatus.CLOSING,
+        )
+
+        await self._execute_place_order(PlaceOrder(order=order))
+        logger.info(
+            "Rotation exit: %s %s qty=%s @ %s (node=%s, reason=%s)",
+            exit_side.value, node.entry_pair, base_qty,
+            current_price, node.node_id, reason,
+        )
+
+    async def _cancel_rotation_entry(self, node) -> None:
+        """Cancel pending order for a PLANNED rotation node and return reserved qty to parent."""
+        # Find and cancel the pending order
+        pending = next(
+            (po for po in self._state.bot_state.pending_orders
+             if po.rotation_node_id == node.node_id),
+            None,
+        )
+        if pending:
+            await self._execute_cancel_order(CancelOrder(client_order_id=pending.client_order_id))
+            # Remove PendingOrder from state
+            async with self._state_lock:
+                remaining = tuple(
+                    po for po in self._state.bot_state.pending_orders
+                    if po.rotation_node_id != node.node_id
+                )
+                self._state = replace(
+                    self._state,
+                    bot_state=replace(self._state.bot_state, pending_orders=remaining),
+                )
+
+        # Return reserved quantity to parent
+        if node.parent_node_id:
+            parent = node_by_id(self._rotation_tree, node.parent_node_id)
+            if parent:
+                self._rotation_tree = update_node(
+                    self._rotation_tree, parent.node_id,
+                    quantity_free=parent.quantity_free + node.quantity_total,
+                    quantity_reserved=max(ZERO_DECIMAL, parent.quantity_reserved - node.quantity_total),
+                )
+
+        # Mark node as CANCELLED
+        self._rotation_tree = update_node(
+            self._rotation_tree, node.node_id,
+            status=RotationNodeStatus.CANCELLED,
+        )
 
     async def _seed_candidate_reference_price(
         self,
@@ -825,6 +1118,7 @@ class SchedulerRuntime:
                 checked_at=state.last_reconcile_at,
                 report=state.last_reconciliation_report,
             ),
+            rotation_tree=_build_rotation_tree_snapshot(self._rotation_tree),
         )
 
 
@@ -962,6 +1256,38 @@ def _apply_exit_offset(
     return raw.quantize(template)
 
 
+def _build_rotation_tree_snapshot(tree: RotationTreeState | None) -> RotationTreeSnapshot:
+    if tree is None:
+        return RotationTreeSnapshot()
+    node_snaps = tuple(
+        RotationNodeSnapshot(
+            node_id=n.node_id,
+            parent_node_id=n.parent_node_id,
+            depth=n.depth,
+            asset=n.asset,
+            quantity_total=str(n.quantity_total),
+            quantity_free=str(n.quantity_free),
+            quantity_reserved=str(n.quantity_reserved),
+            status=n.status.value,
+            entry_pair=n.entry_pair,
+            from_asset=n.from_asset,
+            order_side=n.order_side.value if n.order_side else None,
+            entry_price=str(n.entry_price) if n.entry_price else None,
+            confidence=n.confidence,
+            deadline_at=n.deadline_at.isoformat() if n.deadline_at else None,
+            opened_at=n.opened_at.isoformat() if n.opened_at else None,
+            window_hours=n.window_hours,
+        )
+        for n in tree.nodes
+    )
+    return RotationTreeSnapshot(
+        nodes=node_snaps,
+        root_node_ids=tree.root_node_ids,
+        max_depth=tree.max_depth,
+        last_planned_at=tree.last_planned_at.isoformat() if tree.last_planned_at else None,
+    )
+
+
 def _active_pairs(state: SchedulerState) -> set[str]:
     pairs = {
         position.pair for position in state.bot_state.portfolio.positions
@@ -1015,6 +1341,45 @@ def _normalize_timestamp(value: datetime) -> datetime:
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _collect_root_prices(
+    current_prices: dict[str, PriceSnapshot] | object,
+    balances: dict[str, Decimal],
+) -> dict[str, Decimal]:
+    """Build asset→USD price map for rotation tree root initialization.
+
+    Uses WebSocket prices first, falls back to OHLCV REST for missing assets.
+    """
+    prices: dict[str, Decimal] = {"USD": Decimal("1")}
+    # Extract known prices from current_prices dict
+    if isinstance(current_prices, dict):
+        for pair_key, snap in current_prices.items():
+            if "/" in pair_key:
+                base = pair_key.split("/")[0]
+                price = snap.price if isinstance(snap, PriceSnapshot) else getattr(snap, "price", None)
+                if price and price > ZERO_DECIMAL:
+                    prices[base] = price
+
+    # Fetch missing prices via REST OHLCV
+    from exchange.ohlcv import OHLCVFetchError, fetch_ohlcv
+
+    for asset in balances:
+        if asset in prices:
+            continue
+        pair = f"{asset}/USD"
+        try:
+            bars = fetch_ohlcv(pair, interval=60, count=1, timeout=10.0)
+            if not bars.empty:
+                import pandas as pd
+                close_val = pd.to_numeric(bars["close"], errors="coerce").iloc[-1]
+                if close_val and close_val > 0:
+                    prices[asset] = Decimal(str(close_val))
+                    logger.info("Fetched REST price for %s: %s", asset, prices[asset])
+        except (OHLCVFetchError, Exception) as exc:
+            logger.warning("Could not fetch price for %s, skipping root: %s", asset, exc)
+
+    return prices
 
 
 __all__ = [

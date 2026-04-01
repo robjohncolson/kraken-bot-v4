@@ -231,13 +231,14 @@ class PendingOrder:
     """Tracks an in-flight order for reservation accounting."""
 
     client_order_id: ClientOrderId
-    kind: str  # "position_entry" | "inventory_sell"
+    kind: str  # "position_entry" | "inventory_sell" | "rotation_entry" | "rotation_exit"
     pair: Pair
     side: OrderSide
     base_qty: Quantity  # base-asset quantity (e.g. DOGE for DOGE/USD)
     quote_qty: UsdAmount  # quote-asset committed (USD for buys, ZERO for sells)
     filled_qty: Quantity = ZERO_DECIMAL  # base-asset filled so far
     position_id: PositionId | None = None  # set for position entries
+    rotation_node_id: str | None = None  # set for rotation tree entries/exits
 
 
 @dataclass(frozen=True, slots=True)

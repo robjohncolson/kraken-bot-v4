@@ -22,7 +22,7 @@ Bot running on WSL Athena pane: `/mnt/c/Python313/python.exe main.py`
 | Portfolio | ~$500 (4,651 DOGE + $80 USD) |
 | Open positions | 0 |
 | Dashboard | `http://10.0.0.24:58392` |
-| Tests | 500+ passing |
+| Tests | 544 passing |
 
 ## Belief models
 
@@ -51,22 +51,24 @@ Backfill validation: +4,862 bps, 55.1% accuracy, 100% coverage, all rollout gate
 
 **Vision**: Denomination-agnostic recursive trading. Portfolio holdings become root nodes. Each asset scans all Kraken pairs for bear exits / bull entries. Rotations create timed child nodes. Children recurse within parent windows. Confidence-weighted sizing.
 
-**Foundation complete (R1-R4)**:
-- `core/types.py`: RotationNode, RotationCandidate, RotationTreeState
-- `trading/rotation_tree.py`: Pure helpers (build_root_nodes, compute_child_allocations, cascade_close, etc.)
+**Foundation complete (R1-R4)** + **Execution wired (R5)**:
+- `core/types.py`: RotationNode, RotationCandidate, RotationTreeState, PendingOrder.rotation_node_id
+- `trading/rotation_tree.py`: Pure helpers + denomination conversion (entry_base_quantity, destination_quantity, exit_base_quantity, exit_proceeds)
 - `trading/rotation_planner.py`: RotationTreePlanner (initialize_roots, plan_cycle)
 - `trading/pair_scanner.py`: Generalized — discover_asset_pairs(source_asset), scan_rotation_candidates()
-- `persistence/sqlite.py`: rotation_nodes table, save/fetch
-- `runtime_loop.py`: Planner wired into run_once(), auto-persists
+- `persistence/sqlite.py`: rotation_nodes table + rotation_node_id on orders table
+- `runtime_loop.py`: Full execution loop wired:
+  - `_execute_rotation_entries()`: PLANNED → PlaceOrder with PendingOrder(kind="rotation_entry")
+  - `_settle_rotation_fills()`: WS fill → destination qty conversion → node OPEN, parent qty update
+  - `_handle_rotation_expiry()`: OPEN → exit order (CLOSING), PLANNED → cancel + return reserved
+  - `_close_rotation_node()`: exit order placement with reversed side
+  - `_cancel_rotation_entry()`: cancel pending + return reserved to parent
+  - `_collect_root_prices()`: REST OHLCV fallback for non-USD root assets
+- `core/state_machine.py`: Reducer handles rotation_entry/rotation_exit fills (PendingOrder cleanup only)
 
-**NOT live yet** — execution layer gaps (Codex review):
-1. PLANNED nodes → PlaceOrder reducer bridge (don't treat PLANNED as holdings)
-2. Fill settlement: bind fills to nodes, convert qty to destination denomination
-3. Expiry → real ClosePosition effects (currently in-memory cascade only)
-4. Root init needs REST price fetch for non-USD assets
-5. Generalize portfolio accounting beyond cash_usd/cash_doge
+**Architecture**: Rotation tree is a shadow ledger separate from Portfolio. Orders flow through PendingOrder + PlaceOrder. Fill settlement updates the tree, not portfolio cash. Reconciliation re-aligns on restart.
 
-Activate: `ENABLE_ROTATION_TREE=true` once execution wiring is complete.
+**Ready for testing**: `ENABLE_ROTATION_TREE=true` with `READ_ONLY_EXCHANGE=true` for dry-run validation.
 
 ## Key infrastructure
 
@@ -124,17 +126,16 @@ EXIT_LIMIT_OFFSET_PCT=0.1
 
 ## Goal for next session
 
-Wire rotation tree execution layer:
-1. Reducer bridge: PLANNED nodes → PlaceOrder effects
-2. Fill settlement with denomination conversion
-3. Expiry → real ClosePosition effects
-4. REST price fetch for root init
-5. Portfolio generalization beyond USD/DOGE
+Live-test rotation tree execution:
+1. Dry-run with `ENABLE_ROTATION_TREE=true READ_ONLY_EXCHANGE=true` — verify PLANNED nodes, entry orders attempted (blocked by safe mode)
+2. Monitor with real exchange: small allocation, observe full lifecycle (plan → entry → fill → settlement → expiry → exit)
+3. Dashboard/TUI visualization of active rotation tree
+4. Depth-2 testing: nested children within parent windows
 
 ## Validation
 
 ```bash
-python -m pytest                    # 500+ tests
+python -m pytest                    # 544 tests
 python -m ruff check .              # clean
 curl http://127.0.0.1:58392/api/health   # dashboard up
 ```

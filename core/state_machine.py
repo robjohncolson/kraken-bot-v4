@@ -407,9 +407,31 @@ def _handle_fill_confirmed(
             LogEvent(message=f"fill_confirmed: no pending order for {event.order_id}"),
         )
 
+    if pending.kind in ("rotation_entry", "rotation_exit"):
+        return _handle_rotation_fill(state, event, pending)
     if pending.kind == "inventory_sell":
         return _handle_inventory_sell_fill(state, event, pending)
     return _handle_position_entry_fill(state, event, pending, config)
+
+
+def _handle_rotation_fill(
+    state: BotState, event: FillConfirmed, pending: PendingOrder,
+) -> ReducerResult:
+    """Rotation tree fill — remove PendingOrder only. Tree accounting is in runtime."""
+    updated_pending = replace(pending, filled_qty=pending.filled_qty + event.filled_quantity)
+
+    if updated_pending.filled_qty >= updated_pending.base_qty:
+        remaining = tuple(po for po in state.pending_orders if po.client_order_id != pending.client_order_id)
+    else:
+        remaining = tuple(
+            updated_pending if po.client_order_id == pending.client_order_id else po
+            for po in state.pending_orders
+        )
+
+    new_state = replace(state, pending_orders=remaining)
+    return new_state, (
+        LogEvent(message=f"fill_confirmed: rotation {pending.kind} {event.pair} qty={event.filled_quantity} @ {event.fill_price} node={pending.rotation_node_id}"),
+    )
 
 
 def _handle_inventory_sell_fill(

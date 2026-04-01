@@ -27,6 +27,7 @@ from tui.screens.beliefs import BeliefsScreen
 from tui.screens.orders import OrdersScreen
 from tui.screens.reconciliation import ReconciliationScreen
 from tui.screens.logs import LogsScreen
+from tui.screens.rotation_tree import RotationTreeScreen
 from tui.screens.help import HelpScreen
 
 
@@ -49,6 +50,7 @@ class KrakenCockpit(App):
         Binding("4", "show_orders", "Orders", key_display="4"),
         Binding("5", "show_recon", "Recon", key_display="5"),
         Binding("6", "show_logs", "Logs", key_display="6"),
+        Binding("7", "show_rotation_tree", "Rotation", key_display="7"),
         Binding("question_mark", "show_help", "Help", key_display="?"),
         Binding("r", "manual_refresh", "Refresh", key_display="r"),
         Binding("p", "toggle_pause", "Pause", key_display="p"),
@@ -75,6 +77,7 @@ class KrakenCockpit(App):
         self.install_screen(OrdersScreen(), name="orders")
         self.install_screen(ReconciliationScreen(), name="reconciliation")
         self.install_screen(LogsScreen(), name="logs")
+        self.install_screen(RotationTreeScreen(), name="rotation_tree")
         self.install_screen(HelpScreen(), name="help")
         self.push_screen("overview")
         self._fetch_snapshot()
@@ -186,6 +189,9 @@ class KrakenCockpit(App):
 
     def action_show_logs(self) -> None:
         self._switch_to("logs")
+
+    def action_show_rotation_tree(self) -> None:
+        self._switch_to("rotation_tree")
 
     def action_show_help(self) -> None:
         self._switch_to("help")

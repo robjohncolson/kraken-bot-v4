@@ -8,6 +8,7 @@ from decimal import Decimal
 from typing import Final
 
 from core.types import (
+    OrderSide,
     RotationCandidate,
     RotationNode,
     RotationNodeStatus,
@@ -158,6 +159,58 @@ def make_child_node(
     )
 
 
+def entry_base_quantity(
+    order_side: OrderSide, allocated_qty: Decimal, entry_price: Decimal,
+) -> Decimal:
+    """Compute base-asset order quantity for a rotation entry.
+
+    BUY on BASE/QUOTE: parent has quote, convert to base.
+    SELL on BASE/QUOTE: parent has base, quantity IS base.
+    """
+    if order_side == OrderSide.BUY:
+        return allocated_qty / entry_price
+    return allocated_qty
+
+
+def destination_quantity(
+    order_side: OrderSide, fill_qty: Decimal, fill_price: Decimal,
+) -> Decimal:
+    """Compute destination-asset quantity after a fill.
+
+    BUY: received fill_qty of base (the destination asset).
+    SELL: received fill_qty * fill_price of quote (the destination asset).
+    """
+    if order_side == OrderSide.BUY:
+        return fill_qty
+    return fill_qty * fill_price
+
+
+def exit_base_quantity(
+    entry_side: OrderSide, held_qty: Decimal, current_price: Decimal,
+) -> Decimal:
+    """Compute base-asset order quantity for a rotation exit (reverse of entry).
+
+    Entry was BUY (we hold base): exit SELL, qty = held_qty.
+    Entry was SELL (we hold quote): exit BUY, qty = held_qty / price.
+    """
+    if entry_side == OrderSide.BUY:
+        return held_qty
+    return held_qty / current_price
+
+
+def exit_proceeds(
+    entry_side: OrderSide, fill_qty: Decimal, fill_price: Decimal,
+) -> Decimal:
+    """Compute proceeds returning to parent denomination after exit fill.
+
+    Entry was BUY (exit is SELL): proceeds = fill_qty * fill_price (quote = parent denom).
+    Entry was SELL (exit is BUY): proceeds = fill_qty (base = parent denom).
+    """
+    if entry_side == OrderSide.BUY:
+        return fill_qty * fill_price
+    return fill_qty
+
+
 def close_node(
     tree: RotationTreeState,
     node_id: str,
@@ -233,6 +286,10 @@ __all__ = [
     "children_of",
     "close_node",
     "compute_child_allocations",
+    "destination_quantity",
+    "entry_base_quantity",
+    "exit_base_quantity",
+    "exit_proceeds",
     "expired_nodes",
     "leaf_nodes",
     "live_nodes",

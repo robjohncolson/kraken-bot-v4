@@ -78,6 +78,29 @@ class ReconciliationState:
     untracked_assets: list[Any] = field(default_factory=list)
 
 
+@dataclass
+class RotationNodeRow:
+    node_id: str = ""
+    parent_node_id: str = ""
+    depth: int = 0
+    asset: str = ""
+    quantity_total: str = "0"
+    quantity_free: str = "0"
+    status: str = "planned"
+    entry_pair: str = ""
+    order_side: str = ""
+    confidence: float = 0.0
+    deadline_at: str = ""
+    window_hours: str = ""
+
+
+@dataclass
+class RotationTreeState:
+    nodes: list[RotationNodeRow] = field(default_factory=list)
+    root_node_ids: list[str] = field(default_factory=list)
+    last_planned_at: str = ""
+
+
 # -- Top-level cockpit state --------------------------------------------------
 
 @dataclass
@@ -88,6 +111,7 @@ class CockpitState:
     beliefs: list[BeliefCell] = field(default_factory=list)
     orders: list[OrderRow] = field(default_factory=list)
     reconciliation: ReconciliationState = field(default_factory=ReconciliationState)
+    rotation_tree: RotationTreeState = field(default_factory=RotationTreeState)
     events: list[str] = field(default_factory=list)
     connected: bool = False
     sse_connected: bool = False
@@ -222,6 +246,32 @@ def parse_reconciliation(data: dict[str, Any]) -> ReconciliationState:
     )
 
 
+def parse_rotation_tree(data: dict[str, Any]) -> RotationTreeState:
+    raw_nodes = data.get("nodes") or []
+    nodes = [
+        RotationNodeRow(
+            node_id=str(n.get("node_id", "")),
+            parent_node_id=str(n.get("parent_node_id") or ""),
+            depth=int(n.get("depth", 0)),
+            asset=str(n.get("asset", "")),
+            quantity_total=str(n.get("quantity_total", "0")),
+            quantity_free=str(n.get("quantity_free", "0")),
+            status=str(n.get("status", "planned")),
+            entry_pair=str(n.get("entry_pair") or ""),
+            order_side=str(n.get("order_side") or ""),
+            confidence=float(n.get("confidence", 0.0)),
+            deadline_at=str(n.get("deadline_at") or ""),
+            window_hours=str(n.get("window_hours") or ""),
+        )
+        for n in raw_nodes
+    ]
+    return RotationTreeState(
+        nodes=nodes,
+        root_node_ids=list(data.get("root_node_ids") or []),
+        last_planned_at=str(data.get("last_planned_at") or ""),
+    )
+
+
 def merge_sse_update(state: CockpitState, data: dict[str, Any]) -> CockpitState:
     """Merge a ``dashboard.update`` SSE payload into the cockpit state."""
     if "portfolio" in data:
@@ -232,4 +282,6 @@ def merge_sse_update(state: CockpitState, data: dict[str, Any]) -> CockpitState:
         state.beliefs = parse_beliefs({"beliefs": data["beliefs"]})
     if "reconciliation" in data:
         state.reconciliation = parse_reconciliation(data["reconciliation"])
+    if "rotation_tree" in data:
+        state.rotation_tree = parse_rotation_tree(data["rotation_tree"])
     return state

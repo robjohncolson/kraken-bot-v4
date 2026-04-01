@@ -105,6 +105,7 @@ _ORDER_MIGRATIONS = (
     ("quote_qty", "TEXT DEFAULT '0'"),
     ("limit_price", "TEXT"),
     ("status", "TEXT DEFAULT 'open'"),
+    ("rotation_node_id", "TEXT"),
 )
 
 
@@ -450,14 +451,15 @@ class SqliteWriter:
         limit_price: Decimal | str | None = None,
         position_id: str | None = None,
         exchange_order_id: str | None = None,
+        rotation_node_id: str | None = None,
     ) -> None:
         """Insert or update a tracked order."""
         try:
             self._conn.execute(
                 "INSERT INTO orders (order_id, pair, position_id, exchange_order_id, "
                 "client_order_id, kind, side, base_qty, filled_qty, quote_qty, "
-                "limit_price, status) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open') "
+                "limit_price, status, rotation_node_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?) "
                 "ON CONFLICT(order_id) DO UPDATE SET "
                 "filled_qty=excluded.filled_qty, status=excluded.status",
                 (
@@ -472,6 +474,7 @@ class SqliteWriter:
                     str(filled_qty),
                     str(quote_qty),
                     str(limit_price) if limit_price is not None else None,
+                    rotation_node_id,
                 ),
             )
             self._conn.commit()

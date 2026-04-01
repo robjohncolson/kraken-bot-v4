@@ -239,6 +239,7 @@ def test_routes_are_get_only() -> None:
         "/api/beliefs",
         "/api/stats",
         "/api/reconciliation",
+        "/api/rotation-tree",
     }
     for methods in route_methods.values():
         assert "GET" in methods
