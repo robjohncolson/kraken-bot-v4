@@ -25,6 +25,7 @@ Bot running on WSL Athena pane with **rotation tree LIVE**:
 | Scanner timeout | 45s (`SCANNER_TIMEOUT_SEC=45`) |
 | Dashboard | `http://10.0.0.24:58392` |
 | Tests | 560 passing |
+| Belief confidence gate | `MIN_BELIEF_CONFIDENCE=0.5` — beliefs below threshold dropped |
 
 ### Active rotation tree (observed 2026-04-01)
 
@@ -89,6 +90,8 @@ Backfill validation: +4,862 bps, 55.1% accuracy, 100% coverage, all rollout gate
 
 **Architecture**: Rotation tree is a shadow ledger separate from Portfolio. Orders placed directly via executor (not reducer). Fill settlement updates tree, not portfolio. Reconciliation re-aligns on restart.
 
+**P&L tracking**: RotationNode records `fill_price`, `exit_price`, `closed_at`, `exit_proceeds` on settlement. CLOSED nodes persisted to SQLite. API `/api/rotation-tree` returns per-node `realized_pnl` + tree-level `total_deployed`, `total_realized_pnl`, `open_count`, `closed_count`.
+
 ## Key infrastructure
 
 | Feature | Status |
@@ -149,13 +152,12 @@ EXIT_LIMIT_OFFSET_PCT=0.1
 ## Goal for next session
 
 Monitor rotation tree live performance + council beliefs:
-1. Check fills: did ADA/ETH/BTC orders fill? How did the tree settle them?
+1. Check fills: are GBP rotation orders (SUI, WIF, XLM, KSM, SOL) filling?
 2. Observe expiry: when child deadlines hit, do exit orders fire correctly?
-3. USD children: did the planner find USD rotations on retry?
-4. P&L tracking: compare rotation tree returns vs hold
-5. Harden: add rotation tree metrics to dashboard (total deployed, unrealized P&L, fill rate)
-6. Verify LLM council fallback chain: confirm broker produces consensus, confirm fallback fires when panes offline
-7. Consider: confidence-weighted trading (state machine currently acts on direction only, not confidence)
+3. P&L: check `/api/rotation-tree` for `total_realized_pnl` after first closed nodes
+4. Verify LLM council: start broker sidecar, confirm council beliefs flow, confirm fallback fires when panes offline
+5. TUI P&L column: add realized_pnl to rotation tree TUI screen (data is in API, display not wired yet)
+6. Tune `MIN_BELIEF_CONFIDENCE` threshold based on observed council/ensemble output
 
 ## Validation
 

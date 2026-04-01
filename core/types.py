@@ -424,6 +424,13 @@ class RotationNode:
 
     status: RotationNodeStatus = RotationNodeStatus.PLANNED
 
+    # P&L tracking (populated on fill settlement)
+    entry_cost: Decimal | None = None  # Original parent-denomination allocation (before unit conversion)
+    fill_price: Price | None = None
+    exit_price: Price | None = None
+    closed_at: datetime | None = None
+    exit_proceeds: Decimal | None = None
+
 
 @dataclass(frozen=True, slots=True)
 class RotationCandidate:

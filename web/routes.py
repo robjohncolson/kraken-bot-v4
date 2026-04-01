@@ -94,6 +94,11 @@ class RotationNodeSnapshot:
     deadline_at: str | None = None
     opened_at: str | None = None
     window_hours: float | None = None
+    fill_price: str | None = None
+    exit_price: str | None = None
+    closed_at: str | None = None
+    exit_proceeds: str | None = None
+    realized_pnl: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,6 +107,10 @@ class RotationTreeSnapshot:
     root_node_ids: tuple[str, ...] = field(default_factory=tuple)
     max_depth: int = 2
     last_planned_at: str | None = None
+    total_deployed: str = "0"
+    total_realized_pnl: str = "0"
+    open_count: int = 0
+    closed_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)

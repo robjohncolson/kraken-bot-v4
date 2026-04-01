@@ -24,6 +24,7 @@ DEFAULT_GRID_PROFIT_REDIST_INTERVAL_SEC = 3600
 DEFAULT_GRID_MAKER_OFFSET_PCT = 0.4
 DEFAULT_BELIEF_STALE_HOURS = 4
 DEFAULT_BELIEF_CONSENSUS_THRESHOLD = 2
+DEFAULT_MIN_BELIEF_CONFIDENCE = 0.5
 DEFAULT_REENTRY_COOLDOWN_HOURS = 24
 DEFAULT_LOCAL_STATE_DIR = Path("./data")
 DEFAULT_SQLITE_PATH = Path("./data/bot.db")
@@ -79,6 +80,7 @@ class Settings:
     grid_maker_offset_pct: float
     belief_stale_hours: int
     belief_consensus_threshold: int
+    min_belief_confidence: float
     reentry_cooldown_hours: int
     local_state_dir: Path
     web_port: int
@@ -142,6 +144,9 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
         belief_stale_hours=_read_int(env, "BELIEF_STALE_HOURS", DEFAULT_BELIEF_STALE_HOURS),
         belief_consensus_threshold=_read_int(
             env, "BELIEF_CONSENSUS_THRESHOLD", DEFAULT_BELIEF_CONSENSUS_THRESHOLD
+        ),
+        min_belief_confidence=_read_float(
+            env, "MIN_BELIEF_CONFIDENCE", DEFAULT_MIN_BELIEF_CONFIDENCE
         ),
         reentry_cooldown_hours=_read_int(
             env, "REENTRY_COOLDOWN_HOURS", DEFAULT_REENTRY_COOLDOWN_HOURS

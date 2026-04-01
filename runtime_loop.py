@@ -360,6 +360,13 @@ class SchedulerRuntime:
         *,
         observed_at: datetime | None = None,
     ) -> None:
+        # Confidence gate: drop low-confidence beliefs (single choke point)
+        if belief.confidence < self._settings.min_belief_confidence:
+            logger.debug(
+                "Dropping low-confidence belief for %s (%.2f < %.2f)",
+                belief.pair, belief.confidence, self._settings.min_belief_confidence,
+            )
+            return
         timestamp = self._utc_now() if observed_at is None else _normalize_timestamp(observed_at)
         async with self._state_lock:
             pending = self._state.pending_belief_signals + (belief,)
@@ -848,6 +855,7 @@ class SchedulerRuntime:
             if kind == "rotation_entry":
                 if node.order_side is None:
                     continue
+                entry_cost = node.quantity_total  # Parent-denomination cost before conversion
                 dest_qty = destination_quantity(node.order_side, fill_qty, fill_price)
                 # Transition PLANNED → OPEN with converted quantity
                 self._rotation_tree = update_node(
@@ -857,6 +865,8 @@ class SchedulerRuntime:
                     quantity_free=dest_qty,
                     quantity_reserved=ZERO_DECIMAL,
                     entry_price=fill_price,
+                    fill_price=fill_price,
+                    entry_cost=entry_cost,
                     opened_at=now,
                 )
                 # Release parent's reserved quantity
@@ -877,10 +887,13 @@ class SchedulerRuntime:
                 if node.order_side is None:
                     continue
                 proceeds = exit_proceeds(node.order_side, fill_qty, fill_price)
-                # Mark node as CLOSED
+                # Mark node as CLOSED with P&L data
                 self._rotation_tree = update_node(
                     self._rotation_tree, node_id,
                     status=RotationNodeStatus.CLOSED,
+                    exit_price=fill_price,
+                    closed_at=now,
+                    exit_proceeds=proceeds,
                 )
                 # Return proceeds to parent
                 if node.parent_node_id:
@@ -1327,8 +1340,26 @@ def _apply_exit_offset(
 def _build_rotation_tree_snapshot(tree: RotationTreeState | None) -> RotationTreeSnapshot:
     if tree is None:
         return RotationTreeSnapshot()
-    node_snaps = tuple(
-        RotationNodeSnapshot(
+
+    total_deployed = ZERO_DECIMAL
+    total_realized_pnl = ZERO_DECIMAL
+    open_count = 0
+    closed_count = 0
+
+    node_snaps_list: list[RotationNodeSnapshot] = []
+    for n in tree.nodes:
+        # Compute realized P&L for closed nodes (proceeds vs entry cost in parent denomination)
+        realized_pnl = None
+        if n.status == RotationNodeStatus.CLOSED and n.exit_proceeds is not None and n.entry_cost is not None:
+            pnl = n.exit_proceeds - n.entry_cost
+            realized_pnl = str(pnl)
+            total_realized_pnl += pnl
+            closed_count += 1
+        if n.status in (RotationNodeStatus.OPEN, RotationNodeStatus.CLOSING) and n.depth > 0:
+            total_deployed += n.entry_cost if n.entry_cost is not None else ZERO_DECIMAL
+            open_count += 1
+
+        node_snaps_list.append(RotationNodeSnapshot(
             node_id=n.node_id,
             parent_node_id=n.parent_node_id,
             depth=n.depth,
@@ -1345,14 +1376,22 @@ def _build_rotation_tree_snapshot(tree: RotationTreeState | None) -> RotationTre
             deadline_at=n.deadline_at.isoformat() if n.deadline_at else None,
             opened_at=n.opened_at.isoformat() if n.opened_at else None,
             window_hours=n.window_hours,
-        )
-        for n in tree.nodes
-    )
+            fill_price=str(n.fill_price) if n.fill_price else None,
+            exit_price=str(n.exit_price) if n.exit_price else None,
+            closed_at=n.closed_at.isoformat() if n.closed_at else None,
+            exit_proceeds=str(n.exit_proceeds) if n.exit_proceeds else None,
+            realized_pnl=realized_pnl,
+        ))
+
     return RotationTreeSnapshot(
-        nodes=node_snaps,
+        nodes=tuple(node_snaps_list),
         root_node_ids=tree.root_node_ids,
         max_depth=tree.max_depth,
         last_planned_at=tree.last_planned_at.isoformat() if tree.last_planned_at else None,
+        total_deployed=str(total_deployed),
+        total_realized_pnl=str(total_realized_pnl),
+        open_count=open_count,
+        closed_count=closed_count,
     )
 
 

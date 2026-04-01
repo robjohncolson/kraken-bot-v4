@@ -108,6 +108,14 @@ _ORDER_MIGRATIONS = (
     ("rotation_node_id", "TEXT"),
 )
 
+_ROTATION_NODE_MIGRATIONS = (
+    ("entry_cost", "TEXT"),
+    ("fill_price", "TEXT"),
+    ("exit_price", "TEXT"),
+    ("closed_at", "TEXT"),
+    ("exit_proceeds", "TEXT"),
+)
+
 
 class SqlitePersistenceError(KrakenBotError):
     """Base exception for SQLite persistence failures."""
@@ -162,8 +170,9 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             conn.execute(ddl)
         _migrate_columns(conn, "positions", _POSITION_MIGRATIONS)
         _migrate_columns(conn, "orders", _ORDER_MIGRATIONS)
+        _migrate_columns(conn, "rotation_nodes", _ROTATION_NODE_MIGRATIONS)
         conn.commit()
-        logger.info("SQLite schema verified (positions, orders, ledger, cooldowns)")
+        logger.info("SQLite schema verified (positions, orders, ledger, cooldowns, rotation_nodes)")
     except sqlite3.Error as exc:
         raise SqliteSchemaError(f"Schema bootstrap failed: {exc}") from exc
 
@@ -517,7 +526,7 @@ class SqliteWriter:
             raise SqliteWriteError(f"Failed to clear cooldown for {pair!r}: {exc}") from exc
 
     def save_rotation_tree(self, tree: RotationTreeState) -> None:
-        """Persist the full rotation tree state (replace all live nodes)."""
+        """Persist the full rotation tree state (replace all live nodes + closed with P&L)."""
         try:
             # Clear stale live nodes
             self._conn.execute(
@@ -528,6 +537,7 @@ class SqliteWriter:
                     RotationNodeStatus.PLANNED,
                     RotationNodeStatus.OPEN,
                     RotationNodeStatus.CLOSING,
+                    RotationNodeStatus.CLOSED,
                 ):
                     continue
                 self._conn.execute(
@@ -535,8 +545,9 @@ class SqliteWriter:
                     "node_id, parent_node_id, depth, asset, quantity_total, "
                     "quantity_free, quantity_reserved, entry_pair, from_asset, "
                     "order_side, entry_price, position_id, deadline_at, "
-                    "window_hours, confidence, status"
-                    ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "window_hours, confidence, status, "
+                    "entry_cost, fill_price, exit_price, closed_at, exit_proceeds"
+                    ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         node.node_id,
                         node.parent_node_id,
@@ -554,6 +565,11 @@ class SqliteWriter:
                         node.window_hours,
                         node.confidence,
                         node.status.value,
+                        str(node.entry_cost) if node.entry_cost else None,
+                        str(node.fill_price) if node.fill_price else None,
+                        str(node.exit_price) if node.exit_price else None,
+                        node.closed_at.isoformat() if node.closed_at else None,
+                        str(node.exit_proceeds) if node.exit_proceeds else None,
                     ),
                 )
             self._conn.commit()
