@@ -311,31 +311,48 @@ def _build_agent_prompt(
     agent: str,
     response_path: Path,
 ) -> str:
-    """Build the prompt to send to an agent pane."""
-    context_json = json.dumps(request.context, indent=2, default=str)
+    """Build a compact single-line prompt for an agent pane.
+
+    The prompt is collapsed to one line by _send_to_pane, so we keep it
+    concise and avoid unnecessary formatting.
+    """
+    context_json = json.dumps(request.context, separators=(",", ":"), default=str)
+    response_file = str(response_path.resolve())
     return (
-        f"LLM_COUNCIL_REQUEST {request.call_id}\n"
-        f"You are acting as a market analyst for a {request.pair} trading bot.\n"
-        f"Analyze this market context and write your response as JSON to:\n"
-        f"  {response_path.resolve()}\n\n"
-        f"Market context:\n{context_json}\n\n"
-        f"Write EXACTLY this JSON schema to the file:\n"
-        f'{{"schema_version": "llm-council/v1", "call_id": "{request.call_id}", '
-        f'"agent": "{agent}", "direction": "bullish|bearish|neutral", '
-        f'"confidence": 0.0-1.0, "regime": "trending|ranging|unknown", '
-        f'"reasoning": "1-2 sentence explanation"}}\n\n'
+        f"LLM_COUNCIL_REQUEST {request.call_id} — "
+        f"You are a market analyst for {request.pair}. "
+        f"Market context: {context_json}. "
+        f"Analyze and write your response as JSON to: {response_file}. "
+        f'The JSON must have these exact keys: '
+        f'{{"schema_version":"llm-council/v1","call_id":"{request.call_id}",'
+        f'"agent":"{agent}","direction":"bullish or bearish or neutral",'
+        f'"confidence":float 0.0-1.0,"regime":"trending or ranging or unknown",'
+        f'"reasoning":"1-2 sentence explanation"}}. '
         f"After writing the file, print: LLM_COUNCIL_DONE {request.call_id}"
     )
 
 
 def _send_to_pane(pane: str, text: str) -> None:
-    """Send text to a tmux pane via tmux send-keys."""
-    # Use tmux directly — the broker runs outside of MCP context
-    escaped = text.replace("'", "'\\''")
+    """Send text to a tmux pane via tmux send-keys.
+
+    Collapses the prompt to a single line to avoid multi-line paste issues
+    in CLI tools (Claude Code, Codex). Sends Enter twice with a short delay
+    to ensure submission in interactive prompts that buffer input.
+    """
+    # Collapse to single line — CLI agents handle long single-line prompts fine
+    one_line = " ".join(text.split())
+    escaped = one_line.replace("'", "'\\''")
     subprocess.run(
         ["tmux", "send-keys", "-t", pane, escaped, "Enter"],
         check=True,
         timeout=10,
+    )
+    # Extra Enter after brief delay — some CLIs need a second press to submit
+    time.sleep(0.5)
+    subprocess.run(
+        ["tmux", "send-keys", "-t", pane, "Enter"],
+        check=True,
+        timeout=5,
     )
 
 
