@@ -4,6 +4,7 @@ import asyncio
 import inspect
 import logging
 import sqlite3
+import time as _time
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
@@ -88,6 +89,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_CYCLE_INTERVAL_SEC = 30
 DEFAULT_GUARDIAN_INTERVAL_SEC = 120
 ROTATION_ENTRY_MAX_RETRIES = 3
+ROTATION_PAIR_COOLDOWN_SEC = 1800  # 30 min cooldown after cancel
 
 SsePublisher = Callable[..., Awaitable[None]]
 HeartbeatWriter = Callable[[HeartbeatSnapshot], None]
@@ -246,6 +248,7 @@ class SchedulerRuntime:
         self._rotation_planner: RotationTreePlanner | None = None
         self._rotation_fill_queue: list[tuple[str, Decimal, Decimal, str]] = []
         self._rotation_entry_retry_counts: dict[str, int] = {}
+        self._rotation_pair_cooldowns: dict[str, float] = {}  # pair → monotonic expiry
         if settings.enable_rotation_tree:
             scanner = PairScanner(client=executor._client, settings=settings)
             self._rotation_planner = RotationTreePlanner(
@@ -753,6 +756,12 @@ class SchedulerRuntime:
             if not node.entry_pair or node.order_side is None or not node.entry_price:
                 continue
 
+            # Skip pairs in cooldown (recently cancelled — prevents re-plan churn)
+            cooldown_expiry = self._rotation_pair_cooldowns.get(node.entry_pair)
+            if cooldown_expiry is not None and _time.monotonic() < cooldown_expiry:
+                self._rotation_tree = cancel_planned_node(self._rotation_tree, node.node_id)
+                continue
+
             # Compute base-asset quantity for the order
             base_qty = entry_base_quantity(node.order_side, node.quantity_total, node.entry_price)
             if base_qty <= ZERO_DECIMAL:
@@ -790,6 +799,8 @@ class SchedulerRuntime:
                 logger.warning("Rotation entry cancelled (insufficient funds) for %s: %s", node.node_id, exc)
                 self._rotation_tree = cancel_planned_node(self._rotation_tree, node.node_id)
                 self._rotation_entry_retry_counts.pop(node.node_id, None)
+                # Cooldown this pair to prevent re-plan churn
+                self._rotation_pair_cooldowns[node.entry_pair] = _time.monotonic() + ROTATION_PAIR_COOLDOWN_SEC
                 continue
             except SafeModeBlockedError as exc:
                 # Safe mode: skip without retry count (intentional block, not error)
@@ -806,6 +817,7 @@ class SchedulerRuntime:
                     )
                     self._rotation_tree = cancel_planned_node(self._rotation_tree, node.node_id)
                     self._rotation_entry_retry_counts.pop(node.node_id, None)
+                    self._rotation_pair_cooldowns[node.entry_pair] = _time.monotonic() + ROTATION_PAIR_COOLDOWN_SEC
                 else:
                     logger.warning(
                         "Rotation entry blocked for %s (retry %d/%d): %s",
