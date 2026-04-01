@@ -236,9 +236,9 @@ def _run_main_loop(
         belief_handler = make_research_model_handler(artifact_dir)
         logger.info("Belief model: research_model (artifact=%s)", settings.active_artifact_id)
     elif settings.belief_model == "llm_council":
-        from beliefs.llm_council_handler import make_llm_council_handler
-        belief_handler = make_llm_council_handler()
-        logger.info("Belief model: llm_council (CC+Codex via tmux-bridge)")
+        from beliefs.llm_council_handler import make_fallback_council_handler
+        belief_handler = make_fallback_council_handler()
+        logger.info("Belief model: llm_council with technical_ensemble fallback")
     else:
         belief_handler = technical_ensemble_belief_handler
         logger.info("Belief model: technical_ensemble")

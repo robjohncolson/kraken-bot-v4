@@ -5,10 +5,12 @@ Run as a sidecar alongside the bot:
 
 The broker:
 1. Watches requests/ for unprocessed .json files
-2. Sends structured prompts to CC and Codex tmux panes
-3. Waits for response files (with timeout)
-4. Computes consensus and writes consensus/ file
-5. Never touches bot state directly
+2. Validates tmux panes before dispatch (health checks)
+3. Sends structured prompts to CC and Codex tmux panes (with retry)
+4. Waits for response files (with timeout)
+5. Computes consensus with valid-vote tracking and writes consensus/ file
+6. Cleans up stale files on startup
+7. Never touches bot state directly
 """
 
 from __future__ import annotations
@@ -35,11 +37,92 @@ logger = logging.getLogger(__name__)
 RESPONSE_TIMEOUT_SEC: Final[int] = 120
 POLL_INTERVAL_SEC: Final[int] = 30
 AGENTS: Final[tuple[str, str]] = ("claude", "codex")
+SEND_RETRY_DELAY_SEC: Final[int] = 5
+STALE_CLEANUP_HOURS: Final[int] = 24
 
 # Default pane targets — override via env or args
 DEFAULT_CLAUDE_PANE: Final[str] = "work:2.1"
 DEFAULT_CODEX_PANE: Final[str] = "work:2.0"
 
+
+# ---------------------------------------------------------------------------
+# Pane health checks
+# ---------------------------------------------------------------------------
+
+def _pane_exists(pane: str) -> bool:
+    """Check whether a tmux pane target exists (session + pane)."""
+    session = pane.split(":")[0]
+    try:
+        result = subprocess.run(
+            ["tmux", "has-session", "-t", session],
+            capture_output=True, timeout=5,
+        )
+        if result.returncode != 0:
+            return False
+        result = subprocess.run(
+            ["tmux", "list-panes", "-t", pane, "-F", "#{pane_id}"],
+            capture_output=True, timeout=5,
+        )
+        return result.returncode == 0 and len(result.stdout.strip()) > 0
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return False
+
+
+def _pane_is_ready(pane: str) -> bool:
+    """Heuristic: pane exists and is not in copy-mode or alternate screen."""
+    if not _pane_exists(pane):
+        return False
+    try:
+        result = subprocess.run(
+            ["tmux", "display-message", "-t", pane, "-p", "#{pane_in_mode}"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode != 0:
+            return True  # Can't check mode; assume ready
+        return result.stdout.strip() == "0"
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return True  # tmux unavailable; best-effort
+
+
+def _peek_pane(pane: str, lines: int = 5) -> str:
+    """Capture the last N visible lines from a tmux pane."""
+    try:
+        result = subprocess.run(
+            ["tmux", "capture-pane", "-t", pane, "-p", "-S", str(-lines)],
+            capture_output=True, text=True, timeout=5,
+        )
+        return result.stdout.strip() if result.returncode == 0 else ""
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return ""
+
+
+# ---------------------------------------------------------------------------
+# Stale file cleanup
+# ---------------------------------------------------------------------------
+
+def _cleanup_stale_files(paths: dict[str, Path], max_age_hours: int = STALE_CLEANUP_HOURS) -> int:
+    """Remove request and response files older than max_age_hours.
+
+    Consensus files are kept for history/debugging.
+    """
+    cutoff = time.time() - max_age_hours * 3600
+    removed = 0
+    for subdir in ("requests", "responses"):
+        for f in paths[subdir].glob("*.json"):
+            try:
+                if f.stat().st_mtime < cutoff:
+                    f.unlink()
+                    removed += 1
+            except OSError:
+                pass
+    if removed:
+        logger.info("Cleaned up %d stale files (older than %dh)", removed, max_age_hours)
+    return removed
+
+
+# ---------------------------------------------------------------------------
+# Main broker loop
+# ---------------------------------------------------------------------------
 
 def run_broker(
     council_dir: Path,
@@ -47,10 +130,22 @@ def run_broker(
     claude_pane: str = DEFAULT_CLAUDE_PANE,
     codex_pane: str = DEFAULT_CODEX_PANE,
     poll_interval: int = POLL_INTERVAL_SEC,
+    cleanup_hours: int = STALE_CLEANUP_HOURS,
 ) -> None:
     """Main broker loop — poll for requests, dispatch, collect, consensus."""
     paths = council_paths(council_dir)
+    for p in paths.values():
+        p.mkdir(parents=True, exist_ok=True)
+
     panes = {"claude": claude_pane, "codex": codex_pane}
+
+    # Startup: clean stale files and validate panes
+    _cleanup_stale_files(paths, cleanup_hours)
+    for agent_name, pane_target in panes.items():
+        if _pane_exists(pane_target):
+            logger.info("Pane %s (%s): OK", pane_target, agent_name)
+        else:
+            logger.warning("Pane %s (%s): NOT FOUND — will retry each dispatch", pane_target, agent_name)
 
     logger.info(
         "LLM Council broker started (dir=%s, claude=%s, codex=%s)",
@@ -81,7 +176,8 @@ def _process_pending_requests(
             raw = request_file.read_text(encoding="utf-8")
             request = CouncilRequest.from_json(raw)
         except (json.JSONDecodeError, KeyError) as exc:
-            logger.warning("Skipping malformed request %s: %s", call_id, exc)
+            logger.warning("Deleting malformed request %s: %s", call_id, exc)
+            request_file.unlink(missing_ok=True)
             continue
 
         logger.info("Processing council request %s for %s", call_id, request.pair)
@@ -96,7 +192,7 @@ def _dispatch_and_collect(
     """Send request to both agents, collect responses, write consensus."""
     call_id = request.call_id
 
-    # Send to both panes
+    # Send to both panes (with health checks and retry)
     for agent in AGENTS:
         response_path = paths["responses"] / f"{call_id}.{agent}.json"
         if response_path.exists():
@@ -106,16 +202,34 @@ def _dispatch_and_collect(
         if not pane:
             continue
 
-        prompt = _build_agent_prompt(request, agent, response_path)
-        try:
-            _send_to_pane(pane, prompt)
-            logger.info("Sent request to %s pane %s", agent, pane)
-        except Exception as exc:
-            logger.warning("Failed to send to %s: %s", agent, exc)
+        # Health check
+        if not _pane_exists(pane):
+            logger.warning("Pane %s for %s does not exist, skipping", pane, agent)
+            continue
 
-    # Wait for responses
+        if not _pane_is_ready(pane):
+            logger.info("Pane %s for %s in copy-mode/alt-screen, sending anyway", pane, agent)
+
+        prompt = _build_agent_prompt(request, agent, response_path)
+        sent = False
+        for attempt in range(2):  # 1 try + 1 retry
+            try:
+                _send_to_pane(pane, prompt)
+                logger.info("Sent request to %s pane %s (attempt %d)", agent, pane, attempt + 1)
+                sent = True
+                break
+            except Exception as exc:
+                logger.warning("Send to %s failed (attempt %d): %s", agent, attempt + 1, exc)
+                if attempt == 0:
+                    time.sleep(SEND_RETRY_DELAY_SEC)
+
+        if not sent:
+            logger.error("Could not send to %s after 2 attempts, skipping", agent)
+
+    # Wait for responses — track valid parsed votes separately
     votes: list[CouncilVote] = []
     vote_details: dict[str, dict] = {}
+    valid_vote_count = 0
 
     deadline = time.monotonic() + RESPONSE_TIMEOUT_SEC
     while time.monotonic() < deadline:
@@ -136,17 +250,27 @@ def _dispatch_and_collect(
                         "confidence": vote.confidence,
                         "regime": vote.regime,
                     }
+                    valid_vote_count += 1
                     logger.info(
                         "Got %s vote: %s (conf=%.2f)",
                         agent, vote.direction, vote.confidence,
                     )
                 except Exception as exc:
                     logger.warning("Invalid response from %s: %s", agent, exc)
+                    # File exists but is malformed — mark as seen but not valid
                     vote_details[agent] = {"direction": "neutral", "confidence": 0.0, "regime": "unknown"}
 
         if all_done or len(vote_details) == len(AGENTS):
             break
         time.sleep(5)
+
+    # Determine status based on valid votes (not just file presence)
+    if valid_vote_count == 0:
+        status = "failed"
+    elif valid_vote_count < len(AGENTS):
+        status = "partial"
+    else:
+        status = "completed"
 
     # Compute consensus
     direction, confidence, regime = compute_consensus(votes)
@@ -156,19 +280,21 @@ def _dispatch_and_collect(
         call_id=call_id,
         pair=request.pair,
         as_of=request.as_of,
-        status="completed" if len(vote_details) == len(AGENTS) else "partial",
+        status=status,
         votes=vote_details,
         direction=direction,
         confidence=confidence,
         regime=regime,
         completed_at=now.isoformat(),
+        valid_vote_count=valid_vote_count,
+        expected_vote_count=len(AGENTS),
     )
 
     consensus_path = paths["consensus"] / f"{call_id}.json"
     consensus_path.write_text(consensus.to_json(), encoding="utf-8")
     logger.info(
-        "Council consensus for %s: %s (conf=%.2f, %d/%d votes)",
-        request.pair, direction, confidence, len(vote_details), len(AGENTS),
+        "Council consensus for %s: %s (conf=%.2f, status=%s, %d/%d valid votes)",
+        request.pair, direction, confidence, status, valid_vote_count, len(AGENTS),
     )
 
 
@@ -181,7 +307,7 @@ def _build_agent_prompt(
     context_json = json.dumps(request.context, indent=2, default=str)
     return (
         f"LLM_COUNCIL_REQUEST {request.call_id}\n"
-        f"You are acting as a market analyst for a DOGE/USD trading bot.\n"
+        f"You are acting as a market analyst for a {request.pair} trading bot.\n"
         f"Analyze this market context and write your response as JSON to:\n"
         f"  {response_path.resolve()}\n\n"
         f"Market context:\n{context_json}\n\n"
@@ -214,12 +340,16 @@ def main() -> None:
     parser.add_argument("--codex-pane", default=DEFAULT_CODEX_PANE)
     parser.add_argument("--interval", type=int, default=POLL_INTERVAL_SEC)
     parser.add_argument("--once", action="store_true", help="Process once and exit")
+    parser.add_argument("--cleanup-hours", type=int, default=STALE_CLEANUP_HOURS)
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
     if args.once:
         paths = council_paths(args.council_dir)
+        for p in paths.values():
+            p.mkdir(parents=True, exist_ok=True)
+        _cleanup_stale_files(paths, args.cleanup_hours)
         panes = {"claude": args.claude_pane, "codex": args.codex_pane}
         _process_pending_requests(paths, panes)
     else:
@@ -228,6 +358,7 @@ def main() -> None:
             claude_pane=args.claude_pane,
             codex_pane=args.codex_pane,
             poll_interval=args.interval,
+            cleanup_hours=args.cleanup_hours,
         )
 
 

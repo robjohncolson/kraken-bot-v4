@@ -55,11 +55,42 @@ def make_llm_council_handler(
             return _consensus_to_belief(consensus)
 
         # No fresh consensus — write a request for the broker
-        _write_request(paths["requests"], pair, now, artifact_source)
+        _write_request(paths["requests"], pair, now, artifact_source, paths["consensus"])
         logger.info("LLM council request written for %s (awaiting broker)", pair)
         return None
 
     return handler
+
+
+def make_fallback_council_handler(
+    council_dir: str | Path = COUNCIL_DIR,
+    artifact_source: object | None = None,
+    fallback_handler: callable | None = None,
+) -> callable:
+    """Council handler with automatic fallback to technical_ensemble.
+
+    First poll: council has no consensus → writes request → falls back to ensemble.
+    Subsequent polls: council finds fresh consensus → returns council belief.
+    Bot is never belief-less (unless OHLCV is also down).
+    """
+    council = make_llm_council_handler(council_dir, artifact_source)
+
+    if fallback_handler is None:
+        from beliefs.technical_ensemble_handler import technical_ensemble_belief_handler
+        fallback_handler = technical_ensemble_belief_handler
+
+    def handler(request: BeliefRefreshRequest) -> BeliefSnapshot | None:
+        belief = council(request)
+        if belief is not None:
+            return belief
+        # Council wrote a request for the broker; produce an instant fallback
+        logger.info("Council unavailable for %s, falling back to technical_ensemble", request.pair)
+        return fallback_handler(request)
+
+    return handler
+
+
+_ACCEPTED_STATUSES: Final[frozenset[str]] = frozenset({"completed", "partial"})
 
 
 def _find_fresh_consensus(
@@ -76,7 +107,7 @@ def _find_fresh_consensus(
         except (json.JSONDecodeError, KeyError, ValueError):
             continue
 
-        if consensus.pair != pair or consensus.status != "completed":
+        if consensus.pair != pair or consensus.status not in _ACCEPTED_STATUSES:
             continue
 
         # Check staleness
@@ -96,13 +127,26 @@ def _write_request(
     pair: str,
     now: datetime,
     artifact_source: object | None,
+    consensus_dir: Path | None = None,
 ) -> None:
-    """Build market context and write a council request file."""
+    """Build market context and write a council request file.
+
+    Skips if an unprocessed request for this pair already exists (backoff).
+    """
     call_id = make_call_id(pair, now)
     request_path = requests_dir / f"{call_id}.json"
 
     if request_path.exists():
         return  # Already requested this slot
+
+    # Per-pair backoff: skip if a pending request already exists for this pair
+    slug = pair.replace("/", "").lower()
+    for existing in requests_dir.glob(f"*-{slug}.json"):
+        if consensus_dir is not None and (consensus_dir / existing.name).exists():
+            continue  # This request was already processed
+        if existing != request_path:
+            logger.debug("Skipping duplicate request for %s (pending: %s)", pair, existing.name)
+            return
 
     context = _build_market_context(pair, artifact_source)
     request = CouncilRequest(
@@ -167,7 +211,11 @@ def _build_market_context(pair: str, artifact_source: object | None) -> dict:
 
 
 def _consensus_to_belief(consensus: CouncilConsensus) -> BeliefSnapshot:
-    """Convert a council consensus to a BeliefSnapshot."""
+    """Convert a council consensus to a BeliefSnapshot.
+
+    Partial consensus (fewer valid votes than expected) gets coverage-based
+    confidence scaling: confidence * (valid_votes / expected_votes).
+    """
     direction_map = {
         "bullish": BeliefDirection.BULLISH,
         "bearish": BeliefDirection.BEARISH,
@@ -176,13 +224,17 @@ def _consensus_to_belief(consensus: CouncilConsensus) -> BeliefSnapshot:
         "trending": MarketRegime.TRENDING,
         "ranging": MarketRegime.RANGING,
     }
+    confidence = consensus.confidence
+    if consensus.status == "partial" and consensus.expected_vote_count > 0:
+        coverage = consensus.valid_vote_count / consensus.expected_vote_count
+        confidence *= coverage
     return BeliefSnapshot(
         pair=consensus.pair,
         direction=direction_map.get(consensus.direction, BeliefDirection.NEUTRAL),
-        confidence=round(consensus.confidence, 2),
+        confidence=round(confidence, 2),
         regime=regime_map.get(consensus.regime, MarketRegime.UNKNOWN),
         sources=(BeliefSource.LLM_COUNCIL,),
     )
 
 
-__all__ = ["make_llm_council_handler"]
+__all__ = ["make_llm_council_handler", "make_fallback_council_handler"]

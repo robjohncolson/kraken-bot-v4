@@ -24,7 +24,7 @@ Bot running on WSL Athena pane with **rotation tree LIVE**:
 | ALLOWED_PAIRS | Empty (all pairs enabled for rotation) |
 | Scanner timeout | 45s (`SCANNER_TIMEOUT_SEC=45`) |
 | Dashboard | `http://10.0.0.24:58392` |
-| Tests | 544 passing |
+| Tests | 555 passing |
 
 ### Active rotation tree (observed 2026-04-01)
 
@@ -48,12 +48,16 @@ USD found 148 candidates but timed out; partial results now returned (will retry
 | `research_model` | Requires `ACTIVE_ARTIFACT_ID` | V1 LogReg (+5,531 bps on 180d backtest, all rollout gates pass) |
 | `llm_council` | Requires broker sidecar | CC+Codex analyze structured market context via file-based messaging |
 
-### LLM Council
+### LLM Council (with fallback chain)
 
 - Handler: `beliefs/llm_council_handler.py` — builds market context, writes request files
+- **Fallback**: `make_fallback_council_handler()` wraps council + `technical_ensemble`. If no fresh consensus, falls back to TA instantly. Bot is never belief-less.
 - Broker: `python scripts/llm_council_broker.py` — dispatches to CC+Codex panes, collects votes
+- **Broker hardening**: pane health checks (`_pane_exists`, `_pane_is_ready`), retry on send failure, stale file cleanup on startup, malformed request deletion, valid-vote tracking
 - Protocol: `state/llm-council/{requests,responses,consensus}/*.json`
-- Consensus: 2/2 agree = that direction, split = neutral
+- Consensus: 2/2 agree = that direction, split = neutral, 1/2 = that agent's direction at coverage-scaled confidence (`conf * valid/expected`)
+- **Per-pair request backoff**: handler won't pile up duplicate requests for the same pair
+- Requires CC+Codex running in tmux panes (`work:2.0` Codex, `work:2.1` Claude) for council beliefs
 
 ### Research model artifact
 
@@ -143,17 +147,19 @@ EXIT_LIMIT_OFFSET_PCT=0.1
 
 ## Goal for next session
 
-Monitor rotation tree live performance:
+Monitor rotation tree live performance + council beliefs:
 1. Check fills: did ADA/ETH/BTC orders fill? How did the tree settle them?
 2. Observe expiry: when child deadlines hit, do exit orders fire correctly?
 3. USD children: did the planner find USD rotations on retry?
 4. P&L tracking: compare rotation tree returns vs hold
 5. Harden: add rotation tree metrics to dashboard (total deployed, unrealized P&L, fill rate)
+6. Verify LLM council fallback chain: confirm broker produces consensus, confirm fallback fires when panes offline
+7. Consider: confidence-weighted trading (state machine currently acts on direction only, not confidence)
 
 ## Validation
 
 ```bash
-python -m pytest                    # 544 tests
+python -m pytest                    # 555 tests
 python -m ruff check .              # clean
 curl http://127.0.0.1:58392/api/health         # dashboard up
 curl http://127.0.0.1:58392/api/rotation-tree  # rotation tree state

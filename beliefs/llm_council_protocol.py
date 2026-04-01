@@ -70,6 +70,8 @@ class CouncilConsensus:
     confidence: float
     regime: str = "unknown"
     completed_at: str = ""
+    valid_vote_count: int = 0
+    expected_vote_count: int = 2
 
     def to_json(self) -> str:
         return json.dumps(
@@ -90,6 +92,8 @@ class CouncilConsensus:
             confidence=float(data.get("confidence", data.get("consensus", {}).get("confidence", 0.0))),
             regime=data.get("regime", data.get("consensus", {}).get("regime", "unknown")),
             completed_at=data.get("completed_at", ""),
+            valid_vote_count=int(data.get("valid_vote_count", len(data.get("votes", {})))),
+            expected_vote_count=int(data.get("expected_vote_count", 2)),
         )
 
 
@@ -100,19 +104,24 @@ def make_call_id(pair: str, now: datetime | None = None) -> str:
 
 
 def compute_consensus(votes: list[CouncilVote]) -> tuple[str, float, str]:
-    """Majority vote from council votes. Returns (direction, confidence, regime)."""
+    """Majority vote from council votes. Returns (direction, confidence, regime).
+
+    Single-agent vote: returns that direction at that confidence.
+    Unanimous multi-agent: returns shared direction at average confidence.
+    Split (2 agents disagree): returns neutral/0.0 (safe for direction-based trading).
+    """
     valid = [v for v in votes if v.direction in ("bullish", "bearish", "neutral")]
     if not valid:
         return "neutral", 0.0, "unknown"
 
     directions = [v.direction for v in valid]
     if len(set(directions)) == 1:
-        # Unanimous
+        # Unanimous (includes single-agent case)
         avg_conf = sum(v.confidence for v in valid) / len(valid)
         regime = valid[0].regime
         return directions[0], round(avg_conf, 4), regime
 
-    # Split — neutral
+    # Split — neutral (safe: direction-based trading would act on any non-neutral)
     return "neutral", 0.0, "unknown"
 
 
