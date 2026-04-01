@@ -6,23 +6,39 @@
 - **Exchange**: Kraken (Starter tier) — source of truth for balances/orders/fills
 - **Persistence**: SQLite (`./data/bot.db`, WAL mode) — positions, orders, ledger, cooldowns, rotation tree
 - **Dashboard**: FastAPI + D3.js at `http://0.0.0.0:58392` (LAN-accessible)
-- **TUI**: `python -m tui` — Textual/Rich operator cockpit, 7 screens
+- **TUI**: `python -m tui` — Textual/Rich operator cockpit, 8 screens (key 7 = Rotation Tree)
 - **Beliefs**: 3 available models (select via `BELIEF_MODEL` env var)
 - **Platform**: Windows 11, Python 3.13, WSL for runtime
 - **Repo**: `git@github.com:robjohncolson/kraken-bot-v4.git`, branch `master`
 
-## Current live state (as of 2026-03-31)
+## Current live state (as of 2026-04-01)
 
-Bot running on WSL Athena pane: `/mnt/c/Python313/python.exe main.py`
+Bot running on WSL Athena pane with **rotation tree LIVE**:
 
 | Field | Value |
 |-------|-------|
 | Belief model | `llm_council` (CC+Codex via tmux-bridge) |
 | Poll interval | 1 hour (`BELIEF_STALE_HOURS=2`) |
-| Portfolio | ~$500 (4,651 DOGE + $80 USD) |
-| Open positions | 0 |
+| Portfolio | ~$500 across DOGE, AUD, ADA, ETH, BTC, USD |
+| Rotation tree | **LIVE** — `ENABLE_ROTATION_TREE=true` |
+| ALLOWED_PAIRS | Empty (all pairs enabled for rotation) |
+| Scanner timeout | 45s (`SCANNER_TIMEOUT_SEC=45`) |
 | Dashboard | `http://10.0.0.24:58392` |
 | Tests | 544 passing |
+
+### Active rotation tree (observed 2026-04-01)
+
+```
+root-aud    AUD  245.57   49.13 free   OPEN
+  aud-ada   ADA  65.48    PLANNED  (BUY ADA/AUD)
+  aud-eth   ETH  65.48    PLANNED  (BUY ETH/AUD)
+  aud-btc   BTC  65.48    PLANNED  (BUY BTC/AUD)
+root-doge   DOGE 2790.59  free     OPEN
+root-usd    USD  79.89    free     OPEN
+```
+
+DOGE sold for AUD, AUD immediately deployed into ADA/ETH/BTC children.
+USD found 148 candidates but timed out; partial results now returned (will retry next cycle).
 
 ## Belief models
 
@@ -51,24 +67,23 @@ Backfill validation: +4,862 bps, 55.1% accuracy, 100% coverage, all rollout gate
 
 **Vision**: Denomination-agnostic recursive trading. Portfolio holdings become root nodes. Each asset scans all Kraken pairs for bear exits / bull entries. Rotations create timed child nodes. Children recurse within parent windows. Confidence-weighted sizing.
 
-**Foundation complete (R1-R4)** + **Execution wired (R5)**:
+**Complete (R1-R5) — LIVE**:
 - `core/types.py`: RotationNode, RotationCandidate, RotationTreeState, PendingOrder.rotation_node_id
 - `trading/rotation_tree.py`: Pure helpers + denomination conversion (entry_base_quantity, destination_quantity, exit_base_quantity, exit_proceeds)
 - `trading/rotation_planner.py`: RotationTreePlanner (initialize_roots, plan_cycle)
-- `trading/pair_scanner.py`: Generalized — discover_asset_pairs(source_asset), scan_rotation_candidates()
+- `trading/pair_scanner.py`: Generalized pair discovery, scan_rotation_candidates, partial results on timeout
 - `persistence/sqlite.py`: rotation_nodes table + rotation_node_id on orders table
-- `runtime_loop.py`: Full execution loop wired:
-  - `_execute_rotation_entries()`: PLANNED → PlaceOrder with PendingOrder(kind="rotation_entry")
-  - `_settle_rotation_fills()`: WS fill → destination qty conversion → node OPEN, parent qty update
-  - `_handle_rotation_expiry()`: OPEN → exit order (CLOSING), PLANNED → cancel + return reserved
-  - `_close_rotation_node()`: exit order placement with reversed side
-  - `_cancel_rotation_entry()`: cancel pending + return reserved to parent
+- `runtime_loop.py`: Full execution loop:
+  - `_execute_rotation_entries()`: PLANNED → order (place first, track on success)
+  - `_settle_rotation_fills()`: WS fill → denomination conversion → OPEN
+  - `_handle_rotation_expiry()`: OPEN → exit order, PLANNED → cancel + return
   - `_collect_root_prices()`: REST OHLCV fallback for non-USD root assets
 - `core/state_machine.py`: Reducer handles rotation_entry/rotation_exit fills (PendingOrder cleanup only)
+- `exchange/symbols.py`: Broadened normalizer (AUD, CAD, CHF, JPY, ETH quote currencies)
+- `web/routes.py`: `/api/rotation-tree` endpoint with RotationTreeSnapshot
+- `tui/screens/rotation_tree.py`: TUI screen (key 7) with hierarchical tree table
 
-**Architecture**: Rotation tree is a shadow ledger separate from Portfolio. Orders flow through PendingOrder + PlaceOrder. Fill settlement updates the tree, not portfolio cash. Reconciliation re-aligns on restart.
-
-**Ready for testing**: `ENABLE_ROTATION_TREE=true` with `READ_ONLY_EXCHANGE=true` for dry-run validation.
+**Architecture**: Rotation tree is a shadow ledger separate from Portfolio. Orders placed directly via executor (not reducer). Fill settlement updates tree, not portfolio. Reconciliation re-aligns on restart.
 
 ## Key infrastructure
 
@@ -79,7 +94,8 @@ Backfill validation: +4,862 bps, 55.1% accuracy, 100% coverage, all rollout gate
 | WebSocket | Re-enabled for home laptop |
 | Reconciliation | Uses exchange open orders (not bot_state) |
 | D3 dashboard | Wired — portfolio cards, positions table, belief heatmap, reconciliation |
-| TUI | 7 screens, live SSE, keyboard navigation |
+| TUI | 8 screens (incl. rotation tree), live SSE, keyboard navigation |
+| Rotation tree | **LIVE** — scanning, ordering, settling across all Kraken pairs |
 | Conditional tree (v1) | Built, disabled by default (`ENABLE_CONDITIONAL_TREE`) |
 | Backfill shadow eval | `python -m research.backfill_shadow` |
 
@@ -102,14 +118,15 @@ cd /mnt/c/Users/rober/Downloads/Projects/kraken-bot-v4
 ```
 KRAKEN_API_KEY=...
 KRAKEN_API_SECRET=...
-BELIEF_MODEL=llm_council          # or technical_ensemble, research_model
-BELIEF_STALE_HOURS=2              # poll every 1 hour
-ALLOWED_PAIRS=DOGE/USD
+BELIEF_MODEL=llm_council
+BELIEF_STALE_HOURS=2
+ALLOWED_PAIRS=                    # empty = all pairs (required for rotation tree)
+ENABLE_ROTATION_TREE=true
+SCANNER_TIMEOUT_SEC=45            # 15s default too short for USD (hundreds of pairs)
 WEB_HOST=0.0.0.0
 WEB_PORT=58392
 READ_ONLY_EXCHANGE=false
 DISABLE_ORDER_MUTATIONS=false
-STARTUP_RECONCILE_ONLY=false
 MIN_POSITION_USD=10
 MAX_POSITION_USD=10
 EXIT_LIMIT_OFFSET_PCT=0.1
@@ -126,16 +143,18 @@ EXIT_LIMIT_OFFSET_PCT=0.1
 
 ## Goal for next session
 
-Live-test rotation tree execution:
-1. Dry-run with `ENABLE_ROTATION_TREE=true READ_ONLY_EXCHANGE=true` — verify PLANNED nodes, entry orders attempted (blocked by safe mode)
-2. Monitor with real exchange: small allocation, observe full lifecycle (plan → entry → fill → settlement → expiry → exit)
-3. Dashboard/TUI visualization of active rotation tree
-4. Depth-2 testing: nested children within parent windows
+Monitor rotation tree live performance:
+1. Check fills: did ADA/ETH/BTC orders fill? How did the tree settle them?
+2. Observe expiry: when child deadlines hit, do exit orders fire correctly?
+3. USD children: did the planner find USD rotations on retry?
+4. P&L tracking: compare rotation tree returns vs hold
+5. Harden: add rotation tree metrics to dashboard (total deployed, unrealized P&L, fill rate)
 
 ## Validation
 
 ```bash
 python -m pytest                    # 544 tests
 python -m ruff check .              # clean
-curl http://127.0.0.1:58392/api/health   # dashboard up
+curl http://127.0.0.1:58392/api/health         # dashboard up
+curl http://127.0.0.1:58392/api/rotation-tree  # rotation tree state
 ```
