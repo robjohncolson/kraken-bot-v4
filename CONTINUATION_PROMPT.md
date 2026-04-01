@@ -117,8 +117,8 @@ cd /mnt/c/Users/rober/Downloads/Projects/kraken-bot-v4
 # Launch TUI (separate terminal)
 /mnt/c/Python313/python.exe -m tui
 
-# Launch LLM Council broker (if using llm_council belief model)
-/mnt/c/Python313/python.exe scripts/llm_council_broker.py
+# Launch LLM Council broker (MUST use WSL python3, not Windows Python — needs tmux access)
+python3 scripts/llm_council_broker.py
 ```
 
 ### Key env vars (.env)
@@ -151,7 +151,7 @@ EXIT_LIMIT_OFFSET_PCT=0.1
 
 ## Goal for next session
 
-1. **Start broker sidecar**: `/mnt/c/Python313/python.exe scripts/llm_council_broker.py` in a tmux pane
+1. **Broker sidecar running**: `python3 scripts/llm_council_broker.py` (must use WSL python3, not Windows Python — needs tmux socket access)
 2. Check GBP rotation fills (SUI, WIF, XLM, KSM, SOL) and observe P&L in TUI (key 7)
 3. Observe expiry: when child deadlines hit, do exit orders fire correctly? Check closed_count in TUI footer.
 4. Verify council beliefs flow via broker; confirm fallback fires when panes offline
