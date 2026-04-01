@@ -90,7 +90,7 @@ Backfill validation: +4,862 bps, 55.1% accuracy, 100% coverage, all rollout gate
 
 **Architecture**: Rotation tree is a shadow ledger separate from Portfolio. Orders placed directly via executor (not reducer). Fill settlement updates tree, not portfolio. Reconciliation re-aligns on restart.
 
-**P&L tracking**: RotationNode records `fill_price`, `exit_price`, `closed_at`, `exit_proceeds` on settlement. CLOSED nodes persisted to SQLite. API `/api/rotation-tree` returns per-node `realized_pnl` + tree-level `total_deployed`, `total_realized_pnl`, `open_count`, `closed_count`.
+**P&L tracking**: RotationNode records `entry_cost` (parent-denomination allocation), `fill_price`, `exit_price`, `closed_at`, `exit_proceeds` on settlement. CLOSED nodes persisted to SQLite. API `/api/rotation-tree` returns per-node `realized_pnl` + tree-level `total_deployed`, `total_realized_pnl`, `open_count`, `closed_count`. TUI rotation tree screen (key 7) shows P&L column with green/red coloring + summary footer.
 
 ## Key infrastructure
 
@@ -151,13 +151,12 @@ EXIT_LIMIT_OFFSET_PCT=0.1
 
 ## Goal for next session
 
-Monitor rotation tree live performance + council beliefs:
-1. Check fills: are GBP rotation orders (SUI, WIF, XLM, KSM, SOL) filling?
-2. Observe expiry: when child deadlines hit, do exit orders fire correctly?
-3. P&L: check `/api/rotation-tree` for `total_realized_pnl` after first closed nodes
-4. Verify LLM council: start broker sidecar, confirm council beliefs flow, confirm fallback fires when panes offline
-5. TUI P&L column: add realized_pnl to rotation tree TUI screen (data is in API, display not wired yet)
-6. Tune `MIN_BELIEF_CONFIDENCE` threshold based on observed council/ensemble output
+1. **Start broker sidecar**: `/mnt/c/Python313/python.exe scripts/llm_council_broker.py` in a tmux pane
+2. Check GBP rotation fills (SUI, WIF, XLM, KSM, SOL) and observe P&L in TUI (key 7)
+3. Observe expiry: when child deadlines hit, do exit orders fire correctly? Check closed_count in TUI footer.
+4. Verify council beliefs flow via broker; confirm fallback fires when panes offline
+5. Tune `MIN_BELIEF_CONFIDENCE` based on observed council/ensemble confidence values (default 0.5)
+6. Known trade-off: confidence gate updates belief_timestamp on drop so staleness detection works, but the old directional belief remains active until `BELIEF_STALE_HOURS` expires
 
 ## Validation
 

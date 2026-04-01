@@ -8,7 +8,7 @@ from textual.widgets import DataTable
 from tui.state import RotationNodeRow, RotationTreeState
 from tui.theme import HEALTHY, MUTED, NEUTRAL, UNHEALTHY, WARNING, confidence_text
 
-_COLUMNS = ("Node", "Asset", "Qty", "Free", "Status", "Pair", "Side", "Conf", "Deadline", "Window")
+_COLUMNS = ("Node", "Asset", "Qty", "Free", "Status", "Pair", "Side", "Conf", "Deadline", "P&L")
 
 _STATUS_STYLES: dict[str, Style] = {
     "open": HEALTHY,
@@ -52,6 +52,7 @@ class RotationTreeTable(DataTable):
         self.clear()
         if not tree.nodes:
             self.add_row("\u2014", "", "", "", "disabled", "", "", "", "", "")
+            self.border_subtitle = ""
             return
 
         # Build parent→children map for ordered display
@@ -67,6 +68,15 @@ class RotationTreeTable(DataTable):
         stack: list[RotationNodeRow] = list(reversed(roots))
         while stack:
             node = stack.pop()
+            pnl_display = "\u2014"
+            if node.realized_pnl:
+                try:
+                    pnl_val = float(node.realized_pnl)
+                    style = HEALTHY if pnl_val >= 0 else UNHEALTHY
+                    pnl_display = Text(f"{pnl_val:+.4f}", style=style)
+                except ValueError:
+                    pass
+
             self.add_row(
                 _indent_node_id(node.node_id, node.depth),
                 node.asset,
@@ -77,8 +87,14 @@ class RotationTreeTable(DataTable):
                 node.order_side.upper() if node.order_side else "\u2014",
                 confidence_text(node.confidence),
                 node.deadline_at[:16] if node.deadline_at else "\u2014",
-                f"{node.window_hours}h" if node.window_hours else "\u2014",
+                pnl_display,
             )
             # Push children in reverse so they come out in order
             for child in reversed(children_map.get(node.node_id, [])):
                 stack.append(child)
+
+        # Summary footer via border subtitle
+        self.border_subtitle = (
+            f"Open: {tree.open_count} | Closed: {tree.closed_count} | "
+            f"Deployed: {tree.total_deployed} | P&L: {tree.total_realized_pnl}"
+        )

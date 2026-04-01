@@ -92,6 +92,7 @@ class RotationNodeRow:
     confidence: float = 0.0
     deadline_at: str = ""
     window_hours: str = ""
+    realized_pnl: str = ""
 
 
 @dataclass
@@ -99,6 +100,10 @@ class RotationTreeState:
     nodes: list[RotationNodeRow] = field(default_factory=list)
     root_node_ids: list[str] = field(default_factory=list)
     last_planned_at: str = ""
+    total_deployed: str = "0"
+    total_realized_pnl: str = "0"
+    open_count: int = 0
+    closed_count: int = 0
 
 
 # -- Top-level cockpit state --------------------------------------------------
@@ -262,6 +267,7 @@ def parse_rotation_tree(data: dict[str, Any]) -> RotationTreeState:
             confidence=float(n.get("confidence", 0.0)),
             deadline_at=str(n.get("deadline_at") or ""),
             window_hours=str(n.get("window_hours") or ""),
+            realized_pnl=str(n.get("realized_pnl") or ""),
         )
         for n in raw_nodes
     ]
@@ -269,6 +275,10 @@ def parse_rotation_tree(data: dict[str, Any]) -> RotationTreeState:
         nodes=nodes,
         root_node_ids=list(data.get("root_node_ids") or []),
         last_planned_at=str(data.get("last_planned_at") or ""),
+        total_deployed=str(data.get("total_deployed", "0")),
+        total_realized_pnl=str(data.get("total_realized_pnl", "0")),
+        open_count=int(data.get("open_count", 0)),
+        closed_count=int(data.get("closed_count", 0)),
     )
 
 

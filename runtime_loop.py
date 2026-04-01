@@ -366,6 +366,10 @@ class SchedulerRuntime:
                 "Dropping low-confidence belief for %s (%.2f < %.2f)",
                 belief.pair, belief.confidence, self._settings.min_belief_confidence,
             )
+            # Still update timestamp so guardian staleness detection works —
+            # prevents old high-confidence beliefs from persisting indefinitely
+            timestamp = self._utc_now() if observed_at is None else _normalize_timestamp(observed_at)
+            self._belief_timestamps[belief.pair] = timestamp
             return
         timestamp = self._utc_now() if observed_at is None else _normalize_timestamp(observed_at)
         async with self._state_lock:
