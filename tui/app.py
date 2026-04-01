@@ -19,6 +19,7 @@ from tui.state import (
     parse_portfolio,
     parse_positions,
     parse_reconciliation,
+    parse_rotation_tree,
 )
 
 from tui.screens.overview import OverviewScreen
@@ -146,6 +147,9 @@ class KrakenCockpit(App):
         reconciliation = snapshot.get("reconciliation")
         if reconciliation:
             s.reconciliation = parse_reconciliation(reconciliation)
+        rotation_tree = snapshot.get("rotation_tree")
+        if rotation_tree:
+            s.rotation_tree = parse_rotation_tree(rotation_tree)
         # Orders are not on a dedicated endpoint yet; they come via SSE
         s.last_update = datetime.now().strftime("%H:%M:%S")
 

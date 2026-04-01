@@ -52,6 +52,9 @@ class DashboardClient:
     async def fetch_reconciliation(self) -> dict[str, Any]:
         return await self._get("/api/reconciliation")
 
+    async def fetch_rotation_tree(self) -> dict[str, Any]:
+        return await self._get("/api/rotation-tree")
+
     # -- composite -----------------------------------------------------------
 
     async def fetch_snapshot(self) -> dict[str, dict[str, Any]]:
@@ -63,9 +66,10 @@ class DashboardClient:
             self.fetch_beliefs(),
             self.fetch_stats(),
             self.fetch_reconciliation(),
+            self.fetch_rotation_tree(),
             return_exceptions=True,
         )
-        keys = ("health", "portfolio", "positions", "beliefs", "stats", "reconciliation")
+        keys = ("health", "portfolio", "positions", "beliefs", "stats", "reconciliation", "rotation_tree")
         snapshot: dict[str, dict[str, Any]] = {}
         for key, result in zip(keys, results):
             snapshot[key] = {} if isinstance(result, BaseException) else result
