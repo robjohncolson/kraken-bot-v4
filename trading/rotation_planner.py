@@ -94,6 +94,15 @@ class RotationTreePlanner:
             if leaf.quantity_free < Decimal(str(self._settings.min_position_usd)):
                 continue
 
+            # Enforce max children per parent to prevent order churn
+            max_children = self._settings.rotation_max_children_per_parent
+            existing_children = [
+                n for n in live_nodes(updated_tree) if n.parent_node_id == leaf.node_id
+            ]
+            if len(existing_children) >= max_children:
+                continue
+            remaining_slots = max_children - len(existing_children)
+
             # Check remaining time
             hours_left = remaining_hours(leaf, now)
             if hours_left is not None and hours_left < MIN_REMAINING_HOURS:
@@ -119,6 +128,7 @@ class RotationTreePlanner:
                 leaf,
                 candidates,
                 min_position=Decimal(str(self._settings.min_position_usd)),
+                max_children=remaining_slots,
             )
 
             # Filter allocations below Kraken ordermin

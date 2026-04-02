@@ -52,6 +52,7 @@ DEFAULT_SCANNER_TIMEOUT_SEC = 15.0
 DEFAULT_ENABLE_CONDITIONAL_TREE = False
 DEFAULT_ENABLE_ROTATION_TREE = False
 DEFAULT_EXIT_LIMIT_OFFSET_PCT = 0.1
+DEFAULT_ROTATION_MAX_CHILDREN_PER_PARENT = 3
 DEFAULT_PAIR_METADATA_REFRESH_HOURS = 24
 
 ALLOWED_KRAKEN_TIERS = frozenset({"starter", "intermediate", "pro"})
@@ -117,6 +118,7 @@ class Settings:
     enable_rotation_tree: bool
     exit_limit_offset_pct: float
     pair_metadata_refresh_hours: int
+    rotation_max_children_per_parent: int
     belief_model: str
     active_artifact_id: str | None
     shadow_artifact_id: str | None
@@ -250,6 +252,11 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
             env,
             "PAIR_METADATA_REFRESH_HOURS",
             DEFAULT_PAIR_METADATA_REFRESH_HOURS,
+        ),
+        rotation_max_children_per_parent=_read_int(
+            env,
+            "ROTATION_MAX_CHILDREN_PER_PARENT",
+            DEFAULT_ROTATION_MAX_CHILDREN_PER_PARENT,
         ),
         belief_model=env.get("BELIEF_MODEL", "technical_ensemble").strip(),
         active_artifact_id=_read_optional(env, "ACTIVE_ARTIFACT_ID"),

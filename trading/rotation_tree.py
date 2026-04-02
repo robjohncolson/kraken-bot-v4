@@ -91,6 +91,7 @@ def compute_child_allocations(
     parent: RotationNode,
     candidates: tuple[RotationCandidate, ...],
     min_position: Decimal = Decimal("10"),
+    max_children: int = 3,
 ) -> list[tuple[RotationCandidate, Decimal]]:
     """Compute confidence-weighted allocations for child rotations.
 
@@ -108,6 +109,10 @@ def compute_child_allocations(
 
     if not scored:
         return []
+
+    # Take top candidates by score to limit children per parent
+    scored.sort(key=lambda x: x[1], reverse=True)
+    scored = scored[:max_children]
 
     total_score = sum(s for _, s in scored)
     allocatable = parent.quantity_free * PARENT_DEPLOY_RATIO

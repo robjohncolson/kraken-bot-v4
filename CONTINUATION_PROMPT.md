@@ -26,8 +26,9 @@ Bot running on WSL Athena pane with **rotation tree LIVE**:
 | Dashboard | `http://10.0.0.24:58392` |
 | Tests | 560 passing |
 | Belief confidence gate | `MIN_BELIEF_CONFIDENCE=0.5` — beliefs below threshold shown dimmed in TUI |
-| Price-aware exits | TP=3%, SL=-2%, entry timeout=30min, exit timeout=5min→MARKET |
+| Price-aware exits | TP=3%, SL=-2%, dynamic entry timeout (25% of window, 30-120min), exit timeout=5min→MARKET |
 | Ordermin enforcement | Dynamic from Kraken AssetPairs API, cached 24h in SQLite |
+| Anti-churn | Max 3 children per parent (`ROTATION_MAX_CHILDREN_PER_PARENT`), top-3 by score |
 | Rotation events | TP/SL/timeout/fill events in SSE + TUI rotation tree footer |
 | Settings validation | Startup warns on out-of-range TP/SL/confidence/timeout values |
 
@@ -173,6 +174,7 @@ EXIT_LIMIT_OFFSET_PCT=0.1
 
 ## What shipped 2026-04-02
 
+- **Anti-churn**: Max 3 children per parent (`ROTATION_MAX_CHILDREN_PER_PARENT=3`), `compute_child_allocations` sorts by score descending and takes top-N. Planner counts existing live children and passes remaining slots. Dynamic entry timeout: 25% of estimated window (floor=config, cap=4x config=120min). Stops capital dilution across 10+ thin children.
 - **Ordermin enforcement**: `exchange/pair_metadata.py` fetches `ordermin` from Kraken AssetPairs API, caches in SQLite `pair_metadata` table (24h TTL). Enforced in rotation planner (filters undersized allocations), order gate (defensive `OrderBelowMinimumError`), grid sizing (dynamic fallback)
 - **Beliefs display fix**: All beliefs (including low-confidence/neutral) now shown in TUI. Filtered beliefs rendered with dim styling + "filtered" label. Trading logic unchanged (still gates on `MIN_BELIEF_CONFIDENCE`)
 - **Rotation event tracking**: Structured `RotationEvent` dataclass emitted for TP hits, SL hits, entry timeouts, exit escalations, entry/exit fills. Events included in SSE payload. TUI rotation tree footer shows last event

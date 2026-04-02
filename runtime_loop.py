@@ -1078,7 +1078,6 @@ class SchedulerRuntime:
         if self._rotation_tree is None:
             return
 
-        timeout_entry = timedelta(minutes=self._settings.rotation_entry_fill_timeout_min)
         timeout_exit = timedelta(minutes=self._settings.rotation_exit_fill_timeout_min)
 
         for po in self._state.bot_state.pending_orders:
@@ -1091,35 +1090,48 @@ class SchedulerRuntime:
                 continue
 
             # Stale entry: cancel order + cancel node
-            if po.kind == "rotation_entry" and age >= timeout_entry:
-                logger.warning(
-                    "Rotation entry timeout for %s (age=%s): cancelling",
-                    node.node_id, age,
-                )
-                self._rotation_events.append(RotationEvent(
-                    timestamp=now, node_id=node.node_id, event_type="entry_timeout",
-                    pair=node.entry_pair or "", details={
-                        "age_seconds": str(int(age.total_seconds())),
-                    },
-                ))
-                try:
-                    await self._execute_cancel_order(
-                        CancelOrder(client_order_id=po.client_order_id)
+            # Dynamic entry timeout: 25% of estimated window, capped at config max
+            if po.kind == "rotation_entry":
+                if node.window_hours and node.window_hours > 0:
+                    dynamic_minutes = min(
+                        node.window_hours * 60 * 0.25,  # 25% of window
+                        self._settings.rotation_entry_fill_timeout_min * 4,  # max 4x config
                     )
-                except Exception as exc:
-                    logger.warning("Failed to cancel stale entry: %s", exc)
-                # Remove pending order and cancel node
-                async with self._state_lock:
-                    remaining = tuple(
-                        p for p in self._state.bot_state.pending_orders
-                        if p.rotation_node_id != po.rotation_node_id
+                    # Floor at config minimum to avoid extremely short timeouts
+                    dynamic_minutes = max(dynamic_minutes, self._settings.rotation_entry_fill_timeout_min)
+                else:
+                    dynamic_minutes = self._settings.rotation_entry_fill_timeout_min
+                node_timeout_entry = timedelta(minutes=dynamic_minutes)
+
+                if age >= node_timeout_entry:
+                    logger.warning(
+                        "Rotation entry timeout for %s (age=%s, timeout=%sm): cancelling",
+                        node.node_id, age, dynamic_minutes,
                     )
-                    self._state = replace(
-                        self._state,
-                        bot_state=replace(self._state.bot_state, pending_orders=remaining),
-                    )
-                self._rotation_tree = cancel_planned_node(self._rotation_tree, node.node_id)
-                self._rotation_pair_cooldowns[node.entry_pair] = _time.monotonic() + ROTATION_PAIR_COOLDOWN_SEC
+                    self._rotation_events.append(RotationEvent(
+                        timestamp=now, node_id=node.node_id, event_type="entry_timeout",
+                        pair=node.entry_pair or "", details={
+                            "age_seconds": str(int(age.total_seconds())),
+                        },
+                    ))
+                    try:
+                        await self._execute_cancel_order(
+                            CancelOrder(client_order_id=po.client_order_id)
+                        )
+                    except Exception as exc:
+                        logger.warning("Failed to cancel stale entry: %s", exc)
+                    # Remove pending order and cancel node
+                    async with self._state_lock:
+                        remaining = tuple(
+                            p for p in self._state.bot_state.pending_orders
+                            if p.rotation_node_id != po.rotation_node_id
+                        )
+                        self._state = replace(
+                            self._state,
+                            bot_state=replace(self._state.bot_state, pending_orders=remaining),
+                        )
+                    self._rotation_tree = cancel_planned_node(self._rotation_tree, node.node_id)
+                    self._rotation_pair_cooldowns[node.entry_pair] = _time.monotonic() + ROTATION_PAIR_COOLDOWN_SEC
 
             # Stale exit: escalate to MARKET
             elif po.kind == "rotation_exit" and age >= timeout_exit:
