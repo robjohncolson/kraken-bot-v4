@@ -230,7 +230,9 @@ class OrderGate:
         if self._kraken_tier != "starter":
             payload["cl_ord_id"] = client_order_id
 
-        if order.order_type is OrderType.LIMIT:
+        if order.order_type is OrderType.MARKET:
+            pass  # Market orders have no price field
+        elif order.order_type is OrderType.LIMIT:
             if order.limit_price is None:
                 raise InvalidOrderRequestError("Limit orders require limit_price.")
             payload["price"] = _render_decimal(order.limit_price)
@@ -249,6 +251,8 @@ class OrderGate:
 
 
 def _render_order_type(order_type: OrderType) -> str:
+    if order_type is OrderType.MARKET:
+        return "market"
     if order_type is OrderType.LIMIT:
         return "limit"
     if order_type is OrderType.STOP_LOSS:

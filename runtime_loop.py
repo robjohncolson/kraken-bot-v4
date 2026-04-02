@@ -711,7 +711,13 @@ class SchedulerRuntime:
         # 2. Settle any queued rotation fills
         await self._settle_rotation_fills(now)
 
-        # 3. Run planner to find new candidates
+        # 3. Check fill timeouts (cancel stale entries, escalate stale exits)
+        await self._check_rotation_fill_timeouts(now)
+
+        # 4. Monitor prices for TP/SL triggers
+        await self._monitor_rotation_prices(now)
+
+        # 5. Run planner to find new candidates
         updated_tree = self._rotation_planner.plan_cycle(self._rotation_tree, now)
 
         # 4. Seed reference prices for newly planned nodes
@@ -786,6 +792,7 @@ class SchedulerRuntime:
                 base_qty=base_qty,
                 quote_qty=node.quantity_total if node.order_side == OrderSide.BUY else ZERO_DECIMAL,
                 rotation_node_id=node.node_id,
+                created_at=now,
             )
 
             # Try to place the order first — only add PendingOrder on success
@@ -828,6 +835,7 @@ class SchedulerRuntime:
 
             # Order placed — clear any stale retry count and track it
             self._rotation_entry_retry_counts.pop(node.node_id, None)
+            pending = replace(pending, exchange_order_id=order_id)
             async with self._state_lock:
                 self._state = replace(
                     self._state,
@@ -874,7 +882,17 @@ class SchedulerRuntime:
                     continue
                 entry_cost = node.quantity_total  # Parent-denomination cost before conversion
                 dest_qty = destination_quantity(node.order_side, fill_qty, fill_price)
-                # Transition PLANNED → OPEN with converted quantity
+                # Compute fee-aware TP/SL prices
+                tp_pct = self._settings.rotation_take_profit_pct
+                sl_pct = self._settings.rotation_stop_loss_pct
+                fee_pct = self._settings.kraken_maker_fee_pct * 2  # round-trip
+                if node.order_side == OrderSide.BUY:
+                    tp_price = fill_price * (1 + Decimal(str((tp_pct + fee_pct) / 100)))
+                    sl_price = fill_price * (1 - Decimal(str(sl_pct / 100)))
+                else:  # SELL side
+                    tp_price = fill_price * (1 - Decimal(str((tp_pct + fee_pct) / 100)))
+                    sl_price = fill_price * (1 + Decimal(str(sl_pct / 100)))
+                # Transition PLANNED → OPEN with converted quantity + TP/SL
                 self._rotation_tree = update_node(
                     self._rotation_tree, node_id,
                     status=RotationNodeStatus.OPEN,
@@ -884,6 +902,9 @@ class SchedulerRuntime:
                     entry_price=fill_price,
                     fill_price=fill_price,
                     entry_cost=entry_cost,
+                    take_profit_price=tp_price,
+                    stop_loss_price=sl_price,
+                    trailing_stop_high=fill_price,
                     opened_at=now,
                 )
                 # Release parent's reserved quantity
@@ -925,6 +946,147 @@ class SchedulerRuntime:
                     node_id, proceeds, node.parent_node_id,
                 )
 
+    async def _monitor_rotation_prices(self, now: datetime) -> None:
+        """Check OPEN nodes for TP/SL triggers. Called every cycle."""
+        tree = self._rotation_tree
+        if tree is None:
+            return
+
+        # Build set of nodes already pending exit
+        pending_exit_ids = {
+            po.rotation_node_id
+            for po in self._state.bot_state.pending_orders
+            if po.rotation_node_id and po.kind == "rotation_exit"
+        }
+
+        for node in tree.nodes:
+            if node.status != RotationNodeStatus.OPEN or node.depth == 0:
+                continue
+            if node.node_id in pending_exit_ids:
+                continue
+            if node.fill_price is None or node.order_side is None:
+                continue
+            if node.take_profit_price is None or node.stop_loss_price is None:
+                continue
+
+            # Get current price
+            snap = self._state.current_prices.get(node.entry_pair)
+            if snap is None:
+                continue
+            current_price = snap.price if hasattr(snap, "price") else snap
+
+            # Update trailing stop high
+            if node.order_side == OrderSide.BUY:
+                if node.trailing_stop_high is None or current_price > node.trailing_stop_high:
+                    self._rotation_tree = update_node(
+                        self._rotation_tree, node.node_id,
+                        trailing_stop_high=current_price,
+                    )
+            else:  # SELL: trailing low
+                if node.trailing_stop_high is None or current_price < node.trailing_stop_high:
+                    self._rotation_tree = update_node(
+                        self._rotation_tree, node.node_id,
+                        trailing_stop_high=current_price,
+                    )
+
+            # Check take-profit
+            tp_hit = (
+                (node.order_side == OrderSide.BUY and current_price >= node.take_profit_price)
+                or (node.order_side == OrderSide.SELL and current_price <= node.take_profit_price)
+            )
+            if tp_hit:
+                logger.info(
+                    "Rotation TP hit for %s: current=%s >= tp=%s",
+                    node.node_id, current_price, node.take_profit_price,
+                )
+                self._rotation_tree = update_node(
+                    self._rotation_tree, node.node_id, exit_reason="take_profit",
+                )
+                await self._close_rotation_node(node, order_type=OrderType.LIMIT)
+                continue
+
+            # Check stop-loss
+            sl_hit = (
+                (node.order_side == OrderSide.BUY and current_price <= node.stop_loss_price)
+                or (node.order_side == OrderSide.SELL and current_price >= node.stop_loss_price)
+            )
+            if sl_hit:
+                logger.warning(
+                    "Rotation SL hit for %s: current=%s <= sl=%s",
+                    node.node_id, current_price, node.stop_loss_price,
+                )
+                self._rotation_tree = update_node(
+                    self._rotation_tree, node.node_id, exit_reason="stop_loss",
+                )
+                await self._close_rotation_node(node, order_type=OrderType.MARKET)
+                continue
+
+    async def _check_rotation_fill_timeouts(self, now: datetime) -> None:
+        """Cancel stale entry orders, escalate stale exit orders to MARKET."""
+        if self._rotation_tree is None:
+            return
+
+        timeout_entry = timedelta(minutes=self._settings.rotation_entry_fill_timeout_min)
+        timeout_exit = timedelta(minutes=self._settings.rotation_exit_fill_timeout_min)
+
+        for po in self._state.bot_state.pending_orders:
+            if not po.rotation_node_id or po.created_at is None:
+                continue
+
+            age = now - po.created_at
+            node = node_by_id(self._rotation_tree, po.rotation_node_id)
+            if node is None:
+                continue
+
+            # Stale entry: cancel order + cancel node
+            if po.kind == "rotation_entry" and age >= timeout_entry:
+                logger.warning(
+                    "Rotation entry timeout for %s (age=%s): cancelling",
+                    node.node_id, age,
+                )
+                try:
+                    await self._execute_cancel_order(
+                        CancelOrder(client_order_id=po.client_order_id)
+                    )
+                except Exception as exc:
+                    logger.warning("Failed to cancel stale entry: %s", exc)
+                # Remove pending order and cancel node
+                async with self._state_lock:
+                    remaining = tuple(
+                        p for p in self._state.bot_state.pending_orders
+                        if p.rotation_node_id != po.rotation_node_id
+                    )
+                    self._state = replace(
+                        self._state,
+                        bot_state=replace(self._state.bot_state, pending_orders=remaining),
+                    )
+                self._rotation_tree = cancel_planned_node(self._rotation_tree, node.node_id)
+                self._rotation_pair_cooldowns[node.entry_pair] = _time.monotonic() + ROTATION_PAIR_COOLDOWN_SEC
+
+            # Stale exit: escalate to MARKET
+            elif po.kind == "rotation_exit" and age >= timeout_exit:
+                logger.warning(
+                    "Rotation exit timeout for %s (age=%s): escalating to MARKET",
+                    node.node_id, age,
+                )
+                try:
+                    await self._execute_cancel_order(
+                        CancelOrder(client_order_id=po.client_order_id)
+                    )
+                except Exception as exc:
+                    logger.warning("Failed to cancel stale exit limit: %s", exc)
+                # Remove old pending exit, then resubmit as MARKET
+                async with self._state_lock:
+                    remaining = tuple(
+                        p for p in self._state.bot_state.pending_orders
+                        if p.rotation_node_id != po.rotation_node_id
+                    )
+                    self._state = replace(
+                        self._state,
+                        bot_state=replace(self._state.bot_state, pending_orders=remaining),
+                    )
+                await self._close_rotation_node(node, order_type=OrderType.MARKET)
+
     async def _handle_rotation_expiry(self, now: datetime) -> None:
         """Handle expired rotation nodes with real exchange effects."""
         if self._rotation_tree is None:
@@ -945,6 +1107,9 @@ class SchedulerRuntime:
 
             if node.status == RotationNodeStatus.OPEN and node.depth > 0:
                 # OPEN node with holdings — place exit order
+                self._rotation_tree = update_node(
+                    self._rotation_tree, node.node_id, exit_reason="timer",
+                )
                 await self._close_rotation_node(node, reason="expired", now=now)
             elif node.status == RotationNodeStatus.PLANNED and node.depth > 0:
                 # PLANNED but not yet filled — cancel pending order, return reserved
@@ -957,9 +1122,12 @@ class SchedulerRuntime:
                 )
 
     async def _close_rotation_node(
-        self, node, *, reason: str, now: datetime,
+        self, node, *, reason: str = "", now: datetime | None = None,
+        order_type: OrderType = OrderType.LIMIT,
     ) -> None:
         """Place exit order for an OPEN rotation node."""
+        if now is None:
+            now = self._utc_now()
         if node.order_side is None or not node.entry_pair:
             self._rotation_tree = update_node(
                 self._rotation_tree, node.node_id,
@@ -991,9 +1159,9 @@ class SchedulerRuntime:
         order = OrderRequest(
             pair=node.entry_pair,
             side=exit_side,
-            order_type=OrderType.LIMIT,
+            order_type=order_type,
             quantity=base_qty,
-            limit_price=current_price,
+            limit_price=current_price if order_type == OrderType.LIMIT else None,
             client_order_id=client_order_id,
         )
         pending = PendingOrder(
@@ -1004,6 +1172,7 @@ class SchedulerRuntime:
             base_qty=base_qty,
             quote_qty=ZERO_DECIMAL,
             rotation_node_id=node.node_id,
+            created_at=now,
         )
 
         # Try to place exit order first — only track on success
@@ -1011,16 +1180,13 @@ class SchedulerRuntime:
             order_id = self._executor.execute_order(order)
         except (ExchangeError, SafeModeBlockedError) as exc:
             logger.warning(
-                "Rotation exit blocked for %s (%s): %s — marking expired",
+                "Rotation exit blocked for %s (%s): %s — will retry next cycle",
                 node.node_id, reason, exc,
             )
-            self._rotation_tree = update_node(
-                self._rotation_tree, node.node_id,
-                status=RotationNodeStatus.EXPIRED,
-            )
-            return
+            return  # Keep node OPEN so TP/SL can retry next cycle
 
         # Order placed — track PendingOrder and mark CLOSING
+        pending = replace(pending, exchange_order_id=order_id)
         async with self._state_lock:
             self._state = replace(
                 self._state,

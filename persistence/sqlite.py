@@ -114,6 +114,10 @@ _ROTATION_NODE_MIGRATIONS = (
     ("exit_price", "TEXT"),
     ("closed_at", "TEXT"),
     ("exit_proceeds", "TEXT"),
+    ("take_profit_price", "TEXT"),
+    ("stop_loss_price", "TEXT"),
+    ("trailing_stop_high", "TEXT"),
+    ("exit_reason", "TEXT"),
 )
 
 
@@ -546,8 +550,9 @@ class SqliteWriter:
                     "quantity_free, quantity_reserved, entry_pair, from_asset, "
                     "order_side, entry_price, position_id, deadline_at, "
                     "window_hours, confidence, status, "
-                    "entry_cost, fill_price, exit_price, closed_at, exit_proceeds"
-                    ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "entry_cost, fill_price, exit_price, closed_at, exit_proceeds, "
+                    "take_profit_price, stop_loss_price, trailing_stop_high, exit_reason"
+                    ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         node.node_id,
                         node.parent_node_id,
@@ -570,6 +575,10 @@ class SqliteWriter:
                         str(node.exit_price) if node.exit_price else None,
                         node.closed_at.isoformat() if node.closed_at else None,
                         str(node.exit_proceeds) if node.exit_proceeds else None,
+                        str(node.take_profit_price) if node.take_profit_price else None,
+                        str(node.stop_loss_price) if node.stop_loss_price else None,
+                        str(node.trailing_stop_high) if node.trailing_stop_high else None,
+                        node.exit_reason,
                     ),
                 )
             self._conn.commit()

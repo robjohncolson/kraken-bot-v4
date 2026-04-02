@@ -25,6 +25,12 @@ DEFAULT_GRID_MAKER_OFFSET_PCT = 0.4
 DEFAULT_BELIEF_STALE_HOURS = 4
 DEFAULT_BELIEF_CONSENSUS_THRESHOLD = 2
 DEFAULT_MIN_BELIEF_CONFIDENCE = 0.5
+DEFAULT_ROTATION_TAKE_PROFIT_PCT = 3.0
+DEFAULT_ROTATION_STOP_LOSS_PCT = 2.0
+DEFAULT_ROTATION_ENTRY_FILL_TIMEOUT_MIN = 30
+DEFAULT_ROTATION_EXIT_FILL_TIMEOUT_MIN = 5
+DEFAULT_KRAKEN_MAKER_FEE_PCT = 0.26
+DEFAULT_KRAKEN_TAKER_FEE_PCT = 0.40
 DEFAULT_REENTRY_COOLDOWN_HOURS = 24
 DEFAULT_LOCAL_STATE_DIR = Path("./data")
 DEFAULT_SQLITE_PATH = Path("./data/bot.db")
@@ -81,6 +87,12 @@ class Settings:
     belief_stale_hours: int
     belief_consensus_threshold: int
     min_belief_confidence: float
+    rotation_take_profit_pct: float
+    rotation_stop_loss_pct: float
+    rotation_entry_fill_timeout_min: int
+    rotation_exit_fill_timeout_min: int
+    kraken_maker_fee_pct: float
+    kraken_taker_fee_pct: float
     reentry_cooldown_hours: int
     local_state_dir: Path
     web_port: int
@@ -147,6 +159,24 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
         ),
         min_belief_confidence=_read_float(
             env, "MIN_BELIEF_CONFIDENCE", DEFAULT_MIN_BELIEF_CONFIDENCE
+        ),
+        rotation_take_profit_pct=_read_float(
+            env, "ROTATION_TAKE_PROFIT_PCT", DEFAULT_ROTATION_TAKE_PROFIT_PCT
+        ),
+        rotation_stop_loss_pct=_read_float(
+            env, "ROTATION_STOP_LOSS_PCT", DEFAULT_ROTATION_STOP_LOSS_PCT
+        ),
+        rotation_entry_fill_timeout_min=_read_int(
+            env, "ROTATION_ENTRY_FILL_TIMEOUT_MIN", DEFAULT_ROTATION_ENTRY_FILL_TIMEOUT_MIN
+        ),
+        rotation_exit_fill_timeout_min=_read_int(
+            env, "ROTATION_EXIT_FILL_TIMEOUT_MIN", DEFAULT_ROTATION_EXIT_FILL_TIMEOUT_MIN
+        ),
+        kraken_maker_fee_pct=_read_float(
+            env, "KRAKEN_MAKER_FEE_PCT", DEFAULT_KRAKEN_MAKER_FEE_PCT
+        ),
+        kraken_taker_fee_pct=_read_float(
+            env, "KRAKEN_TAKER_FEE_PCT", DEFAULT_KRAKEN_TAKER_FEE_PCT
         ),
         reentry_cooldown_hours=_read_int(
             env, "REENTRY_COOLDOWN_HOURS", DEFAULT_REENTRY_COOLDOWN_HOURS

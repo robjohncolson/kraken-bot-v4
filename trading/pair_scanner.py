@@ -300,10 +300,7 @@ class PairScanner:
         if side == OrderSide.SELL and belief.direction is not BeliefDirection.BEARISH:
             return None
 
-        try:
-            window_hours = _estimate_bull_peak_hours(bars)
-        except ValueError:
-            return None
+        window_hours = _estimate_rotation_window_hours(bars, take_profit_pct=3.0)
 
         if window_hours <= 0:
             return None
@@ -441,6 +438,20 @@ def _raw_pair_symbol(raw_name: str, metadata: Mapping[str, object]) -> str | Non
         if isinstance(value, str) and value.strip():
             return value
     return raw_name if raw_name.strip() else None
+
+
+def _estimate_rotation_window_hours(
+    bars: pd.DataFrame, take_profit_pct: float = 3.0,
+) -> float:
+    """Estimate hours to reach take-profit based on hourly volatility."""
+    close = pd.to_numeric(bars["close"], errors="coerce").astype(float)
+    if len(close) < 12:
+        return 48.0  # Default to max if insufficient data
+    hourly_vol = float(close.pct_change().dropna().std())
+    if hourly_vol <= 0 or pd.isna(hourly_vol):
+        return 48.0
+    hours_to_tp = (take_profit_pct / 100) / hourly_vol
+    return max(2.0, min(48.0, hours_to_tp))
 
 
 def _estimate_bull_peak_hours(bars: pd.DataFrame) -> int:

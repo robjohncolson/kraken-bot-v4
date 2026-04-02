@@ -58,6 +58,7 @@ class OrderSide(StrEnum):
 
 class OrderType(StrEnum):
     LIMIT = "limit"
+    MARKET = "market"
     STOP_LOSS = "stop_loss"
 
 
@@ -239,6 +240,8 @@ class PendingOrder:
     filled_qty: Quantity = ZERO_DECIMAL  # base-asset filled so far
     position_id: PositionId | None = None  # set for position entries
     rotation_node_id: str | None = None  # set for rotation tree entries/exits
+    created_at: datetime | None = None  # for fill timeout tracking
+    exchange_order_id: str | None = None  # Kraken txid for cancel
 
 
 @dataclass(frozen=True, slots=True)
@@ -423,6 +426,12 @@ class RotationNode:
     confidence: float = 0.0
 
     status: RotationNodeStatus = RotationNodeStatus.PLANNED
+
+    # Price-aware exit targets (set on entry fill)
+    take_profit_price: Price | None = None
+    stop_loss_price: Price | None = None
+    trailing_stop_high: Price | None = None
+    exit_reason: str | None = None  # "take_profit", "stop_loss", "timer", "cancelled"
 
     # P&L tracking (populated on fill settlement)
     entry_cost: Decimal | None = None  # Original parent-denomination allocation (before unit conversion)

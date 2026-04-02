@@ -26,6 +26,7 @@ Bot running on WSL Athena pane with **rotation tree LIVE**:
 | Dashboard | `http://10.0.0.24:58392` |
 | Tests | 560 passing |
 | Belief confidence gate | `MIN_BELIEF_CONFIDENCE=0.5` — beliefs below threshold dropped |
+| Price-aware exits | TP=3%, SL=-2%, entry timeout=30min, exit timeout=5min→MARKET |
 
 ### Active rotation tree (observed 2026-04-01)
 
@@ -89,6 +90,8 @@ Backfill validation: +4,862 bps, 55.1% accuracy, 100% coverage, all rollout gate
 - `tui/screens/rotation_tree.py`: TUI screen (key 7) with hierarchical tree table
 
 **Architecture**: Rotation tree is a shadow ledger separate from Portfolio. Orders placed directly via executor (not reducer). Fill settlement updates tree, not portfolio. Reconciliation re-aligns on restart.
+
+**Price-aware exits**: On entry fill, fee-aware TP/SL prices are computed (TP includes round-trip fees). Every 30s cycle `_monitor_rotation_prices()` checks OPEN nodes: TP hit → LIMIT exit, SL hit → MARKET exit. `_check_rotation_fill_timeouts()` cancels stale entries (30min) and escalates stale exit limits to MARKET (5min). Window estimation uses volatility: `hours_to_tp = tp_pct / hourly_vol`, clamped 2-48h.
 
 **P&L tracking**: RotationNode records `entry_cost` (parent-denomination allocation), `fill_price`, `exit_price`, `closed_at`, `exit_proceeds` on settlement. CLOSED nodes persisted to SQLite. API `/api/rotation-tree` returns per-node `realized_pnl` + tree-level `total_deployed`, `total_realized_pnl`, `open_count`, `closed_count`, `rotation_tree_value_usd`, `total_portfolio_value_usd`. TUI rotation tree screen (key 7) shows P&L column with green/red coloring + summary footer.
 
