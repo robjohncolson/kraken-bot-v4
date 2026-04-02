@@ -58,6 +58,7 @@ class BeliefEntry:
     confidence: float
     regime: MarketRegime = MarketRegime.UNKNOWN
     updated_at: datetime | None = None
+    filtered: bool = False  # True if below confidence gate (display-only, not used for trading)
 
 
 @dataclass(frozen=True, slots=True)

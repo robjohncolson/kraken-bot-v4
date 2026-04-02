@@ -52,6 +52,7 @@ class BeliefCell:
     confidence: float = 0.0
     regime: str = "unknown"
     updated_at: str = ""
+    filtered: bool = False  # True if below confidence gate (display-only)
 
 
 @dataclass
@@ -96,6 +97,15 @@ class RotationNodeRow:
 
 
 @dataclass
+class RotationEventRow:
+    timestamp: str = ""
+    node_id: str = ""
+    event_type: str = ""
+    pair: str = ""
+    details: dict = field(default_factory=dict)
+
+
+@dataclass
 class RotationTreeState:
     nodes: list[RotationNodeRow] = field(default_factory=list)
     root_node_ids: list[str] = field(default_factory=list)
@@ -106,6 +116,7 @@ class RotationTreeState:
     closed_count: int = 0
     rotation_tree_value_usd: str = "0"
     total_portfolio_value_usd: str = "0"
+    rotation_events: list[RotationEventRow] = field(default_factory=list)
 
 
 # -- Top-level cockpit state --------------------------------------------------
@@ -189,6 +200,7 @@ def parse_beliefs(data: dict[str, Any]) -> list[BeliefCell]:
                     confidence=float(info.get("confidence", 0)),
                     regime=str(info.get("regime", "unknown")),
                     updated_at=str(info.get("updated_at") or ""),
+                    filtered=bool(info.get("filtered", False)),
                 ))
     elif isinstance(beliefs, list):
         for item in beliefs:
@@ -199,6 +211,7 @@ def parse_beliefs(data: dict[str, Any]) -> list[BeliefCell]:
                 confidence=float(item.get("confidence", 0)),
                 regime=str(item.get("regime", "unknown")),
                 updated_at=str(item.get("updated_at") or ""),
+                filtered=bool(item.get("filtered", False)),
             ))
     return cells
 
@@ -300,6 +313,17 @@ def merge_sse_update(state: CockpitState, data: dict[str, Any]) -> CockpitState:
         state.reconciliation = parse_reconciliation(data["reconciliation"])
     if "rotation_tree" in data:
         state.rotation_tree = parse_rotation_tree(data["rotation_tree"])
+    if "rotation_events" in data:
+        state.rotation_tree.rotation_events = [
+            RotationEventRow(
+                timestamp=str(e.get("timestamp", "")),
+                node_id=str(e.get("node_id", "")),
+                event_type=str(e.get("event_type", "")),
+                pair=str(e.get("pair", "")),
+                details=e.get("details", {}),
+            )
+            for e in data["rotation_events"]
+        ]
     if "pending_orders" in data:
         state.orders = parse_orders({"pending_orders": data["pending_orders"]})
     return state

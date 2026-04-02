@@ -14,7 +14,7 @@ from typing import Protocol
 
 from fastapi.encoders import jsonable_encoder
 
-from core.config import Settings
+from core.config import Settings, validate_settings
 from core.errors import (
     ExchangeError,
     InsufficientFundsError,
@@ -37,11 +37,16 @@ from core.types import (
     PlaceOrder,
     Position,
     PositionSide,
+    RotationEvent,
     RotationNodeStatus,
     RotationTreeState,
     ZERO_DECIMAL,
 )
+from collections import deque
+
 from exchange.executor import KrakenExecutor
+from exchange.pair_metadata import PairMetadataCache
+from grid.sizing import set_pair_metadata_cache
 from exchange.websocket import ConnectionState, FillConfirmed, KrakenWebSocketV2, PriceTick
 from guardian import PriceSnapshot
 from healing.heartbeat import HeartbeatSnapshot, HeartbeatStatus, write_heartbeat
@@ -243,6 +248,10 @@ class SchedulerRuntime:
                 settings=settings,
                 executor=executor,
             )
+        # Pair metadata cache (ordermin enforcement)
+        self._pair_metadata = PairMetadataCache(conn)
+        self._pair_metadata.load_from_db()
+        set_pair_metadata_cache(self._pair_metadata)
         # Rotation tree (denomination-agnostic recursive trading)
         self._rotation_tree: RotationTreeState | None = None
         self._rotation_planner: RotationTreePlanner | None = None
@@ -253,6 +262,7 @@ class SchedulerRuntime:
             scanner = PairScanner(client=executor._client, settings=settings)
             self._rotation_planner = RotationTreePlanner(
                 settings=settings, pair_scanner=scanner,
+                pair_metadata=self._pair_metadata,
             )
             # Initialize root nodes from current balances
             balances_dict = {
@@ -276,6 +286,10 @@ class SchedulerRuntime:
         self._state = replace(initial_state, now=_normalize_timestamp(initial_state.now))
         self._state_lock = asyncio.Lock()
         self._belief_timestamps: dict[str, datetime] = {}
+        # All beliefs for display (including low-confidence / filtered ones)
+        self._display_beliefs: dict[str, BeliefSnapshot] = {}
+        # Rotation event log (capped ring buffer)
+        self._rotation_events: deque[RotationEvent] = deque(maxlen=100)
         self._dashboard_store = DashboardStateStore(self._build_dashboard_state(self._state))
         self._serve_dashboard = serve_dashboard
         self._dashboard_server = None
@@ -296,6 +310,13 @@ class SchedulerRuntime:
         return self._state
 
     async def start(self) -> None:
+        # Validate settings and log warnings at startup
+        for warning in validate_settings(self._settings):
+            logger.warning("Settings validation: %s", warning)
+        # Refresh pair metadata (ordermin) from Kraken API
+        if self._pair_metadata.stale(max_age_hours=self._settings.pair_metadata_refresh_hours):
+            self._pair_metadata.refresh()
+            logger.info("Pair metadata refreshed: %d pairs cached", self._pair_metadata.pair_count)
         if self._serve_dashboard:
             await self._start_dashboard_server()
         # WS connect is deferred to run_once — skip here to avoid blocking
@@ -364,18 +385,18 @@ class SchedulerRuntime:
         *,
         observed_at: datetime | None = None,
     ) -> None:
-        # Confidence gate: drop low-confidence beliefs (single choke point)
+        timestamp = self._utc_now() if observed_at is None else _normalize_timestamp(observed_at)
+        # Always stash for dashboard display (TUI shows all beliefs)
+        self._display_beliefs[belief.pair] = belief
+        # Confidence gate: drop low-confidence beliefs from trading decisions
         if belief.confidence < self._settings.min_belief_confidence:
             logger.debug(
                 "Dropping low-confidence belief for %s (%.2f < %.2f)",
                 belief.pair, belief.confidence, self._settings.min_belief_confidence,
             )
-            # Still update timestamp so guardian staleness detection works —
-            # prevents old high-confidence beliefs from persisting indefinitely
-            timestamp = self._utc_now() if observed_at is None else _normalize_timestamp(observed_at)
+            # Still update timestamp so guardian staleness detection works
             self._belief_timestamps[belief.pair] = timestamp
             return
-        timestamp = self._utc_now() if observed_at is None else _normalize_timestamp(observed_at)
         async with self._state_lock:
             pending = self._state.pending_belief_signals + (belief,)
             self._state = replace(self._state, pending_belief_signals=pending)
@@ -920,6 +941,13 @@ class SchedulerRuntime:
                     "Rotation fill settled: node=%s OPEN, dest_qty=%s %s",
                     node_id, dest_qty, node.asset,
                 )
+                self._rotation_events.append(RotationEvent(
+                    timestamp=now, node_id=node_id, event_type="fill_entry",
+                    pair=node.entry_pair or "", details={
+                        "dest_qty": str(dest_qty), "asset": node.asset,
+                        "fill_price": str(fill_price),
+                    },
+                ))
 
             elif kind == "rotation_exit":
                 if node.order_side is None:
@@ -945,6 +973,14 @@ class SchedulerRuntime:
                     "Rotation exit settled: node=%s CLOSED, proceeds=%s → parent=%s",
                     node_id, proceeds, node.parent_node_id,
                 )
+                pnl = str(proceeds - node.entry_cost) if node.entry_cost else ""
+                self._rotation_events.append(RotationEvent(
+                    timestamp=now, node_id=node_id, event_type="fill_exit",
+                    pair=node.entry_pair or "", details={
+                        "proceeds": str(proceeds), "exit_price": str(fill_price),
+                        "exit_reason": node.exit_reason or "", "pnl": pnl,
+                    },
+                ))
 
     async def _monitor_rotation_prices(self, now: datetime) -> None:
         """Check OPEN nodes for TP/SL triggers. Called every cycle."""
@@ -999,6 +1035,14 @@ class SchedulerRuntime:
                     "Rotation TP hit for %s: current=%s >= tp=%s",
                     node.node_id, current_price, node.take_profit_price,
                 )
+                self._rotation_events.append(RotationEvent(
+                    timestamp=now, node_id=node.node_id, event_type="tp_hit",
+                    pair=node.entry_pair or "", details={
+                        "current_price": str(current_price),
+                        "tp_price": str(node.take_profit_price),
+                        "fill_price": str(node.fill_price or ""),
+                    },
+                ))
                 self._rotation_tree = update_node(
                     self._rotation_tree, node.node_id, exit_reason="take_profit",
                 )
@@ -1015,6 +1059,14 @@ class SchedulerRuntime:
                     "Rotation SL hit for %s: current=%s <= sl=%s",
                     node.node_id, current_price, node.stop_loss_price,
                 )
+                self._rotation_events.append(RotationEvent(
+                    timestamp=now, node_id=node.node_id, event_type="sl_hit",
+                    pair=node.entry_pair or "", details={
+                        "current_price": str(current_price),
+                        "sl_price": str(node.stop_loss_price),
+                        "fill_price": str(node.fill_price or ""),
+                    },
+                ))
                 self._rotation_tree = update_node(
                     self._rotation_tree, node.node_id, exit_reason="stop_loss",
                 )
@@ -1044,6 +1096,12 @@ class SchedulerRuntime:
                     "Rotation entry timeout for %s (age=%s): cancelling",
                     node.node_id, age,
                 )
+                self._rotation_events.append(RotationEvent(
+                    timestamp=now, node_id=node.node_id, event_type="entry_timeout",
+                    pair=node.entry_pair or "", details={
+                        "age_seconds": str(int(age.total_seconds())),
+                    },
+                ))
                 try:
                     await self._execute_cancel_order(
                         CancelOrder(client_order_id=po.client_order_id)
@@ -1069,6 +1127,12 @@ class SchedulerRuntime:
                     "Rotation exit timeout for %s (age=%s): escalating to MARKET",
                     node.node_id, age,
                 )
+                self._rotation_events.append(RotationEvent(
+                    timestamp=now, node_id=node.node_id, event_type="exit_escalation",
+                    pair=node.entry_pair or "", details={
+                        "age_seconds": str(int(age.total_seconds())),
+                    },
+                ))
                 try:
                     await self._execute_cancel_order(
                         CancelOrder(client_order_id=po.client_order_id)
@@ -1292,6 +1356,11 @@ class SchedulerRuntime:
                 "reconciliation": jsonable_encoder(dashboard_state.reconciliation),
                 "rotation_tree": jsonable_encoder(dashboard_state.rotation_tree),
                 "pending_orders": jsonable_encoder(dashboard_state.pending_orders),
+                "rotation_events": [
+                    {"timestamp": e.timestamp.isoformat(), "node_id": e.node_id,
+                     "event_type": e.event_type, "pair": e.pair, "details": e.details}
+                    for e in self._rotation_events
+                ],
             },
             event_id=f"dashboard-{self._dashboard_event_id}",
         )
@@ -1379,6 +1448,12 @@ class SchedulerRuntime:
         tree_value = _compute_rotation_tree_value(
             self._rotation_tree, state.current_prices,
         )
+        # Merge trading beliefs with display-only beliefs (low-confidence)
+        all_beliefs = _build_belief_entries(
+            state.bot_state.beliefs,
+            display_beliefs=self._display_beliefs,
+            confidence_gate=self._settings.min_belief_confidence,
+        )
         return DashboardState(
             portfolio=state.bot_state.portfolio,
             positions=_build_position_snapshots(
@@ -1386,7 +1461,7 @@ class SchedulerRuntime:
                 state.current_prices,
             ),
             grids=_build_grid_snapshots(state.bot_state.portfolio.positions),
-            beliefs=_build_belief_entries(state.bot_state.beliefs),
+            beliefs=all_beliefs,
             stats=StrategyStatsSnapshot(),
             reconciliation=ReconciliationSnapshot(
                 checked_at=state.last_reconcile_at,
@@ -1494,9 +1569,15 @@ def _build_grid_snapshots(positions: tuple[Position, ...]) -> tuple[GridStatusSn
 
 def _build_belief_entries(
     beliefs: tuple[BeliefSnapshot, ...],
+    *,
+    display_beliefs: dict[str, BeliefSnapshot] | None = None,
+    confidence_gate: float = 0.0,
 ) -> tuple[BeliefEntry, ...]:
     entries: list[BeliefEntry] = []
+    seen_pairs: set[str] = set()
+    # Active (trading) beliefs first
     for belief in beliefs:
+        seen_pairs.add(belief.pair)
         for source in belief.sources:
             entries.append(
                 BeliefEntry(
@@ -1507,6 +1588,24 @@ def _build_belief_entries(
                     regime=belief.regime,
                 )
             )
+    # Display-only beliefs (below confidence gate) — not used for trading
+    if display_beliefs:
+        for pair, belief in display_beliefs.items():
+            if pair in seen_pairs:
+                continue
+            if belief.confidence >= confidence_gate:
+                continue  # already in trading beliefs
+            for source in belief.sources:
+                entries.append(
+                    BeliefEntry(
+                        pair=belief.pair,
+                        source=source if isinstance(source, BeliefSource) else BeliefSource(str(source)),
+                        direction=belief.direction,
+                        confidence=belief.confidence,
+                        regime=belief.regime,
+                        filtered=True,
+                    )
+                )
     return tuple(sorted(entries, key=lambda item: (item.pair, item.source.value)))
 
 

@@ -34,7 +34,10 @@ class ReconciliationWidget(Static):
         tbl.add_row("Last Check", r.checked_at or "Never")
         tbl.add_row("Discrepancy", bool_indicator(r.discrepancy_detected))
         tbl.add_row("Ghost Positions", str(len(r.ghost_positions)))
-        tbl.add_row("Foreign Orders", str(len(r.foreign_orders)))
+        foreign_label = str(len(r.foreign_orders))
+        if r.foreign_orders:
+            foreign_label += " (Kraken-side orders not placed by bot)"
+        tbl.add_row("Foreign Orders", foreign_label)
         tbl.add_row("Untracked", str(len(r.untracked_assets)))
         tbl.add_row("Fee Drift", str(len(r.fee_drift)))
 

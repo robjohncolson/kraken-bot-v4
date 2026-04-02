@@ -13,15 +13,18 @@ from typing import Final
 
 from core.config import Settings
 from core.types import (
+    RotationCandidate,
     RotationTreeState,
     ZERO_DECIMAL,
 )
+from exchange.pair_metadata import PairMetadataCache
 from trading.pair_scanner import PairScanner
 from trading.rotation_tree import (
     MIN_REMAINING_HOURS,
     add_node,
     build_root_nodes,
     compute_child_allocations,
+    entry_base_quantity,
     leaf_nodes,
     live_nodes,
     make_child_node,
@@ -42,9 +45,11 @@ class RotationTreePlanner:
         *,
         settings: Settings,
         pair_scanner: PairScanner,
+        pair_metadata: PairMetadataCache | None = None,
     ) -> None:
         self._settings = settings
         self._pair_scanner = pair_scanner
+        self._pair_metadata = pair_metadata
 
     def initialize_roots(
         self,
@@ -115,6 +120,27 @@ class RotationTreePlanner:
                 candidates,
                 min_position=Decimal(str(self._settings.min_position_usd)),
             )
+
+            # Filter allocations below Kraken ordermin
+            if self._pair_metadata is not None:
+                filtered: list[tuple[RotationCandidate, Decimal]] = []
+                for candidate, qty in allocations:
+                    # Convert allocated qty (parent denom) to base for ordermin check
+                    if candidate.reference_price_hint and candidate.reference_price_hint > 0:
+                        base_qty = entry_base_quantity(
+                            candidate.order_side, qty, candidate.reference_price_hint,
+                        )
+                    else:
+                        base_qty = qty
+                    if self._pair_metadata.meets_minimum(candidate.pair, base_qty):
+                        filtered.append((candidate, qty))
+                    else:
+                        ordermin = self._pair_metadata.ordermin(candidate.pair)
+                        logger.info(
+                            "Skipping %s: base_qty=%s below ordermin=%s",
+                            candidate.pair, base_qty, ordermin,
+                        )
+                allocations = filtered
 
             if not allocations:
                 continue

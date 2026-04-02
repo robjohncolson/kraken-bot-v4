@@ -86,7 +86,15 @@ CREATE TABLE IF NOT EXISTS cooldowns (
     cooldown_until TEXT NOT NULL
 )"""
 
-SCHEMA_STATEMENTS = (POSITIONS_DDL, ORDERS_DDL, LEDGER_DDL, COOLDOWNS_DDL, ROTATION_NODES_DDL)
+PAIR_METADATA_DDL = """\
+CREATE TABLE IF NOT EXISTS pair_metadata (
+    pair         TEXT PRIMARY KEY,
+    ordermin     TEXT NOT NULL,
+    lot_decimals INTEGER,
+    updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
+)"""
+
+SCHEMA_STATEMENTS = (POSITIONS_DDL, ORDERS_DDL, LEDGER_DDL, COOLDOWNS_DDL, ROTATION_NODES_DDL, PAIR_METADATA_DDL)
 
 # Columns added after initial schema — safe to run repeatedly.
 _POSITION_MIGRATIONS = (
@@ -176,7 +184,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         _migrate_columns(conn, "orders", _ORDER_MIGRATIONS)
         _migrate_columns(conn, "rotation_nodes", _ROTATION_NODE_MIGRATIONS)
         conn.commit()
-        logger.info("SQLite schema verified (positions, orders, ledger, cooldowns, rotation_nodes)")
+        logger.info("SQLite schema verified (positions, orders, ledger, cooldowns, rotation_nodes, pair_metadata)")
     except sqlite3.Error as exc:
         raise SqliteSchemaError(f"Schema bootstrap failed: {exc}") from exc
 

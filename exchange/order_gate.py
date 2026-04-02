@@ -17,6 +17,7 @@ from core.config import (
 from core.errors import ExchangeError, RateLimitExceededError
 from core.types import CircuitBreakerState, OrderRequest, OrderType
 from exchange.client import PreparedKrakenRequest
+from exchange.pair_metadata import PairMetadataCache
 from exchange.symbols import normalize_pair
 
 TimeSource = Callable[[], float]
@@ -49,6 +50,18 @@ class PairNotAllowedError(OrderGateError):
         self.pair = pair
         self.allowed = allowed
         super().__init__(f"Pair {pair!r} is not in the allowed set: {sorted(allowed)}.")
+
+
+class OrderBelowMinimumError(OrderGateError):
+    """Raised when order quantity is below the exchange minimum."""
+
+    def __init__(self, pair: str, quantity: Decimal, minimum: Decimal) -> None:
+        self.pair = pair
+        self.quantity = quantity
+        self.minimum = minimum
+        super().__init__(
+            f"Order quantity {quantity} for {pair!r} is below minimum {minimum}."
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,9 +173,11 @@ class OrderGate:
         sequence_source: SequenceSource | None = None,
         allowed_pairs: frozenset[str] = frozenset(),
         kraken_tier: str = "starter",
+        pair_metadata: PairMetadataCache | None = None,
     ) -> None:
         self._client = client
         self._order_prefix = order_prefix
+        self._pair_metadata = pair_metadata
         self._sequence_source = count(1).__next__ if sequence_source is None else sequence_source
         self._breaker = OrderMutationCircuitBreaker(policy=breaker_policy, now=now)
         self._allowed_pairs = allowed_pairs
@@ -243,6 +258,12 @@ class OrderGate:
         else:
             raise InvalidOrderRequestError(f"Unsupported order type {order.order_type!r}.")
 
+        # Defensive ordermin check
+        if self._pair_metadata is not None:
+            ordermin = self._pair_metadata.ordermin(normalize_pair(order.pair))
+            if ordermin is not None and order.quantity < ordermin:
+                raise OrderBelowMinimumError(order.pair, order.quantity, ordermin)
+
         return MappingProxyType(payload)
 
     def _next_client_order_id(self, pair: str) -> str:
@@ -273,5 +294,6 @@ __all__ = [
     "OrderGatewayClient",
     "OrderMutationBlockedError",
     "OrderMutationCircuitBreaker",
+    "OrderBelowMinimumError",
     "PairNotAllowedError",
 ]

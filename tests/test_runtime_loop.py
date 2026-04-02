@@ -154,6 +154,7 @@ def test_start_connects_websocket_subscribes_and_publishes_dashboard_state() -> 
             "reconciliation",
             "rotation_tree",
             "pending_orders",
+            "rotation_events",
         }
         await runtime.shutdown()
 

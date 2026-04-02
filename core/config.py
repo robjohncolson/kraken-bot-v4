@@ -52,6 +52,7 @@ DEFAULT_SCANNER_TIMEOUT_SEC = 15.0
 DEFAULT_ENABLE_CONDITIONAL_TREE = False
 DEFAULT_ENABLE_ROTATION_TREE = False
 DEFAULT_EXIT_LIMIT_OFFSET_PCT = 0.1
+DEFAULT_PAIR_METADATA_REFRESH_HOURS = 24
 
 ALLOWED_KRAKEN_TIERS = frozenset({"starter", "intermediate", "pro"})
 TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
@@ -115,6 +116,7 @@ class Settings:
     enable_conditional_tree: bool
     enable_rotation_tree: bool
     exit_limit_offset_pct: float
+    pair_metadata_refresh_hours: int
     belief_model: str
     active_artifact_id: str | None
     shadow_artifact_id: str | None
@@ -244,6 +246,11 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
             "EXIT_LIMIT_OFFSET_PCT",
             DEFAULT_EXIT_LIMIT_OFFSET_PCT,
         ),
+        pair_metadata_refresh_hours=_read_int(
+            env,
+            "PAIR_METADATA_REFRESH_HOURS",
+            DEFAULT_PAIR_METADATA_REFRESH_HOURS,
+        ),
         belief_model=env.get("BELIEF_MODEL", "technical_ensemble").strip(),
         active_artifact_id=_read_optional(env, "ACTIVE_ARTIFACT_ID"),
         shadow_artifact_id=_read_optional(env, "SHADOW_ARTIFACT_ID"),
@@ -325,4 +332,43 @@ def _read_path(environ: Mapping[str, str], name: str, default: Path) -> Path:
     return Path(raw_value)
 
 
-__all__ = ["REQUIRED_ENV_VARS", "Settings", "load_settings"]
+def validate_settings(settings: Settings) -> list[str]:
+    """Validate settings and return a list of warning messages."""
+    warnings: list[str] = []
+    if settings.rotation_take_profit_pct <= 0:
+        warnings.append("ROTATION_TAKE_PROFIT_PCT must be > 0")
+    elif settings.rotation_take_profit_pct < 1.0:
+        warnings.append(
+            f"ROTATION_TAKE_PROFIT_PCT={settings.rotation_take_profit_pct} is very low — "
+            "fees may eat the profit"
+        )
+    elif settings.rotation_take_profit_pct > 10.0:
+        warnings.append(
+            f"ROTATION_TAKE_PROFIT_PCT={settings.rotation_take_profit_pct} is high — "
+            "may rarely trigger"
+        )
+    if settings.rotation_stop_loss_pct <= 0:
+        warnings.append("ROTATION_STOP_LOSS_PCT must be > 0")
+    elif settings.rotation_stop_loss_pct > 5.0:
+        warnings.append(
+            f"ROTATION_STOP_LOSS_PCT={settings.rotation_stop_loss_pct} is loose — "
+            "large losses before exit"
+        )
+    if not (0.0 <= settings.min_belief_confidence <= 1.0):
+        warnings.append(
+            f"MIN_BELIEF_CONFIDENCE={settings.min_belief_confidence} must be in [0.0, 1.0]"
+        )
+    if settings.rotation_entry_fill_timeout_min < 5:
+        warnings.append(
+            f"ROTATION_ENTRY_FILL_TIMEOUT_MIN={settings.rotation_entry_fill_timeout_min} "
+            "is short — entries may get cancelled prematurely"
+        )
+    if settings.rotation_exit_fill_timeout_min < 1:
+        warnings.append(
+            f"ROTATION_EXIT_FILL_TIMEOUT_MIN={settings.rotation_exit_fill_timeout_min} "
+            "is very short — exits may escalate to MARKET too quickly"
+        )
+    return warnings
+
+
+__all__ = ["REQUIRED_ENV_VARS", "Settings", "load_settings", "validate_settings"]

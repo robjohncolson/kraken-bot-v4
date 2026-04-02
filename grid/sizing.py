@@ -6,6 +6,7 @@ from types import MappingProxyType
 from typing import Mapping
 
 from core.errors import KrakenBotError
+from exchange.pair_metadata import PairMetadataCache
 from core.types import Pair, Price, Quantity, UsdAmount, ZERO_DECIMAL
 
 
@@ -36,6 +37,15 @@ class InvalidAvailableCapitalError(GridSizingError):
     def __init__(self, capital_usd: UsdAmount) -> None:
         self.capital_usd = capital_usd
         super().__init__(f"Available capital must be non-negative; got {capital_usd}.")
+
+
+_pair_metadata_cache: PairMetadataCache | None = None
+
+
+def set_pair_metadata_cache(cache: PairMetadataCache) -> None:
+    """Set the shared pair metadata cache for dynamic ordermin lookups."""
+    global _pair_metadata_cache
+    _pair_metadata_cache = cache
 
 
 KRAKEN_MINIMUM_ORDER_QUANTITIES: Mapping[Pair, Quantity] = MappingProxyType(
@@ -97,6 +107,11 @@ def calculate_slot_count(
 
 
 def _minimum_order_quantity(pair: Pair) -> Quantity:
+    # Dynamic cache takes priority over hardcoded map
+    if _pair_metadata_cache is not None:
+        ordermin = _pair_metadata_cache.ordermin(pair)
+        if ordermin is not None:
+            return ordermin
     try:
         return KRAKEN_MINIMUM_ORDER_QUANTITIES[pair]
     except KeyError as exc:
@@ -123,5 +138,6 @@ __all__ = [
     "KRAKEN_MINIMUM_ORDER_QUANTITIES",
     "min_slot_size_usd",
     "SlotAllocation",
+    "set_pair_metadata_cache",
     "UnknownPairMinimumError",
 ]

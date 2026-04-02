@@ -11,7 +11,7 @@
 - **Platform**: Windows 11, Python 3.13, WSL for runtime
 - **Repo**: `git@github.com:robjohncolson/kraken-bot-v4.git`, branch `master`
 
-## Current live state (as of 2026-04-01)
+## Current live state (as of 2026-04-02)
 
 Bot running on WSL Athena pane with **rotation tree LIVE**:
 
@@ -25,8 +25,11 @@ Bot running on WSL Athena pane with **rotation tree LIVE**:
 | Scanner timeout | 45s (`SCANNER_TIMEOUT_SEC=45`) |
 | Dashboard | `http://10.0.0.24:58392` |
 | Tests | 560 passing |
-| Belief confidence gate | `MIN_BELIEF_CONFIDENCE=0.5` — beliefs below threshold dropped |
+| Belief confidence gate | `MIN_BELIEF_CONFIDENCE=0.5` — beliefs below threshold shown dimmed in TUI |
 | Price-aware exits | TP=3%, SL=-2%, entry timeout=30min, exit timeout=5min→MARKET |
+| Ordermin enforcement | Dynamic from Kraken AssetPairs API, cached 24h in SQLite |
+| Rotation events | TP/SL/timeout/fill events in SSE + TUI rotation tree footer |
+| Settings validation | Startup warns on out-of-range TP/SL/confidence/timeout values |
 
 ### Active rotation tree (observed 2026-04-01)
 
@@ -109,6 +112,10 @@ Backfill validation: +4,862 bps, 55.1% accuracy, 100% coverage, all rollout gate
 | TUI | 8 screens (incl. rotation tree), live SSE, keyboard navigation |
 | Rotation tree | **LIVE** — scanning, ordering, settling across all Kraken pairs |
 | Rotation resilience | Retry budget (3x), rate limit bypass, matching engine decay, auto-cancel on insufficient funds |
+| Ordermin enforcement | **NEW** — dynamic from Kraken API, cached in SQLite `pair_metadata` table |
+| Rotation events | **NEW** — structured TP/SL/timeout/fill events in SSE + TUI |
+| Beliefs display | **FIXED** — all beliefs shown in TUI (filtered ones dimmed) |
+| Settings validation | **NEW** — startup warnings for out-of-range TP/SL/confidence/timeout |
 | Conditional tree (v1) | Built, disabled by default (`ENABLE_CONDITIONAL_TREE`) |
 | Backfill shadow eval | `python -m research.backfill_shadow` |
 
@@ -156,13 +163,22 @@ EXIT_LIMIT_OFFSET_PCT=0.1
 
 ## Goal for next session
 
-1. **Fetch Kraken minimum order sizes**: `ordermin` from AssetPairs API → cache in SQLite → enforce in planner to stop "volume minimum not met" errors wasting retries
-2. **Observe TP/SL exits**: watch for first take-profit (3%) and stop-loss (-2%) triggers in logs
-3. **Observe fill timeouts**: stale entries cancelled at 30min, stale exit limits escalated to MARKET at 5min
-4. **Monitor P&L**: check `/api/rotation-tree` for `total_realized_pnl` after first closed nodes with exit_reason="take_profit"
-5. **Broker sidecar**: must use `python3 scripts/llm_council_broker.py` (WSL python3, not Windows — needs tmux socket)
-6. **Tune parameters**: `ROTATION_TAKE_PROFIT_PCT`, `ROTATION_STOP_LOSS_PCT`, `MIN_BELIEF_CONFIDENCE` based on observed behavior
-7. **TUI known gaps**: beliefs panel empty (neutral signals don't display), uptime updates only on SSE (needs TUI restart to pick up), reconciliation shows foreign orders (Kraken-side state)
+1. **Observe ordermin enforcement**: verify planner logs "Skipping X: base_qty below ordermin" for undersized allocations
+2. **Observe rotation events in TUI**: check rotation tree footer shows last TP/SL/timeout event
+3. **Observe beliefs panel**: verify filtered (low-confidence) beliefs appear dimmed in TUI
+4. **Monitor P&L**: check `/api/rotation-tree` for `total_realized_pnl` after closed nodes
+5. **Tune parameters**: adjust TP/SL/confidence based on observed TP hit rate vs SL hit rate
+6. **Consider trailing stop**: once enough TP/SL data, evaluate tightening SL or implementing trailing stop activation
+7. **Broker sidecar**: must use `python3 scripts/llm_council_broker.py` (WSL python3, not Windows — needs tmux socket)
+
+## What shipped 2026-04-02
+
+- **Ordermin enforcement**: `exchange/pair_metadata.py` fetches `ordermin` from Kraken AssetPairs API, caches in SQLite `pair_metadata` table (24h TTL). Enforced in rotation planner (filters undersized allocations), order gate (defensive `OrderBelowMinimumError`), grid sizing (dynamic fallback)
+- **Beliefs display fix**: All beliefs (including low-confidence/neutral) now shown in TUI. Filtered beliefs rendered with dim styling + "filtered" label. Trading logic unchanged (still gates on `MIN_BELIEF_CONFIDENCE`)
+- **Rotation event tracking**: Structured `RotationEvent` dataclass emitted for TP hits, SL hits, entry timeouts, exit escalations, entry/exit fills. Events included in SSE payload. TUI rotation tree footer shows last event
+- **Settings validation**: `validate_settings()` logs warnings at startup for out-of-range TP/SL/confidence/timeout values (never blocks startup)
+- **TUI reconciliation**: Foreign orders now explained with contextual label
+- **Spec-and-ship skill**: Saved as `.claude/skills/spec-and-ship/SKILL.md` for future use
 
 ## What shipped 2026-04-01 (13 commits)
 

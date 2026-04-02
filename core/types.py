@@ -469,6 +469,17 @@ class RotationTreeState:
     last_planned_at: datetime | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class RotationEvent:
+    """Structured event emitted by rotation tree operations."""
+
+    timestamp: datetime
+    node_id: str
+    event_type: str  # "tp_hit", "sl_hit", "entry_timeout", "exit_escalation", "fill_entry", "fill_exit", "expiry"
+    pair: str
+    details: dict[str, str]  # flexible payload — all values as strings for JSON safety
+
+
 __all__ = [
     "Action",
     "ActionType",
@@ -513,6 +524,7 @@ __all__ = [
     "ReconciliationResult",
     "RedistributeGridProfits",
     "RotationCandidate",
+    "RotationEvent",
     "RotationExitReason",
     "RotationNode",
     "RotationNodeStatus",

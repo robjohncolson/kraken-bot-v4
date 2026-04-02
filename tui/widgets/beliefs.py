@@ -1,12 +1,13 @@
 """Beliefs / consensus matrix widget."""
 from __future__ import annotations
 
+from rich.text import Text
 from textual.widgets import DataTable
 
 from tui.state import BeliefCell
 from tui.theme import confidence_text, direction_text
 
-_COLUMNS = ("Pair", "Source", "Direction", "Conf", "Regime", "Updated")
+_COLUMNS = ("Pair", "Source", "Direction", "Conf", "Regime", "Status")
 
 
 class BeliefsTable(DataTable):
@@ -31,11 +32,22 @@ class BeliefsTable(DataTable):
             self.add_row("\u2014", "", "", "", "", "")
             return
         for b in beliefs:
-            self.add_row(
-                b.pair,
-                b.source,
-                direction_text(b.direction),
-                confidence_text(b.confidence),
-                b.regime,
-                b.updated_at or "\u2014",
-            )
+            if b.filtered:
+                # Dim styling for below-confidence-gate beliefs
+                self.add_row(
+                    Text(b.pair, style="dim"),
+                    Text(b.source, style="dim"),
+                    Text(str(b.direction), style="dim"),
+                    Text(f"{b.confidence:.0%}", style="dim"),
+                    Text(b.regime, style="dim"),
+                    Text("filtered", style="dim italic"),
+                )
+            else:
+                self.add_row(
+                    b.pair,
+                    b.source,
+                    direction_text(b.direction),
+                    confidence_text(b.confidence),
+                    b.regime,
+                    "active",
+                )

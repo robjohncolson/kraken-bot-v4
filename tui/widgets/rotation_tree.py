@@ -94,7 +94,12 @@ class RotationTreeTable(DataTable):
                 stack.append(child)
 
         # Summary footer via border subtitle
-        self.border_subtitle = (
+        subtitle = (
             f"Open: {tree.open_count} | Closed: {tree.closed_count} | "
             f"Deployed: {tree.total_deployed} | P&L: {tree.total_realized_pnl}"
         )
+        # Append last rotation event if available
+        if tree.rotation_events:
+            last = tree.rotation_events[-1]
+            subtitle += f" | Last: {last.event_type} {last.pair}"
+        self.border_subtitle = subtitle
