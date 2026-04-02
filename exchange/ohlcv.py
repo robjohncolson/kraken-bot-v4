@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import logging
+import time
 from decimal import Decimal
 
 import httpx
 import pandas as pd
 
 logger = logging.getLogger(__name__)
+
+# OHLCV cache: avoids redundant HTTP calls when multiple roots scan the same pair
+_ohlcv_cache: dict[str, tuple[float, "pd.DataFrame"]] = {}
+_OHLCV_CACHE_TTL_SEC = 300  # 5 minutes — matches plan_cycle interval
 
 KRAKEN_OHLCV_URL = "https://api.kraken.com/0/public/OHLC"
 
@@ -54,6 +59,12 @@ def fetch_ohlcv(
     Returns:
         DataFrame with columns: open, high, low, close, volume
     """
+    cache_key = f"{pair}:{interval}"
+    now = time.monotonic()
+    cached = _ohlcv_cache.get(cache_key)
+    if cached is not None and now < cached[0] and len(cached[1]) >= count:
+        return cached[1]
+
     kraken_pair = kraken_pair_name(pair)
     params = {"pair": kraken_pair, "interval": interval}
 
@@ -90,6 +101,7 @@ def fetch_ohlcv(
         })
 
     df = pd.DataFrame(rows)
+    _ohlcv_cache[cache_key] = (time.monotonic() + _OHLCV_CACHE_TTL_SEC, df)
     if len(df) < count:
         logger.warning(
             "OHLCV for %s: got %d candles, wanted %d", pair, len(df), count,

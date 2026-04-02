@@ -795,6 +795,31 @@ class SchedulerRuntime:
             if base_qty <= ZERO_DECIMAL:
                 continue
 
+            # Pre-flight: verify exchange has enough of the source asset
+            source_asset = node.from_asset or _order_source_asset(
+                node.entry_pair, node.order_side,
+            )
+            available = _available_balance(
+                self._state.kraken_state.balances, source_asset,
+            )
+            # Subtract already-committed pending rotation orders for same asset
+            committed = ZERO_DECIMAL
+            for po in self._state.bot_state.pending_orders:
+                if not po.kind.startswith("rotation_"):
+                    continue
+                po_source = _order_source_asset(po.pair, po.side)
+                if po_source == source_asset:
+                    committed += po.quote_qty if po.side == OrderSide.BUY else po.base_qty
+            effective = available - committed
+            order_cost = (base_qty * node.entry_price) if node.order_side == OrderSide.BUY else base_qty
+            if order_cost > effective:
+                logger.info(
+                    "Pre-flight skip %s: cost=%s > effective=%s (avail=%s, committed=%s)",
+                    node.node_id, order_cost, effective, available, committed,
+                )
+                self._rotation_tree = cancel_planned_node(self._rotation_tree, node.node_id)
+                continue
+
             client_order_id = f"kbv4-rot-{node.node_id}-entry"
 
             order = OrderRequest(
@@ -1855,6 +1880,25 @@ def _collect_root_prices(
             logger.warning("Could not fetch price for %s, skipping root: %s", asset, exc)
 
     return prices
+
+
+def _available_balance(
+    balances: tuple, asset: str,
+) -> Decimal:
+    """Sum available balance for an asset from Kraken balances."""
+    total = ZERO_DECIMAL
+    for b in balances:
+        if b.asset == asset:
+            total += b.available
+    return total
+
+
+def _order_source_asset(pair: str, side: OrderSide) -> str:
+    """Determine which asset an order consumes. BUY BASE/QUOTE spends QUOTE."""
+    parts = pair.split("/")
+    if len(parts) != 2:
+        return pair
+    return parts[1] if side == OrderSide.BUY else parts[0]
 
 
 __all__ = [

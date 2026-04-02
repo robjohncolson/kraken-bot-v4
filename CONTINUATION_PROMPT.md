@@ -29,6 +29,8 @@ Bot running on WSL Athena pane with **rotation tree LIVE**:
 | Price-aware exits | TP=3%, SL=-2%, dynamic entry timeout (25% of window, 30-120min), exit timeout=5min→MARKET |
 | Ordermin enforcement | Dynamic from Kraken AssetPairs API, cached 24h in SQLite |
 | Anti-churn | Max 3 children per parent (`ROTATION_MAX_CHILDREN_PER_PARENT`), top-3 by score |
+| OHLCV cache | 5-minute TTL, deduplicates same-pair scans across roots |
+| Pre-flight balance check | Verifies exchange balance before placing rotation entries (no more InsufficientFundsError) |
 | Rotation events | TP/SL/timeout/fill events in SSE + TUI rotation tree footer |
 | Settings validation | Startup warns on out-of-range TP/SL/confidence/timeout values |
 
@@ -175,6 +177,8 @@ EXIT_LIMIT_OFFSET_PCT=0.1
 ## What shipped 2026-04-02
 
 - **Anti-churn**: Max 3 children per parent (`ROTATION_MAX_CHILDREN_PER_PARENT=3`), `compute_child_allocations` sorts by score descending and takes top-N. Planner counts existing live children and passes remaining slots. Dynamic entry timeout: 25% of estimated window (floor=config, cap=4x config=120min). Stops capital dilution across 10+ thin children.
+- **Scan efficiency**: OHLCV cache with 5-min TTL deduplicates same-pair scans across multiple roots. Per-child budget check skips underfunded leaves before scanning (saves 100s of HTTP calls).
+- **Pre-flight balance check**: Before placing rotation entries, verifies `order_cost <= exchange_balance - committed_orders`. Cancels planned node silently (no pair cooldown) if insufficient. Eliminates InsufficientFundsError from exchange.
 - **Ordermin enforcement**: `exchange/pair_metadata.py` fetches `ordermin` from Kraken AssetPairs API, caches in SQLite `pair_metadata` table (24h TTL). Enforced in rotation planner (filters undersized allocations), order gate (defensive `OrderBelowMinimumError`), grid sizing (dynamic fallback)
 - **Beliefs display fix**: All beliefs (including low-confidence/neutral) now shown in TUI. Filtered beliefs rendered with dim styling + "filtered" label. Trading logic unchanged (still gates on `MIN_BELIEF_CONFIDENCE`)
 - **Rotation event tracking**: Structured `RotationEvent` dataclass emitted for TP hits, SL hits, entry timeouts, exit escalations, entry/exit fills. Events included in SSE payload. TUI rotation tree footer shows last event

@@ -103,6 +103,12 @@ class RotationTreePlanner:
                 continue
             remaining_slots = max_children - len(existing_children)
 
+            # Skip leaves where per-child budget is below minimum
+            # (avoids scanning when all allocations would be undersized)
+            per_child_budget = leaf.quantity_free / Decimal(remaining_slots)
+            if per_child_budget < Decimal(str(self._settings.min_position_usd)):
+                continue
+
             # Check remaining time
             hours_left = remaining_hours(leaf, now)
             if hours_left is not None and hours_left < MIN_REMAINING_HOURS:
