@@ -90,7 +90,9 @@ Backfill validation: +4,862 bps, 55.1% accuracy, 100% coverage, all rollout gate
 
 **Architecture**: Rotation tree is a shadow ledger separate from Portfolio. Orders placed directly via executor (not reducer). Fill settlement updates tree, not portfolio. Reconciliation re-aligns on restart.
 
-**P&L tracking**: RotationNode records `entry_cost` (parent-denomination allocation), `fill_price`, `exit_price`, `closed_at`, `exit_proceeds` on settlement. CLOSED nodes persisted to SQLite. API `/api/rotation-tree` returns per-node `realized_pnl` + tree-level `total_deployed`, `total_realized_pnl`, `open_count`, `closed_count`. TUI rotation tree screen (key 7) shows P&L column with green/red coloring + summary footer.
+**P&L tracking**: RotationNode records `entry_cost` (parent-denomination allocation), `fill_price`, `exit_price`, `closed_at`, `exit_proceeds` on settlement. CLOSED nodes persisted to SQLite. API `/api/rotation-tree` returns per-node `realized_pnl` + tree-level `total_deployed`, `total_realized_pnl`, `open_count`, `closed_count`, `rotation_tree_value_usd`, `total_portfolio_value_usd`. TUI rotation tree screen (key 7) shows P&L column with green/red coloring + summary footer.
+
+**Portfolio valuation**: TUI overview shows total portfolio value by pricing all rotation tree root assets in USD (WebSocket prices → cached REST fallback → N/A). The rotation tree IS the portfolio now — the old Portfolio.total_value_usd only tracks cash/positions from the pre-rotation era. `~` prefix on value means some asset prices are missing.
 
 ## Key infrastructure
 

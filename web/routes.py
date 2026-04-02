@@ -111,6 +111,8 @@ class RotationTreeSnapshot:
     total_realized_pnl: str = "0"
     open_count: int = 0
     closed_count: int = 0
+    rotation_tree_value_usd: str = "0"
+    total_portfolio_value_usd: str = "0"
 
 
 @dataclass(frozen=True, slots=True)

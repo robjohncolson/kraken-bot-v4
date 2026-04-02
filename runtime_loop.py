@@ -1119,6 +1119,7 @@ class SchedulerRuntime:
                 "beliefs": jsonable_encoder(dashboard_state.beliefs),
                 "stats": jsonable_encoder(dashboard_state.stats),
                 "reconciliation": jsonable_encoder(dashboard_state.reconciliation),
+                "rotation_tree": jsonable_encoder(dashboard_state.rotation_tree),
             },
             event_id=f"dashboard-{self._dashboard_event_id}",
         )
@@ -1202,6 +1203,10 @@ class SchedulerRuntime:
         return HeartbeatStatus.HEALTHY
 
     def _build_dashboard_state(self, state: SchedulerState) -> DashboardState:
+        # Compute rotation tree total value in USD
+        tree_value = _compute_rotation_tree_value(
+            self._rotation_tree, state.current_prices,
+        )
         return DashboardState(
             portfolio=state.bot_state.portfolio,
             positions=_build_position_snapshots(
@@ -1215,7 +1220,9 @@ class SchedulerRuntime:
                 checked_at=state.last_reconcile_at,
                 report=state.last_reconciliation_report,
             ),
-            rotation_tree=_build_rotation_tree_snapshot(self._rotation_tree),
+            rotation_tree=_build_rotation_tree_snapshot(
+                self._rotation_tree, tree_value_usd=tree_value,
+            ),
         )
 
 
@@ -1353,7 +1360,63 @@ def _apply_exit_offset(
     return raw.quantize(template)
 
 
-def _build_rotation_tree_snapshot(tree: RotationTreeState | None) -> RotationTreeSnapshot:
+_price_cache: dict[str, tuple[float, Decimal]] = {}  # pair → (monotonic_expiry, price)
+_PRICE_CACHE_TTL = 300  # 5 minutes
+
+
+def _compute_rotation_tree_value(
+    tree: RotationTreeState | None,
+    current_prices: dict,
+) -> str:
+    """Sum all rotation tree root assets in USD. Returns string, '~X' (partial), or 'N/A'."""
+    if tree is None:
+        return "0"
+    total = ZERO_DECIMAL
+    has_missing = False
+    now = _time.monotonic()
+    for node in tree.nodes:
+        if node.depth != 0:
+            continue
+        asset = node.asset
+        if asset in ("USD", "USDC"):
+            total += node.quantity_total
+            continue
+        # Look up ASSET/USD price from current_prices (WebSocket)
+        pair_key = f"{asset}/USD"
+        snap = current_prices.get(pair_key)
+        if snap is not None:
+            price = snap.price if hasattr(snap, "price") else snap
+            total += node.quantity_total * price
+            continue
+        # Check cache before REST fallback
+        cached = _price_cache.get(pair_key)
+        if cached is not None and now < cached[0]:
+            total += node.quantity_total * cached[1]
+            continue
+        # REST fallback (cached for 5 min to avoid blocking every cycle)
+        try:
+            from exchange.ohlcv import fetch_ohlcv
+            bars = fetch_ohlcv(pair_key, interval=60, count=1)
+            if not bars.empty:
+                price = Decimal(str(float(bars["close"].iloc[-1])))
+                _price_cache[pair_key] = (now + _PRICE_CACHE_TTL, price)
+                total += node.quantity_total * price
+            else:
+                has_missing = True
+        except Exception:
+            has_missing = True
+    if has_missing:
+        if total == ZERO_DECIMAL:
+            return "N/A"
+        return f"~{round(total, 2)}"  # Prefix ~ to signal incomplete valuation
+    return str(round(total, 2))
+
+
+def _build_rotation_tree_snapshot(
+    tree: RotationTreeState | None,
+    *,
+    tree_value_usd: str = "0",
+) -> RotationTreeSnapshot:
     if tree is None:
         return RotationTreeSnapshot()
 
@@ -1408,6 +1471,8 @@ def _build_rotation_tree_snapshot(tree: RotationTreeState | None) -> RotationTre
         total_realized_pnl=str(total_realized_pnl),
         open_count=open_count,
         closed_count=closed_count,
+        rotation_tree_value_usd=tree_value_usd,
+        total_portfolio_value_usd=tree_value_usd,
     )
 
 

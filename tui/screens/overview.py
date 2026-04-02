@@ -83,7 +83,9 @@ class OverviewScreen(Screen):
             self.query_one("#ov-health", HealthWidget).refresh_content(
                 state.health, connected=state.connected,
             )
-            self.query_one("#ov-portfolio", PortfolioWidget).refresh_content(state.portfolio)
+            self.query_one("#ov-portfolio", PortfolioWidget).refresh_content(
+                state.portfolio, state.rotation_tree,
+            )
             self.query_one("#ov-positions", PositionsTable).refresh_content(state.positions)
             self.query_one("#ov-orders", OrdersTable).refresh_content(state.orders)
             self.query_one("#ov-beliefs", BeliefsTable).refresh_content(state.beliefs)
