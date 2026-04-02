@@ -145,6 +145,7 @@ def test_start_connects_websocket_subscribes_and_publishes_dashboard_state() -> 
         assert fake_websocket.connect_calls == 0
         assert published[0]["event"] == "dashboard.update"
         assert set(published[0]["data"]) == {
+            "health",
             "portfolio",
             "positions",
             "grid",
@@ -152,6 +153,7 @@ def test_start_connects_websocket_subscribes_and_publishes_dashboard_state() -> 
             "stats",
             "reconciliation",
             "rotation_tree",
+            "pending_orders",
         }
         await runtime.shutdown()
 

@@ -288,6 +288,8 @@ def parse_rotation_tree(data: dict[str, Any]) -> RotationTreeState:
 
 def merge_sse_update(state: CockpitState, data: dict[str, Any]) -> CockpitState:
     """Merge a ``dashboard.update`` SSE payload into the cockpit state."""
+    if "health" in data:
+        state.health = parse_health(data["health"])
     if "portfolio" in data:
         state.portfolio = parse_portfolio(data["portfolio"])
     if "positions" in data:
@@ -298,4 +300,6 @@ def merge_sse_update(state: CockpitState, data: dict[str, Any]) -> CockpitState:
         state.reconciliation = parse_reconciliation(data["reconciliation"])
     if "rotation_tree" in data:
         state.rotation_tree = parse_rotation_tree(data["rotation_tree"])
+    if "pending_orders" in data:
+        state.orders = parse_orders({"pending_orders": data["pending_orders"]})
     return state

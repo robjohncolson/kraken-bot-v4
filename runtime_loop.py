@@ -268,6 +268,7 @@ class SchedulerRuntime:
                 len(self._rotation_tree.root_node_ids),
             )
 
+        self._runtime_started_at = datetime.now(timezone.utc)
         self._sleep = sleep
         self._utc_now = utc_now or _utcnow
         self._sse_publisher = sse_publisher
@@ -1113,6 +1114,10 @@ class SchedulerRuntime:
         await self._sse_publisher(
             event="dashboard.update",
             data={
+                "health": {
+                    "uptime_seconds": int((datetime.now(timezone.utc) - self._runtime_started_at).total_seconds()),
+                    "version": "0.1.0",
+                },
                 "portfolio": jsonable_encoder(dashboard_state.portfolio),
                 "positions": {"positions": jsonable_encoder(dashboard_state.positions)},
                 "grid": jsonable_encoder(dashboard_state.grids),
@@ -1120,6 +1125,7 @@ class SchedulerRuntime:
                 "stats": jsonable_encoder(dashboard_state.stats),
                 "reconciliation": jsonable_encoder(dashboard_state.reconciliation),
                 "rotation_tree": jsonable_encoder(dashboard_state.rotation_tree),
+                "pending_orders": jsonable_encoder(dashboard_state.pending_orders),
             },
             event_id=f"dashboard-{self._dashboard_event_id}",
         )
@@ -1222,6 +1228,10 @@ class SchedulerRuntime:
             ),
             rotation_tree=_build_rotation_tree_snapshot(
                 self._rotation_tree, tree_value_usd=tree_value,
+            ),
+            pending_orders=tuple(
+                {"client_order_id": po.client_order_id, "pair": po.pair, "side": po.side.value if po.side else "", "kind": po.kind, "base_qty": str(po.base_qty), "rotation_node_id": po.rotation_node_id or ""}
+                for po in state.bot_state.pending_orders
             ),
         )
 

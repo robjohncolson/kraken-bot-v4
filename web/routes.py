@@ -124,6 +124,7 @@ class DashboardState:
     stats: StrategyStatsSnapshot = field(default_factory=StrategyStatsSnapshot)
     reconciliation: ReconciliationSnapshot = field(default_factory=ReconciliationSnapshot)
     rotation_tree: RotationTreeSnapshot = field(default_factory=RotationTreeSnapshot)
+    pending_orders: tuple = field(default_factory=tuple)
 
 
 class DashboardStateProvider(Protocol):
