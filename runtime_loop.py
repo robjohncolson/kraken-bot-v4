@@ -1396,7 +1396,7 @@ class SchedulerRuntime:
                 self._rotation_tree, tree_value_usd=tree_value,
             ),
             pending_orders=tuple(
-                {"client_order_id": po.client_order_id, "pair": po.pair, "side": po.side.value if po.side else "", "kind": po.kind, "base_qty": str(po.base_qty), "rotation_node_id": po.rotation_node_id or ""}
+                {"client_order_id": po.client_order_id, "pair": po.pair, "side": po.side.value if hasattr(po.side, "value") else str(po.side or ""), "kind": po.kind, "base_qty": str(po.base_qty), "rotation_node_id": po.rotation_node_id or ""}
                 for po in state.bot_state.pending_orders
             ),
         )
