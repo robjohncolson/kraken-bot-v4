@@ -41,13 +41,12 @@ class PortfolioWidget(Static):
         tbl.add_row("Cash USD", f"${p.cash_usd}")
         tbl.add_row("Cash DOGE", p.cash_doge)
 
-        if rt is not None and rt.rotation_tree_value_usd != "0":
-            # Show rotation value (may be "N/A", "~123.45", or "123.45")
+        if rt is not None:
             val = rt.rotation_tree_value_usd
-            display = val if val in ("N/A",) or val.startswith("~") else f"${val}"
+            display = val if val in ("N/A", "0") or val.startswith("~") else f"${val}"
             tbl.add_row("Rotation Value", display)
             tot = rt.total_portfolio_value_usd
-            tot_display = tot if tot in ("N/A",) or tot.startswith("~") else f"${tot}"
+            tot_display = tot if tot in ("N/A", "0") or tot.startswith("~") else f"${tot}"
             tbl.add_row("Total Value", tot_display)
         else:
             tbl.add_row("Total Value", f"${p.total_value_usd}")

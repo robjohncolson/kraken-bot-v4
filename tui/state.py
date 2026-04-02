@@ -281,8 +281,8 @@ def parse_rotation_tree(data: dict[str, Any]) -> RotationTreeState:
         total_realized_pnl=str(data.get("total_realized_pnl", "0")),
         open_count=int(data.get("open_count", 0)),
         closed_count=int(data.get("closed_count", 0)),
-        rotation_tree_value_usd=str(data.get("rotation_tree_value_usd", "0")),
-        total_portfolio_value_usd=str(data.get("total_portfolio_value_usd", "0")),
+        rotation_tree_value_usd=str(data.get("rotation_tree_value_usd") or "N/A"),
+        total_portfolio_value_usd=str(data.get("total_portfolio_value_usd") or "N/A"),
     )
 
 
