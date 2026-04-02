@@ -156,12 +156,24 @@ EXIT_LIMIT_OFFSET_PCT=0.1
 
 ## Goal for next session
 
-1. **Broker sidecar running**: `python3 scripts/llm_council_broker.py` (must use WSL python3, not Windows Python — needs tmux socket access)
-2. Check GBP rotation fills (SUI, WIF, XLM, KSM, SOL) and observe P&L in TUI (key 7)
-3. Observe expiry: when child deadlines hit, do exit orders fire correctly? Check closed_count in TUI footer.
-4. Verify council beliefs flow via broker; confirm fallback fires when panes offline
-5. Tune `MIN_BELIEF_CONFIDENCE` based on observed council/ensemble confidence values (default 0.5)
-6. Known trade-off: confidence gate updates belief_timestamp on drop so staleness detection works, but the old directional belief remains active until `BELIEF_STALE_HOURS` expires
+1. **Fetch Kraken minimum order sizes**: `ordermin` from AssetPairs API → cache in SQLite → enforce in planner to stop "volume minimum not met" errors wasting retries
+2. **Observe TP/SL exits**: watch for first take-profit (3%) and stop-loss (-2%) triggers in logs
+3. **Observe fill timeouts**: stale entries cancelled at 30min, stale exit limits escalated to MARKET at 5min
+4. **Monitor P&L**: check `/api/rotation-tree` for `total_realized_pnl` after first closed nodes with exit_reason="take_profit"
+5. **Broker sidecar**: must use `python3 scripts/llm_council_broker.py` (WSL python3, not Windows — needs tmux socket)
+6. **Tune parameters**: `ROTATION_TAKE_PROFIT_PCT`, `ROTATION_STOP_LOSS_PCT`, `MIN_BELIEF_CONFIDENCE` based on observed behavior
+7. **TUI known gaps**: beliefs panel empty (neutral signals don't display), uptime updates only on SSE (needs TUI restart to pick up), reconciliation shows foreign orders (Kraken-side state)
+
+## What shipped 2026-04-01 (13 commits)
+
+- LLM Council fallback chain + broker hardening (bulletproof pane health checks, retry, cleanup)
+- Rotation entry resilience (retry budget, rate limit decay, breaker bypass, 30min pair cooldown)
+- P&L tracking (entry_cost, fill_price, exit_price, exit_proceeds on nodes, SQLite persistence)
+- Confidence-weighted trading (MIN_BELIEF_CONFIDENCE=0.5 gate, staleness fix)
+- Portfolio total value (rotation tree root pricing in USD, TUI shows ~$440 not $79)
+- TUI polish (orders + health in SSE, P&L column on rotation tree, summary footer)
+- **Price-aware exits**: TP=3% (LIMIT), SL=-2% (MARKET), fill timeouts (30min entry, 5min exit→MARKET), volatility-based window estimation, fee-aware TP calculation, MARKET order support
+- Broker: WSL python3 for tmux access, single-line prompt delivery, sys.path fix
 
 ## Validation
 
