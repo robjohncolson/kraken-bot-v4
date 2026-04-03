@@ -803,19 +803,25 @@ class SchedulerRuntime:
                 self._state.kraken_state.balances, source_asset,
             )
             # Subtract already-committed pending rotation orders for same asset
+            # Include fee estimate so cumulative orders don't exceed actual available
+            fee_multiplier = Decimal("1") + Decimal(str(self._settings.kraken_taker_fee_pct / 100))
             committed = ZERO_DECIMAL
             for po in self._state.bot_state.pending_orders:
                 if not po.kind.startswith("rotation_"):
                     continue
                 po_source = _order_source_asset(po.pair, po.side)
                 if po_source == source_asset:
-                    committed += po.quote_qty if po.side == OrderSide.BUY else po.base_qty
+                    po_cost = po.quote_qty if po.side == OrderSide.BUY else po.base_qty
+                    committed += po_cost * fee_multiplier
             effective = available - committed
             order_cost = (base_qty * node.entry_price) if node.order_side == OrderSide.BUY else base_qty
-            if order_cost > effective:
+            # Add fee buffer: Kraken reserves fees on top of order notional
+            fee_buffer = order_cost * Decimal(str(self._settings.kraken_taker_fee_pct / 100))
+            order_cost_with_fees = order_cost + fee_buffer
+            if order_cost_with_fees > effective:
                 logger.info(
-                    "Pre-flight skip %s: cost=%s > effective=%s (avail=%s, committed=%s)",
-                    node.node_id, order_cost, effective, available, committed,
+                    "Pre-flight skip %s: cost=%s (incl fees) > effective=%s (avail=%s, committed=%s)",
+                    node.node_id, order_cost_with_fees, effective, available, committed,
                 )
                 self._rotation_tree = cancel_planned_node(self._rotation_tree, node.node_id)
                 continue
