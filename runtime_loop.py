@@ -258,6 +258,8 @@ class SchedulerRuntime:
         self._rotation_fill_queue: list[tuple[str, Decimal, Decimal, str]] = []
         self._rotation_entry_retry_counts: dict[str, int] = {}
         self._rotation_pair_cooldowns: dict[str, float] = {}  # pair → monotonic expiry
+        self._root_usd_prices: dict[str, Decimal] = {"USD": Decimal("1")}
+        self._root_usd_prices_at: float = 0.0  # monotonic timestamp
         # Load persisted cooldowns
         try:
             stored = self._reader.fetch_cooldowns()
@@ -1272,6 +1274,18 @@ class SchedulerRuntime:
         if self._rotation_tree is None or self._pair_scanner is None:
             return
 
+        # Refresh cached root USD prices (5-min TTL for P&L computation)
+        if _time.monotonic() - self._root_usd_prices_at > 300:
+            root_balances = {
+                n.asset: n.quantity_total
+                for n in self._rotation_tree.nodes
+                if n.depth == 0 and n.status == RotationNodeStatus.OPEN
+            }
+            self._root_usd_prices = _collect_root_prices(
+                self._state.current_prices, root_balances,
+            )
+            self._root_usd_prices_at = _time.monotonic()
+
         for node in self._rotation_tree.nodes:
             if node.depth != 0 or node.status != RotationNodeStatus.OPEN:
                 continue
@@ -1307,8 +1321,7 @@ class SchedulerRuntime:
 
             # Compute entry_cost for unrealized P&L tracking
             entry_cost = None
-            root_prices = _collect_root_prices(self._state.current_prices, {node.asset: node.quantity_total})
-            usd_price = root_prices.get(node.asset)
+            usd_price = self._root_usd_prices.get(node.asset)
             if usd_price and usd_price > ZERO_DECIMAL:
                 entry_cost = node.quantity_total * usd_price
 

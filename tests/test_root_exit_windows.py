@@ -321,3 +321,77 @@ class TestUnrealizedPnL:
         node_snap = snap.nodes[0]
         assert node_snap.realized_pnl is not None
         assert Decimal(node_snap.realized_pnl) == Decimal("0")
+
+    def test_fiat_inverse_pair_pnl(self):
+        """Fiat root priced via inverse pair (USD/EUR) shows correct P&L."""
+        from guardian import PriceSnapshot as PS
+        from runtime_loop import _build_rotation_tree_snapshot
+        root = _make_root("EUR", qty=Decimal("200"))
+        root = replace(root, entry_cost=Decimal("210"))
+        tree = _make_tree(root)
+        # USD/EUR = 0.90 → EUR price = 1/0.90 ≈ 1.1111
+        prices = {"USD/EUR": PS(price=Decimal("0.90"))}
+        snap = _build_rotation_tree_snapshot(tree, current_prices=prices)
+        node_snap = snap.nodes[0]
+        assert node_snap.realized_pnl is not None
+        pnl = Decimal(node_snap.realized_pnl)
+        # current_value = 200 * (1/0.90) ≈ 222.22, entry_cost = 210, P&L ≈ 12.22
+        expected = Decimal("200") * (Decimal("1") / Decimal("0.90")) - Decimal("210")
+        assert pnl == expected
+
+    def test_stablecoin_defaults_without_price_data(self):
+        """USDT/USDC roots use $1 default even without WebSocket prices."""
+        from runtime_loop import _build_rotation_tree_snapshot
+        root = _make_root("USDT", qty=Decimal("500"))
+        root = replace(root, entry_cost=Decimal("500"))
+        tree = _make_tree(root)
+        snap = _build_rotation_tree_snapshot(tree)  # no current_prices
+        node_snap = snap.nodes[0]
+        assert node_snap.realized_pnl is not None
+        assert Decimal(node_snap.realized_pnl) == Decimal("0")
+
+    def test_missing_asset_no_pnl(self):
+        """Asset with no price in map and no default shows no P&L."""
+        from runtime_loop import _build_rotation_tree_snapshot
+        root = _make_root("GBP", qty=Decimal("100"))
+        root = replace(root, entry_cost=Decimal("120"))
+        tree = _make_tree(root)
+        snap = _build_rotation_tree_snapshot(tree)  # no prices for GBP
+        node_snap = snap.nodes[0]
+        assert node_snap.realized_pnl is None
+
+
+# ---------------------------------------------------------------------------
+# Cached root USD prices tests
+# ---------------------------------------------------------------------------
+
+class TestCachedRootPrices:
+    def test_collect_root_prices_includes_stablecoins(self):
+        """_collect_root_prices always includes USD=1 default."""
+        from unittest.mock import patch
+        from runtime_loop import _collect_root_prices
+        with patch("exchange.ohlcv.fetch_ohlcv", side_effect=Exception("no network")):
+            prices = _collect_root_prices({}, {"USDT": Decimal("100")})
+        assert prices["USD"] == Decimal("1")
+
+    def test_collect_root_prices_websocket_hit(self):
+        """Known WebSocket price is used without REST fallback."""
+        from guardian import PriceSnapshot as PS
+        from unittest.mock import patch
+        from runtime_loop import _collect_root_prices
+        ws_prices = {"ADA/USD": PS(price=Decimal("0.45"))}
+        with patch("exchange.ohlcv.fetch_ohlcv") as mock_fetch:
+            prices = _collect_root_prices(ws_prices, {"ADA": Decimal("100")})
+        assert prices["ADA"] == Decimal("0.45")
+        mock_fetch.assert_not_called()
+
+    def test_collect_root_prices_rest_fallback(self):
+        """Missing asset triggers REST OHLCV fetch."""
+        import pandas as pd
+        from unittest.mock import patch
+        from runtime_loop import _collect_root_prices
+        bars = pd.DataFrame({"close": ["1.25"]})
+        with patch("exchange.ohlcv.fetch_ohlcv", return_value=bars):
+            prices = _collect_root_prices({}, {"EUR": Decimal("100")})
+        assert "EUR" in prices
+        assert prices["EUR"] == Decimal("1.25")
