@@ -1956,14 +1956,23 @@ def _build_rotation_tree_snapshot(
         return RotationTreeSnapshot()
 
     # Build prices map for unrealized P&L on roots
-    root_usd_prices: dict[str, Decimal] = {"USD": Decimal("1")}
+    root_usd_prices: dict[str, Decimal] = {
+        "USD": Decimal("1"),
+        "USDT": Decimal("1"),
+        "USDC": Decimal("1"),
+    }
     if current_prices and isinstance(current_prices, dict):
         for pair_key, snap in current_prices.items():
             if "/" in pair_key:
-                base = pair_key.split("/")[0]
+                base, quote = pair_key.split("/", 1)
                 price = snap.price if isinstance(snap, PriceSnapshot) else getattr(snap, "price", None)
                 if price and price > ZERO_DECIMAL:
-                    root_usd_prices[base] = price
+                    # BASE/USD → base price is the price directly
+                    if quote == "USD":
+                        root_usd_prices[base] = price
+                    # USD/QUOTE → quote price is 1/price (inverse pair)
+                    elif base == "USD" and quote not in root_usd_prices:
+                        root_usd_prices[quote] = Decimal("1") / price
 
     total_deployed = ZERO_DECIMAL
     total_realized_pnl = ZERO_DECIMAL
