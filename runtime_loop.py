@@ -803,8 +803,10 @@ class SchedulerRuntime:
                 self._state.kraken_state.balances, source_asset,
             )
             # Subtract already-committed pending rotation orders for same asset
-            # Include fee estimate so cumulative orders don't exceed actual available
-            fee_multiplier = Decimal("1") + Decimal(str(self._settings.kraken_taker_fee_pct / 100))
+            # Use 2% safety margin (not just fee%) to cover Kraken's hold rounding,
+            # fee reserves, and balance staleness between reconciles
+            _HOLD_SAFETY_PCT = Decimal("0.02")
+            safety_multiplier = Decimal("1") + _HOLD_SAFETY_PCT
             committed = ZERO_DECIMAL
             for po in self._state.bot_state.pending_orders:
                 if not po.kind.startswith("rotation_"):
@@ -812,16 +814,14 @@ class SchedulerRuntime:
                 po_source = _order_source_asset(po.pair, po.side)
                 if po_source == source_asset:
                     po_cost = po.quote_qty if po.side == OrderSide.BUY else po.base_qty
-                    committed += po_cost * fee_multiplier
+                    committed += po_cost * safety_multiplier
             effective = available - committed
             order_cost = (base_qty * node.entry_price) if node.order_side == OrderSide.BUY else base_qty
-            # Add fee buffer: Kraken reserves fees on top of order notional
-            fee_buffer = order_cost * Decimal(str(self._settings.kraken_taker_fee_pct / 100))
-            order_cost_with_fees = order_cost + fee_buffer
-            if order_cost_with_fees > effective:
+            order_cost_with_safety = order_cost * safety_multiplier
+            if order_cost_with_safety > effective:
                 logger.info(
-                    "Pre-flight skip %s: cost=%s (incl fees) > effective=%s (avail=%s, committed=%s)",
-                    node.node_id, order_cost_with_fees, effective, available, committed,
+                    "Pre-flight skip %s: cost=%s (incl 2%% safety) > effective=%s (avail=%s, committed=%s)",
+                    node.node_id, order_cost_with_safety, effective, available, committed,
                 )
                 self._rotation_tree = cancel_planned_node(self._rotation_tree, node.node_id)
                 continue
