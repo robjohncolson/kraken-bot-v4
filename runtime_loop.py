@@ -60,7 +60,7 @@ from scheduler import (
     SchedulerState,
 )
 from trading.conditional_tree import ConditionalTreeCoordinator, ConditionalTreeState
-from trading.pair_scanner import PairScanner
+from trading.pair_scanner import PREFERRED_QUOTES, QUOTE_ASSETS, PairScanner, evaluate_root_ta
 from trading.rotation_planner import RotationTreePlanner
 from trading.rotation_tree import (
     cancel_planned_node,
@@ -258,8 +258,21 @@ class SchedulerRuntime:
         self._rotation_fill_queue: list[tuple[str, Decimal, Decimal, str]] = []
         self._rotation_entry_retry_counts: dict[str, int] = {}
         self._rotation_pair_cooldowns: dict[str, float] = {}  # pair → monotonic expiry
+        # Load persisted cooldowns
+        try:
+            stored = self._reader.fetch_cooldowns()
+            now_utc = datetime.now(timezone.utc)
+            mono_now = _time.monotonic()
+            for pair, until_str in stored:
+                remaining = (datetime.fromisoformat(until_str) - now_utc).total_seconds()
+                if remaining > 0:
+                    self._rotation_pair_cooldowns[pair] = mono_now + remaining
+        except Exception:
+            logger.debug("Failed to load persisted cooldowns")
+        self._pair_scanner: PairScanner | None = None
         if settings.enable_rotation_tree:
             scanner = PairScanner(client=executor._client, settings=settings)
+            self._pair_scanner = scanner
             self._rotation_planner = RotationTreePlanner(
                 settings=settings, pair_scanner=scanner,
                 pair_metadata=self._pair_metadata,
@@ -729,6 +742,9 @@ class SchedulerRuntime:
         # 1. Handle expired nodes with real exchange orders
         await self._handle_rotation_expiry(now)
 
+        # 1b. Evaluate/set deadlines on root nodes
+        await self._evaluate_root_deadlines(now)
+
         # 2. Settle any queued rotation fills
         await self._settle_rotation_fills(now)
 
@@ -774,16 +790,22 @@ class SchedulerRuntime:
             if po.rotation_node_id
         }
 
-        for node in tree.nodes:
-            if node.status != RotationNodeStatus.PLANNED:
-                continue
-            if node.depth == 0:  # roots are not traded
-                continue
-            if node.node_id in pending_node_ids:
-                continue
-            if not node.entry_pair or node.order_side is None or not node.entry_price:
-                continue
+        # One-order-per-cycle: sort PLANNED children by confidence desc
+        # (tiebreak by node_id for determinism), then return after first success.
+        planned_children = sorted(
+            (
+                n for n in tree.nodes
+                if n.status == RotationNodeStatus.PLANNED
+                and n.depth > 0
+                and n.node_id not in pending_node_ids
+                and n.entry_pair
+                and n.order_side is not None
+                and n.entry_price
+            ),
+            key=lambda n: (-n.confidence, n.node_id),
+        )
 
+        for node in planned_children:
             # Skip pairs in cooldown (recently cancelled — prevents re-plan churn)
             cooldown_expiry = self._rotation_pair_cooldowns.get(node.entry_pair)
             if cooldown_expiry is not None and _time.monotonic() < cooldown_expiry:
@@ -861,6 +883,11 @@ class SchedulerRuntime:
                 self._rotation_entry_retry_counts.pop(node.node_id, None)
                 # Cooldown this pair to prevent re-plan churn
                 self._rotation_pair_cooldowns[node.entry_pair] = _time.monotonic() + ROTATION_PAIR_COOLDOWN_SEC
+                try:
+                    abs_until = datetime.now(timezone.utc) + timedelta(seconds=ROTATION_PAIR_COOLDOWN_SEC)
+                    self._writer.set_cooldown(node.entry_pair, abs_until.isoformat())
+                except Exception:
+                    logger.debug("Failed to persist cooldown for %s", node.entry_pair)
                 continue
             except SafeModeBlockedError as exc:
                 # Safe mode: skip without retry count (intentional block, not error)
@@ -878,6 +905,11 @@ class SchedulerRuntime:
                     self._rotation_tree = cancel_planned_node(self._rotation_tree, node.node_id)
                     self._rotation_entry_retry_counts.pop(node.node_id, None)
                     self._rotation_pair_cooldowns[node.entry_pair] = _time.monotonic() + ROTATION_PAIR_COOLDOWN_SEC
+                    try:
+                        abs_until = datetime.now(timezone.utc) + timedelta(seconds=ROTATION_PAIR_COOLDOWN_SEC)
+                        self._writer.set_cooldown(node.entry_pair, abs_until.isoformat())
+                    except Exception:
+                        logger.debug("Failed to persist cooldown for %s", node.entry_pair)
                 else:
                     logger.warning(
                         "Rotation entry blocked for %s (retry %d/%d): %s",
@@ -914,6 +946,8 @@ class SchedulerRuntime:
                 node.order_side.value, node.entry_pair, base_qty,
                 node.entry_price, node.node_id, order_id,
             )
+            # One order per cycle — stop after first successful placement
+            return
 
     async def _settle_rotation_fills(self, now: datetime) -> None:
         """Apply queued rotation fills to the tree."""
@@ -1163,6 +1197,11 @@ class SchedulerRuntime:
                         )
                     self._rotation_tree = cancel_planned_node(self._rotation_tree, node.node_id)
                     self._rotation_pair_cooldowns[node.entry_pair] = _time.monotonic() + ROTATION_PAIR_COOLDOWN_SEC
+                    try:
+                        abs_until = datetime.now(timezone.utc) + timedelta(seconds=ROTATION_PAIR_COOLDOWN_SEC)
+                        self._writer.set_cooldown(node.entry_pair, abs_until.isoformat())
+                    except Exception:
+                        logger.debug("Failed to persist cooldown for %s", node.entry_pair)
 
             # Stale exit: escalate to MARKET
             elif po.kind == "rotation_exit" and age >= timeout_exit:
@@ -1194,6 +1233,175 @@ class SchedulerRuntime:
                     )
                 await self._close_rotation_node(node, order_type=OrderType.MARKET)
 
+    def _find_root_exit_pair(self, asset: str) -> tuple[str, OrderSide] | None:
+        """Find the best quote-currency pair for a root asset exit.
+
+        Returns (pair, entry_side) where entry_side is the SIMULATED entry side
+        (i.e., how we would have entered this position).  _close_rotation_node
+        reverses the entry side to get the actual exit order side.
+
+        For asset=ADA, pair=ADA/USD → entry_side=BUY (we "bought" ADA),
+        so _close_rotation_node exits with SELL.
+        """
+        if self._pair_scanner is None:
+            return None
+        try:
+            asset_pairs = self._pair_scanner.discover_asset_pairs(asset)
+        except Exception:
+            return None
+
+        # Try preferred quotes in order: USD > USDT > USDC > EUR
+        for preferred in PREFERRED_QUOTES:
+            for pair, base, quote in asset_pairs:
+                if base == asset and quote == preferred:
+                    # Asset is base → we "entered" by BUYing base
+                    return pair, OrderSide.BUY
+                if quote == asset and base == preferred:
+                    # Asset is quote → we "entered" by SELLing base
+                    return pair, OrderSide.SELL
+        # Fallback: any quote currency
+        for pair, base, quote in asset_pairs:
+            if base == asset and quote in QUOTE_ASSETS:
+                return pair, OrderSide.BUY
+            if quote == asset and base in QUOTE_ASSETS:
+                return pair, OrderSide.SELL
+        return None
+
+    async def _evaluate_root_deadlines(self, now: datetime) -> None:
+        """Set or refresh deadlines on root nodes that need evaluation."""
+        if self._rotation_tree is None or self._pair_scanner is None:
+            return
+
+        for node in self._rotation_tree.nodes:
+            if node.depth != 0 or node.status != RotationNodeStatus.OPEN:
+                continue
+            # Skip quote-currency roots — they ARE the destination
+            if node.asset in QUOTE_ASSETS:
+                continue
+            # Skip roots that already have a deadline (will be handled by expiry)
+            if node.deadline_at is not None:
+                continue
+            # Skip roots already in CLOSING state
+            if node.status == RotationNodeStatus.CLOSING:
+                continue
+
+            pair_info = self._find_root_exit_pair(node.asset)
+            if pair_info is None:
+                logger.debug("No exit pair found for root %s", node.asset)
+                continue
+
+            pair, _ = pair_info
+            try:
+                bars = self._pair_scanner._ohlcv_fetcher(
+                    pair,
+                    interval=60,
+                    count=50,
+                    timeout=self._settings.scanner_timeout_sec,
+                )
+            except Exception:
+                logger.debug("OHLCV fetch failed for root eval %s", pair)
+                continue
+
+            if len(bars) < 26:  # Need enough bars for TA
+                continue
+
+            try:
+                direction, window_hours = evaluate_root_ta(bars)
+            except Exception:
+                logger.debug("TA eval failed for root %s", node.asset)
+                continue
+
+            deadline = now + timedelta(hours=window_hours)
+            self._rotation_tree = update_node(
+                self._rotation_tree, node.node_id,
+                deadline_at=deadline,
+                window_hours=window_hours,
+                entry_pair=pair,
+            )
+            logger.info(
+                "Root %s deadline set: %s (%.1fh, TA=%s)",
+                node.node_id, deadline.isoformat(), window_hours, direction,
+            )
+
+    async def _handle_root_expiry(self, node, now: datetime) -> None:
+        """Re-evaluate an expired root node: sell if bearish/neutral, extend if bullish."""
+        pair_info = self._find_root_exit_pair(node.asset)
+        if pair_info is None:
+            # No exit pair — just clear deadline so it gets re-evaluated next cycle
+            self._rotation_tree = update_node(
+                self._rotation_tree, node.node_id, deadline_at=None,
+            )
+            return
+
+        pair, entry_side = pair_info  # simulated entry side — _close_rotation_node reverses it
+        try:
+            bars = self._pair_scanner._ohlcv_fetcher(
+                pair, interval=60, count=50,
+                timeout=self._settings.scanner_timeout_sec,
+            )
+        except Exception:
+            # Can't evaluate — extend by default (don't sell blind)
+            self._rotation_tree = update_node(
+                self._rotation_tree, node.node_id, deadline_at=None,
+            )
+            return
+
+        if len(bars) < 26:
+            self._rotation_tree = update_node(
+                self._rotation_tree, node.node_id, deadline_at=None,
+            )
+            return
+
+        try:
+            direction, window_hours = evaluate_root_ta(bars)
+        except Exception:
+            self._rotation_tree = update_node(
+                self._rotation_tree, node.node_id, deadline_at=None,
+            )
+            return
+
+        if direction == "bullish":
+            # Still bullish — extend deadline
+            new_deadline = now + timedelta(hours=window_hours)
+            self._rotation_tree = update_node(
+                self._rotation_tree, node.node_id,
+                deadline_at=new_deadline,
+                window_hours=window_hours,
+            )
+            logger.info(
+                "Root %s still bullish — extended deadline to %s (%.1fh)",
+                node.node_id, new_deadline.isoformat(), window_hours,
+            )
+            self._rotation_events.append(RotationEvent(
+                timestamp=now, node_id=node.node_id,
+                event_type="root_extended",
+                pair=pair, details={"direction": direction, "window_hours": str(window_hours)},
+            ))
+            return
+
+        # Bearish or neutral — sell the root
+        logger.info(
+            "Root %s is %s — initiating exit via %s",
+            node.node_id, direction, pair,
+        )
+        self._rotation_events.append(RotationEvent(
+            timestamp=now, node_id=node.node_id,
+            event_type="root_exit",
+            pair=pair, details={"direction": direction},
+        ))
+
+        # Set entry_pair and order_side on the root so _close_rotation_node can use them
+        self._rotation_tree = update_node(
+            self._rotation_tree, node.node_id,
+            entry_pair=pair,
+            order_side=entry_side,
+            exit_reason="root_exit_" + direction,
+        )
+        # Refresh the node reference after update
+        updated_node = node_by_id(self._rotation_tree, node.node_id)
+        if updated_node is not None:
+            await self._close_rotation_node(updated_node, reason="root_exit", now=now)
+
     async def _handle_rotation_expiry(self, now: datetime) -> None:
         """Handle expired rotation nodes with real exchange effects."""
         if self._rotation_tree is None:
@@ -1212,8 +1420,11 @@ class SchedulerRuntime:
                 node.node_id, node.asset, node.depth, node.status,
             )
 
-            if node.status == RotationNodeStatus.OPEN and node.depth > 0:
-                # OPEN node with holdings — place exit order
+            if node.depth == 0 and node.status == RotationNodeStatus.OPEN:
+                # Root node expired — re-evaluate TA before deciding
+                await self._handle_root_expiry(node, now)
+            elif node.status == RotationNodeStatus.OPEN and node.depth > 0:
+                # OPEN child node with holdings — place exit order
                 self._rotation_tree = update_node(
                     self._rotation_tree, node.node_id, exit_reason="timer",
                 )
@@ -1222,7 +1433,7 @@ class SchedulerRuntime:
                 # PLANNED but not yet filled — cancel pending order, return reserved
                 await self._cancel_rotation_entry(node)
             else:
-                # Root or already closing — just mark expired
+                # Already closing — just mark expired
                 self._rotation_tree = cascade_close(
                     self._rotation_tree, node.node_id,
                     status=RotationNodeStatus.EXPIRED,

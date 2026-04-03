@@ -24,7 +24,7 @@ Bot running on WSL `work:2.3` pane with **rotation tree LIVE**:
 | ALLOWED_PAIRS | Empty (all pairs enabled for rotation) |
 | Scanner timeout | 45s (`SCANNER_TIMEOUT_SEC=45`) |
 | Dashboard | `http://10.0.0.24:58392` |
-| Tests | 560 passing |
+| Tests | 590 passing |
 | Belief confidence gate | `MIN_BELIEF_CONFIDENCE=0.5` — beliefs below threshold shown dimmed in TUI |
 | Price-aware exits | TP=3%, SL=-2%, dynamic entry timeout (25% of window, 30-120min), exit timeout=5min→MARKET |
 | Ordermin enforcement | Dynamic from Kraken AssetPairs API, cached 24h in SQLite |
@@ -33,6 +33,10 @@ Bot running on WSL `work:2.3` pane with **rotation tree LIVE**:
 | Pre-flight balance check | 2% safety margin, verifies exchange balance before placing rotation entries |
 | Rotation events | TP/SL/timeout/fill events in SSE + TUI rotation tree footer |
 | Settings validation | Startup warns on out-of-range TP/SL/confidence/timeout values |
+| Root exit windows | Roots get TA-evaluated deadlines; on expiry: re-evaluate → sell if bearish/neutral, extend if bullish |
+| One order per cycle | PLANNED nodes sorted by confidence, only one entry placed per 30s cycle |
+| Pair cooldown persistence | Rotation pair cooldowns survive restart (SQLite-backed) |
+| TUI cancelled node pruning | Cancelled nodes hidden from TUI rotation tree view |
 
 ### Portfolio (actual Kraken balances as of 2026-04-03)
 
@@ -94,7 +98,7 @@ Previous sessions successfully traded: USD→BABY/BSU/CFG, ADA→AUD, PEPE→CAD
 
 **Architecture**: Rotation tree is a shadow ledger. Orders placed directly via executor. Fill settlement updates tree. Pre-flight verifies exchange balance (2% safety margin) before each order.
 
-**Known limitation**: Root nodes have NO deadlines — they are permanent portfolio anchors. Child nodes get deadlines from scanner's estimated window. This means orphaned assets (from missed fill tracking) become permanent roots with no exit plan.
+**Root exit windows**: Roots now get TA-evaluated deadlines (EMA/RSI/MACD, clamped 2-48h). On expiry, re-evaluate: sell if bearish/neutral, extend if bullish. Quote-currency roots (USD, USDT, etc.) are skipped. Orphaned assets are no longer permanent — they get evaluated and consolidated.
 
 ## Key infrastructure
 
@@ -102,12 +106,16 @@ Previous sessions successfully traded: USD→BABY/BSU/CFG, ADA→AUD, PEPE→CAD
 |---------|--------|
 | Position persistence | Done — survives restart via SQLite |
 | Rotation tree | **LIVE** — scanning, ordering, settling across all Kraken pairs |
+| Root exit windows | **LIVE** — TA-evaluated deadlines, re-evaluate on expiry |
+| One order per cycle | **LIVE** — confidence-sorted, one entry per 30s cycle |
+| Pair cooldown persistence | **LIVE** — SQLite-backed, survives restart |
 | Anti-churn | Max 3 children, top-3 by score, per-child budget gate |
 | Ordermin enforcement | Dynamic from Kraken API, cached in SQLite |
 | OHLCV cache | 5-min TTL dedup across roots |
 | Pre-flight balance | 2% safety margin, committed order tracking |
-| Rotation events | Structured TP/SL/timeout/fill events in SSE + TUI |
+| Rotation events | Structured TP/SL/timeout/fill/root_exit/root_extended events in SSE + TUI |
 | Beliefs display | All beliefs shown (filtered dimmed) |
+| TUI cancelled pruning | Cancelled nodes hidden from rotation tree view |
 | Settings validation | Startup warnings for out-of-range params |
 | Conditional tree (v1) | Built, disabled by default |
 
@@ -147,45 +155,40 @@ ROTATION_MAX_CHILDREN_PER_PARENT=3
 
 ## Goal for next session
 
-### Priority 1: Root Exit Windows (Decision: Option B)
+### Priority 1: Observe Root Exit Windows in Production
 
-Root nodes currently have no deadlines — they hold forever. This must change. The design:
+Root exit windows are now live. Monitor:
+- Are roots getting reasonable deadlines (2-48h range)?
+- Do bearish/neutral roots actually sell? Check rotation events for `root_exit` type
+- Do bullish roots properly extend? Check for `root_extended` events
+- Does the portfolio consolidation work (small bearish holdings → USD)?
 
-1. **On startup and every plan_cycle**: run TA on each root asset (against its best quote pair)
-2. **Estimate window**: `hours_to_tp = tp_pct / hourly_volatility` (same formula used for child windows, clamped 2-48h)
-3. **Set deadline on root**: `root.deadline_at = now + timedelta(hours=hours_to_tp)`
-4. **On deadline expiry: RE-EVALUATE, not hard sell**:
-   - Re-run TA on the root asset
-   - If BEARISH or NEUTRAL → sell to USD (or best available quote currency)
-   - If still BULLISH → extend deadline with new estimate
-5. **Root exit mechanics**: same as child exit — place LIMIT sell order, escalate to MARKET after 5min timeout
-6. **Proceeds**: root sells → USD/quote received → new root node created for the proceeds
-7. **Key constraint**: this turns all holdings into actively-managed positions. No permanent "buy and hold."
+### Priority 2: Root Exit Settlement
 
-This solves:
-- Orphaned assets from missed fills sitting as permanent roots
-- Portfolio fragmentation — bearish small holdings get consolidated back to USD
-- The "no exits ever" problem — roots currently never sell
+When a root exits (sells to USD), the proceeds should create a new root node. Verify this happens correctly via fill settlement. The `_settle_rotation_fills` path may need adjustment since root nodes don't have the typical parent-child fill settlement flow.
 
-### Priority 2: One Order Per Cycle
+### Priority 3: Dashboard Rotation Tree Enhancements
 
-Currently places up to 3 orders simultaneously against stale balance data. Change to place **one rotation entry per 30-second cycle**. Each order settles on Kraken between cycles, so the next pre-flight sees accurate balances. Simpler and eliminates the stale-balance edge case entirely.
-
-### Priority 3: Persist Pair Cooldowns
-
-`_rotation_pair_cooldowns` is in-memory dict, lost on restart. Persist to SQLite `cooldowns` table (already exists). Load on startup. Prevents retrying same failing pairs immediately after restart.
-
-### Priority 4: Prune Cancelled Nodes from TUI
-
-Cancelled nodes accumulate in the tree forever. Either:
-- Don't display CANCELLED nodes in TUI (filter in widget)
-- Prune CANCELLED nodes from tree state after 1 hour
+The `/api/rotation-tree` endpoint could show:
+- Root deadline status (time remaining)
+- Root TA direction (bullish/bearish/neutral)
+- Root exit events in the event stream
 
 ### Lessons learned 2026-04-02/03
 
 - **Nonce safety**: NEVER use a separate script to call authenticated Kraken API while the bot is running. Nonce conflict breaks all subsequent API calls. Cancel orders through the bot's own interface.
 - **Shadow ledger divergence**: The rotation tree's `quantity_free` can diverge from actual Kraken balances. Pre-flight check is essential but only as good as the balance staleness allows. One-order-per-cycle is the real fix.
 - **Portfolio fragmentation**: Rotation tree creates many small positions. Without root exit windows, these accumulate and become individually untradeable.
+- **Root exit pair matching**: `_close_rotation_node` expects `order_side` to be the *entry* side (reverses it for exit). Root exits must simulate entry side, not set the desired exit side directly.
+
+## What shipped 2026-04-03 (spec-and-ship)
+
+- **Root exit windows**: Roots get TA-evaluated deadlines (EMA/RSI/MACD, 2-48h). On expiry: re-evaluate → sell if bearish/neutral, extend if bullish. Quote-currency roots skipped. `evaluate_root_ta()` in pair_scanner, `_evaluate_root_deadlines()` + `_handle_root_expiry()` in runtime_loop
+- **One order per cycle**: PLANNED nodes sorted by confidence desc, early return after first successful placement. Eliminates stale-balance edge case
+- **Pair cooldown persistence**: Rotation pair cooldowns written to SQLite `cooldowns` table on set, loaded on startup. Survives restart
+- **TUI cancelled node pruning**: Cancelled nodes filtered from DFS traversal in rotation tree widget
+- 30 new tests (19 root exit, 4 one-order, 4 cooldowns, 3 TUI pruning)
+- Specs in `tasks/specs/`: `root-exit-windows.md`, `one-order-per-cycle.md`, `persist-pair-cooldowns.md`, `prune-cancelled-nodes.md`
 
 ## What shipped 2026-04-02/03 (6 commits)
 
@@ -213,7 +216,7 @@ Cancelled nodes accumulate in the tree forever. Either:
 ## Validation
 
 ```bash
-python -m pytest                    # 560 tests
+python -m pytest                    # 590 tests
 python -m ruff check .              # clean
 curl http://127.0.0.1:58392/api/health         # dashboard up
 curl http://127.0.0.1:58392/api/rotation-tree  # rotation tree state

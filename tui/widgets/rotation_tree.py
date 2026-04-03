@@ -68,6 +68,8 @@ class RotationTreeTable(DataTable):
         stack: list[RotationNodeRow] = list(reversed(roots))
         while stack:
             node = stack.pop()
+            if node.status == "cancelled":
+                continue
             pnl_display = "\u2014"
             if node.realized_pnl:
                 try:

@@ -512,8 +512,53 @@ def _histogram_is_getting_more_positive(histogram: pd.Series) -> bool:
     return bool(histogram.iloc[-1] > histogram.iloc[-2] > 0.0)
 
 
+def evaluate_root_ta(
+    bars: pd.DataFrame,
+) -> tuple[str, float]:
+    """Evaluate TA on OHLCV bars and return (direction, window_hours).
+
+    direction: "bullish", "bearish", or "neutral"
+    window_hours: estimated hours to TP, clamped [2, 48]
+
+    Uses the same EMA/RSI/MACD signals as the rotation scanner.
+    """
+    close = _coerce_close_series(bars)
+    ema_fast = close.ewm(span=EMA_FAST_SPAN, adjust=False).mean()
+    ema_slow = close.ewm(span=EMA_SLOW_SPAN, adjust=False).mean()
+    ema_bullish = bool(ema_fast.iloc[-1] > ema_slow.iloc[-1])
+
+    rsi = _compute_rsi(close)
+    rsi_bullish = bool(rsi > RSI_BULLISH_THRESHOLD)
+
+    histogram = _compute_macd_histogram(close)
+    macd_bullish = bool(histogram.iloc[-1] > 0.0)
+
+    bullish_count = sum((ema_bullish, rsi_bullish, macd_bullish))
+    if bullish_count >= 2:
+        direction = "bullish"
+    elif bullish_count == 0:
+        direction = "bearish"
+    else:
+        direction = "neutral"
+
+    window_hours = _estimate_rotation_window_hours(bars, take_profit_pct=3.0)
+    return direction, window_hours
+
+
+# Assets that ARE quote currencies — never set exit windows on these
+QUOTE_ASSETS: frozenset[str] = frozenset({
+    "USD", "USDT", "USDC", "EUR", "GBP", "CAD", "AUD", "JPY", "CHF",
+})
+
+# Preferred quote currencies for root exit (best first)
+PREFERRED_QUOTES: tuple[str, ...] = ("USD", "USDT", "USDC", "EUR")
+
+
 __all__ = [
     "AssetPairDiscoveryError",
     "PairScanner",
     "PairScannerError",
+    "PREFERRED_QUOTES",
+    "QUOTE_ASSETS",
+    "evaluate_root_ta",
 ]
