@@ -24,7 +24,7 @@ Bot running on WSL `work:2.3` pane with **rotation tree LIVE**:
 | ALLOWED_PAIRS | Empty (all pairs enabled for rotation) |
 | Scanner timeout | 45s (`SCANNER_TIMEOUT_SEC=45`) |
 | Dashboard | `http://10.0.0.24:58392` |
-| Tests | 590 passing |
+| Tests | 597 passing |
 | Belief confidence gate | `MIN_BELIEF_CONFIDENCE=0.5` — beliefs below threshold shown dimmed in TUI |
 | Price-aware exits | TP=3%, SL=-2%, dynamic entry timeout (25% of window, 30-120min), exit timeout=5min→MARKET |
 | Ordermin enforcement | Dynamic from Kraken AssetPairs API, cached 24h in SQLite |
@@ -33,7 +33,7 @@ Bot running on WSL `work:2.3` pane with **rotation tree LIVE**:
 | Pre-flight balance check | 2% safety margin, verifies exchange balance before placing rotation entries |
 | Rotation events | TP/SL/timeout/fill events in SSE + TUI rotation tree footer |
 | Settings validation | Startup warns on out-of-range TP/SL/confidence/timeout values |
-| Root exit windows | Roots get TA-evaluated deadlines; on expiry: re-evaluate → sell if bearish/neutral, extend if bullish |
+| Root exit windows | ALL roots get TA-evaluated deadlines (no currency special-casing); shows confidence + side + unrealized P&L |
 | One order per cycle | PLANNED nodes sorted by confidence, only one entry placed per 30s cycle |
 | Pair cooldown persistence | Rotation pair cooldowns survive restart (SQLite-backed) |
 | TUI cancelled node pruning | Cancelled nodes hidden from TUI rotation tree view |
@@ -183,12 +183,16 @@ The `/api/rotation-tree` endpoint could show:
 
 ## What shipped 2026-04-03 (spec-and-ship)
 
-- **Root exit windows**: Roots get TA-evaluated deadlines (EMA/RSI/MACD, 2-48h). On expiry: re-evaluate → sell if bearish/neutral, extend if bullish. Quote-currency roots skipped. `evaluate_root_ta()` in pair_scanner, `_evaluate_root_deadlines()` + `_handle_root_expiry()` in runtime_loop
+- **Root exit windows**: Roots get TA-evaluated deadlines (EMA/RSI/MACD, 2-48h). On expiry: re-evaluate → sell if bearish/neutral, extend if bullish. `evaluate_root_ta()` in pair_scanner, `_evaluate_root_deadlines()` + `_handle_root_expiry()` in runtime_loop
+- **No currency special-casing**: Removed QUOTE_ASSETS skip — all roots (including USD, EUR, USDT) get TA evaluation and deadlines
+- **Root confidence + side**: `evaluate_root_ta()` returns 3-tuple with confidence (signal agreement). Roots display side and confidence in TUI
+- **Eastern time deadlines**: TUI shows deadlines in `MM/DD HH:MM ET` format via `zoneinfo`
+- **Unrealized P&L on roots**: `entry_cost` set at first evaluation, unrealized P&L computed as `current_value - entry_cost` in snapshot
 - **One order per cycle**: PLANNED nodes sorted by confidence desc, early return after first successful placement. Eliminates stale-balance edge case
 - **Pair cooldown persistence**: Rotation pair cooldowns written to SQLite `cooldowns` table on set, loaded on startup. Survives restart
 - **TUI cancelled node pruning**: Cancelled nodes filtered from DFS traversal in rotation tree widget
-- 30 new tests (19 root exit, 4 one-order, 4 cooldowns, 3 TUI pruning)
-- Specs in `tasks/specs/`: `root-exit-windows.md`, `one-order-per-cycle.md`, `persist-pair-cooldowns.md`, `prune-cancelled-nodes.md`
+- 37 new tests total
+- Specs in `tasks/specs/`
 
 ## What shipped 2026-04-02/03 (6 commits)
 
@@ -216,7 +220,7 @@ The `/api/rotation-tree` endpoint could show:
 ## Validation
 
 ```bash
-python -m pytest                    # 590 tests
+python -m pytest                    # 597 tests
 python -m ruff check .              # clean
 curl http://127.0.0.1:58392/api/health         # dashboard up
 curl http://127.0.0.1:58392/api/rotation-tree  # rotation tree state

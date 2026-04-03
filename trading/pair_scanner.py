@@ -514,11 +514,12 @@ def _histogram_is_getting_more_positive(histogram: pd.Series) -> bool:
 
 def evaluate_root_ta(
     bars: pd.DataFrame,
-) -> tuple[str, float]:
-    """Evaluate TA on OHLCV bars and return (direction, window_hours).
+) -> tuple[str, float, float]:
+    """Evaluate TA on OHLCV bars and return (direction, window_hours, confidence).
 
     direction: "bullish", "bearish", or "neutral"
     window_hours: estimated hours to TP, clamped [2, 48]
+    confidence: signal agreement strength (0.0 to 1.0)
 
     Uses the same EMA/RSI/MACD signals as the rotation scanner.
     """
@@ -536,13 +537,16 @@ def evaluate_root_ta(
     bullish_count = sum((ema_bullish, rsi_bullish, macd_bullish))
     if bullish_count >= 2:
         direction = "bullish"
+        confidence = bullish_count / 3.0
     elif bullish_count == 0:
         direction = "bearish"
+        confidence = 1.0  # all 3 signals agree on bearish
     else:
         direction = "neutral"
+        confidence = 1.0 / 3.0  # only 1 signal, ambiguous
 
     window_hours = _estimate_rotation_window_hours(bars, take_profit_pct=3.0)
-    return direction, window_hours
+    return direction, window_hours, confidence
 
 
 # Assets that ARE quote currencies — never set exit windows on these

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import numpy as np
@@ -56,27 +57,37 @@ def _flat_bars(n: int = 50, price: float = 100.0) -> pd.DataFrame:
 class TestEvaluateRootTa:
     def test_bullish_trend_returns_bullish(self):
         bars = _trending_up_bars()
-        direction, window = evaluate_root_ta(bars)
+        direction, window, confidence = evaluate_root_ta(bars)
         assert direction == "bullish"
         assert 2.0 <= window <= 48.0
+        assert 0.0 < confidence <= 1.0
 
     def test_bearish_trend_returns_bearish(self):
         bars = _trending_down_bars()
-        direction, window = evaluate_root_ta(bars)
+        direction, window, confidence = evaluate_root_ta(bars)
         assert direction == "bearish"
         assert 2.0 <= window <= 48.0
+        assert confidence == 1.0  # all 3 signals agree
 
     def test_window_clamped_within_range(self):
         bars = _trending_up_bars()
-        _, window = evaluate_root_ta(bars)
+        _, window, _ = evaluate_root_ta(bars)
         assert 2.0 <= window <= 48.0
 
-    def test_returns_tuple_of_two(self):
+    def test_returns_tuple_of_three(self):
         bars = _trending_up_bars()
         result = evaluate_root_ta(bars)
-        assert len(result) == 2
+        assert len(result) == 3
         assert result[0] in ("bullish", "bearish", "neutral")
         assert isinstance(result[1], float)
+        assert isinstance(result[2], float)
+
+    def test_bullish_confidence_is_signal_agreement(self):
+        bars = _trending_up_bars()
+        direction, _, confidence = evaluate_root_ta(bars)
+        assert direction == "bullish"
+        # 2 or 3 signals agree → confidence is 2/3 or 3/3
+        assert confidence in (2.0 / 3.0, 1.0)
 
     def test_insufficient_bars_raises(self):
         bars = _make_bars([100.0] * 10)  # Too few for EMA slow span (26)
@@ -132,12 +143,12 @@ def _make_tree(*nodes: RotationNode) -> RotationTreeState:
 
 
 class TestFindRootExitPair:
-    """Test _find_root_exit_pair logic via a mock RuntimeLoop."""
+    """Test _find_root_exit_pair logic."""
 
-    def test_quote_assets_skipped_in_evaluate(self):
-        """USD/stablecoin roots should not get deadlines."""
-        for asset in ("USD", "USDT", "USDC", "EUR"):
-            assert asset in QUOTE_ASSETS
+    def test_quote_assets_still_defined_for_pair_matching(self):
+        """QUOTE_ASSETS used for pair matching priority, not for skipping."""
+        assert "USD" in QUOTE_ASSETS
+        assert "USDT" in QUOTE_ASSETS
 
 
 class TestRootExitPairMatching:
@@ -213,11 +224,14 @@ class TestRootExpiryReEvaluation:
 class TestEvaluateRootDeadlinesSkips:
     """Test that _evaluate_root_deadlines correctly skips certain roots."""
 
-    def test_quote_currency_roots_skipped(self):
-        """USD and stablecoin roots should never get deadlines."""
-        for asset in ("USD", "USDT", "USDC"):
+    def test_all_assets_equal_no_skip(self):
+        """No currency is treated as special — all roots can get deadlines."""
+        for asset in ("USD", "USDT", "ADA", "BTC"):
             root = _make_root(asset)
-            assert root.asset in QUOTE_ASSETS
+            # All roots are eligible (depth==0, status==OPEN, no deadline)
+            assert root.depth == 0
+            assert root.status == RotationNodeStatus.OPEN
+            assert root.deadline_at is None
 
     def test_root_with_existing_deadline_skipped(self):
         """Root that already has a deadline should not be re-evaluated by _evaluate_root_deadlines."""
@@ -238,3 +252,72 @@ class TestEvaluateRootDeadlinesSkips:
             status=RotationNodeStatus.OPEN,
         )
         assert child.depth != 0
+
+
+# ---------------------------------------------------------------------------
+# Deadline timezone formatting tests
+# ---------------------------------------------------------------------------
+
+class TestDeadlineFormatting:
+    def test_utc_to_eastern(self):
+        from tui.widgets.rotation_tree import _format_deadline_et
+        # 2026-04-03T18:30:00+00:00 (UTC) = 2:30 PM ET (EDT in April)
+        result = _format_deadline_et("2026-04-03T18:30:00+00:00")
+        assert "ET" in result
+        assert "04/03" in result
+        assert "14:30" in result
+
+    def test_naive_datetime_treated_as_utc(self):
+        from tui.widgets.rotation_tree import _format_deadline_et
+        result = _format_deadline_et("2026-04-03T18:30:00")
+        assert "ET" in result
+        assert "14:30" in result
+
+    def test_invalid_string_falls_back(self):
+        from tui.widgets.rotation_tree import _format_deadline_et
+        result = _format_deadline_et("not-a-date")
+        assert result == "not-a-date"
+
+
+# ---------------------------------------------------------------------------
+# Unrealized P&L tests
+# ---------------------------------------------------------------------------
+
+class TestUnrealizedPnL:
+    def test_root_unrealized_pnl_computed(self):
+        """Open root with entry_cost should show unrealized P&L."""
+        from guardian import PriceSnapshot as PS
+        from runtime_loop import _build_rotation_tree_snapshot
+        root = _make_root("ADA", qty=Decimal("100"))
+        root = replace(root, entry_cost=Decimal("50"))
+        tree = _make_tree(root)
+        prices = {"ADA/USD": PS(price=Decimal("0.70"))}
+        snap = _build_rotation_tree_snapshot(tree, current_prices=prices)
+        node_snap = snap.nodes[0]
+        assert node_snap.realized_pnl is not None
+        pnl = Decimal(node_snap.realized_pnl)
+        # current value = 100 * 0.70 = 70, entry_cost = 50, P&L = 20
+        assert pnl == Decimal("20")
+
+    def test_root_no_entry_cost_shows_none(self):
+        """Root without entry_cost should show no P&L."""
+        from runtime_loop import _build_rotation_tree_snapshot
+        root = _make_root("ADA", qty=Decimal("100"))
+        tree = _make_tree(root)
+        snap = _build_rotation_tree_snapshot(tree)
+        node_snap = snap.nodes[0]
+        assert node_snap.realized_pnl is None
+
+    def test_usd_root_pnl_is_zero(self):
+        """USD root should have P&L of 0 (1 USD = 1 USD)."""
+        from runtime_loop import _build_rotation_tree_snapshot
+        root = _make_root("USD", qty=Decimal("100"))
+        root = replace(root, entry_cost=Decimal("100"))
+        tree = _make_tree(root)
+        # No ADA/USD price needed — USD is not in any pair as base
+        # But USD root has entry_cost=100 and qty=100
+        # root_usd_prices defaults USD=1, so current_value = 100*1 = 100
+        snap = _build_rotation_tree_snapshot(tree)
+        node_snap = snap.nodes[0]
+        assert node_snap.realized_pnl is not None
+        assert Decimal(node_snap.realized_pnl) == Decimal("0")

@@ -1275,14 +1275,8 @@ class SchedulerRuntime:
         for node in self._rotation_tree.nodes:
             if node.depth != 0 or node.status != RotationNodeStatus.OPEN:
                 continue
-            # Skip quote-currency roots — they ARE the destination
-            if node.asset in QUOTE_ASSETS:
-                continue
             # Skip roots that already have a deadline (will be handled by expiry)
             if node.deadline_at is not None:
-                continue
-            # Skip roots already in CLOSING state
-            if node.status == RotationNodeStatus.CLOSING:
                 continue
 
             pair_info = self._find_root_exit_pair(node.asset)
@@ -1290,7 +1284,7 @@ class SchedulerRuntime:
                 logger.debug("No exit pair found for root %s", node.asset)
                 continue
 
-            pair, _ = pair_info
+            pair, entry_side = pair_info
             try:
                 bars = self._pair_scanner._ohlcv_fetcher(
                     pair,
@@ -1306,10 +1300,17 @@ class SchedulerRuntime:
                 continue
 
             try:
-                direction, window_hours = evaluate_root_ta(bars)
+                direction, window_hours, confidence = evaluate_root_ta(bars)
             except Exception:
                 logger.debug("TA eval failed for root %s", node.asset)
                 continue
+
+            # Compute entry_cost for unrealized P&L tracking
+            entry_cost = None
+            root_prices = _collect_root_prices(self._state.current_prices, {node.asset: node.quantity_total})
+            usd_price = root_prices.get(node.asset)
+            if usd_price and usd_price > ZERO_DECIMAL:
+                entry_cost = node.quantity_total * usd_price
 
             deadline = now + timedelta(hours=window_hours)
             self._rotation_tree = update_node(
@@ -1317,10 +1318,13 @@ class SchedulerRuntime:
                 deadline_at=deadline,
                 window_hours=window_hours,
                 entry_pair=pair,
+                order_side=entry_side,
+                confidence=confidence,
+                entry_cost=entry_cost,
             )
             logger.info(
-                "Root %s deadline set: %s (%.1fh, TA=%s)",
-                node.node_id, deadline.isoformat(), window_hours, direction,
+                "Root %s deadline set: %s (%.1fh, TA=%s, conf=%.2f)",
+                node.node_id, deadline.isoformat(), window_hours, direction, confidence,
             )
 
     async def _handle_root_expiry(self, node, now: datetime) -> None:
@@ -1353,7 +1357,7 @@ class SchedulerRuntime:
             return
 
         try:
-            direction, window_hours = evaluate_root_ta(bars)
+            direction, window_hours, _confidence = evaluate_root_ta(bars)
         except Exception:
             self._rotation_tree = update_node(
                 self._rotation_tree, node.node_id, deadline_at=None,
@@ -1723,6 +1727,7 @@ class SchedulerRuntime:
             ),
             rotation_tree=_build_rotation_tree_snapshot(
                 self._rotation_tree, tree_value_usd=tree_value,
+                current_prices=state.current_prices,
             ),
             pending_orders=tuple(
                 {"client_order_id": po.client_order_id, "pair": po.pair, "side": po.side.value if hasattr(po.side, "value") else str(po.side or ""), "kind": po.kind, "base_qty": str(po.base_qty), "rotation_node_id": po.rotation_node_id or ""}
@@ -1945,9 +1950,20 @@ def _build_rotation_tree_snapshot(
     tree: RotationTreeState | None,
     *,
     tree_value_usd: str = "0",
+    current_prices: dict[str, object] | None = None,
 ) -> RotationTreeSnapshot:
     if tree is None:
         return RotationTreeSnapshot()
+
+    # Build prices map for unrealized P&L on roots
+    root_usd_prices: dict[str, Decimal] = {"USD": Decimal("1")}
+    if current_prices and isinstance(current_prices, dict):
+        for pair_key, snap in current_prices.items():
+            if "/" in pair_key:
+                base = pair_key.split("/")[0]
+                price = snap.price if isinstance(snap, PriceSnapshot) else getattr(snap, "price", None)
+                if price and price > ZERO_DECIMAL:
+                    root_usd_prices[base] = price
 
     total_deployed = ZERO_DECIMAL
     total_realized_pnl = ZERO_DECIMAL
@@ -1963,6 +1979,13 @@ def _build_rotation_tree_snapshot(
             realized_pnl = str(pnl)
             total_realized_pnl += pnl
             closed_count += 1
+        # Compute unrealized P&L for open root nodes
+        elif n.depth == 0 and n.status == RotationNodeStatus.OPEN and n.entry_cost is not None:
+            usd_price = root_usd_prices.get(n.asset)
+            if usd_price and usd_price > ZERO_DECIMAL:
+                current_value = n.quantity_total * usd_price
+                pnl = current_value - n.entry_cost
+                realized_pnl = str(pnl)
         if n.status in (RotationNodeStatus.OPEN, RotationNodeStatus.CLOSING) and n.depth > 0:
             total_deployed += n.entry_cost if n.entry_cost is not None else ZERO_DECIMAL
             open_count += 1

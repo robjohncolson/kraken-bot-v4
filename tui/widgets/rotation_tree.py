@@ -1,12 +1,30 @@
 """Rotation tree table widget."""
 from __future__ import annotations
 
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
 from rich.style import Style
 from rich.text import Text
 from textual.widgets import DataTable
 
 from tui.state import RotationNodeRow, RotationTreeState
 from tui.theme import HEALTHY, MUTED, NEUTRAL, UNHEALTHY, WARNING, confidence_text
+
+_ET = ZoneInfo("America/New_York")
+_UTC = ZoneInfo("UTC")
+
+
+def _format_deadline_et(iso_str: str) -> str:
+    """Convert an ISO deadline string from UTC to Eastern time display."""
+    try:
+        dt = datetime.fromisoformat(iso_str)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=_UTC)
+        local = dt.astimezone(_ET)
+        return local.strftime("%m/%d %H:%M ET")
+    except (ValueError, TypeError):
+        return iso_str[:16] if len(iso_str) >= 16 else iso_str
 
 _COLUMNS = ("Node", "Asset", "Qty", "Free", "Status", "Pair", "Side", "Conf", "Deadline", "P&L")
 
@@ -88,7 +106,7 @@ class RotationTreeTable(DataTable):
                 node.entry_pair or "\u2014",
                 node.order_side.upper() if node.order_side else "\u2014",
                 confidence_text(node.confidence),
-                node.deadline_at[:16] if node.deadline_at else "\u2014",
+                _format_deadline_et(node.deadline_at) if node.deadline_at else "\u2014",
                 pnl_display,
             )
             # Push children in reverse so they come out in order
