@@ -1290,7 +1290,15 @@ class SchedulerRuntime:
             if node.depth != 0 or node.status != RotationNodeStatus.OPEN:
                 continue
             # Skip roots that already have a deadline (will be handled by expiry)
+            # But backfill entry_cost if it was missed (price cache was cold)
             if node.deadline_at is not None:
+                if node.entry_cost is None:
+                    usd_price = self._root_usd_prices.get(node.asset)
+                    if usd_price and usd_price > ZERO_DECIMAL:
+                        self._rotation_tree = update_node(
+                            self._rotation_tree, node.node_id,
+                            entry_cost=node.quantity_total * usd_price,
+                        )
                 continue
 
             pair_info = self._find_root_exit_pair(node.asset)
