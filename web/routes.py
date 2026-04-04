@@ -100,6 +100,7 @@ class RotationNodeSnapshot:
     closed_at: str | None = None
     exit_proceeds: str | None = None
     realized_pnl: str | None = None
+    ta_direction: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

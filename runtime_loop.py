@@ -38,6 +38,7 @@ from core.types import (
     Position,
     PositionSide,
     RotationEvent,
+    RotationNode,
     RotationNodeStatus,
     RotationTreeState,
     ZERO_DECIMAL,
@@ -288,6 +289,46 @@ class SchedulerRuntime:
             self._rotation_tree = self._rotation_planner.initialize_roots(
                 balances_dict, prices_usd=prices,
             )
+            # Restore persisted fields (entry_cost, deadlines, etc.) from SQLite
+            try:
+                persisted = self._reader.fetch_rotation_tree()
+                persisted_map = {n.node_id: n for n in persisted.nodes}
+                restored = 0
+                new_nodes: list[RotationNode] = []
+                for node in self._rotation_tree.nodes:
+                    old = persisted_map.get(node.node_id)
+                    if old is not None:
+                        # Restore all persisted fields — not just entry_cost
+                        merge_fields: dict = {}
+                        if old.entry_cost is not None:
+                            merge_fields["entry_cost"] = old.entry_cost
+                        if old.deadline_at is not None:
+                            merge_fields["deadline_at"] = old.deadline_at
+                            merge_fields["window_hours"] = old.window_hours
+                        if old.entry_pair:
+                            merge_fields["entry_pair"] = old.entry_pair
+                            merge_fields["order_side"] = old.order_side
+                        if old.confidence:
+                            merge_fields["confidence"] = old.confidence
+                        if old.ta_direction:
+                            merge_fields["ta_direction"] = old.ta_direction
+                        if old.recovery_count:
+                            merge_fields["recovery_count"] = old.recovery_count
+                        # Restore status for non-OPEN nodes (e.g. CLOSING, EXPIRED)
+                        if old.status in (RotationNodeStatus.CLOSING, RotationNodeStatus.EXPIRED):
+                            merge_fields["status"] = old.status
+                        if merge_fields:
+                            node = replace(node, **merge_fields)
+                            restored += 1
+                    new_nodes.append(node)
+                if restored:
+                    self._rotation_tree = RotationTreeState(
+                        nodes=tuple(new_nodes),
+                        root_node_ids=self._rotation_tree.root_node_ids,
+                    )
+                    logger.info("Restored persisted fields for %d root nodes", restored)
+            except Exception:
+                logger.debug("No persisted rotation tree to restore")
             logger.info(
                 "Rotation tree initialized: %d root nodes",
                 len(self._rotation_tree.root_node_ids),
@@ -1279,7 +1320,7 @@ class SchedulerRuntime:
             root_balances = {
                 n.asset: n.quantity_total
                 for n in self._rotation_tree.nodes
-                if n.depth == 0 and n.status == RotationNodeStatus.OPEN
+                if n.depth == 0 and n.status in (RotationNodeStatus.OPEN, RotationNodeStatus.EXPIRED)
             }
             self._root_usd_prices = _collect_root_prices(
                 self._state.current_prices, root_balances,
@@ -1287,7 +1328,24 @@ class SchedulerRuntime:
             self._root_usd_prices_at = _time.monotonic()
 
         for node in self._rotation_tree.nodes:
-            if node.depth != 0 or node.status != RotationNodeStatus.OPEN:
+            if node.depth != 0:
+                continue
+            # Recover EXPIRED roots — reset to OPEN so they get re-evaluated (max 3 attempts)
+            if node.status == RotationNodeStatus.EXPIRED:
+                if node.recovery_count >= 3:
+                    logger.info("Root %s (%s) exhausted %d recovery attempts — staying EXPIRED",
+                                node.node_id, node.asset, node.recovery_count)
+                    continue
+                self._rotation_tree = update_node(
+                    self._rotation_tree, node.node_id,
+                    status=RotationNodeStatus.OPEN,
+                    deadline_at=None,
+                    recovery_count=node.recovery_count + 1,
+                )
+                logger.info("Recovered EXPIRED root %s (%s) for re-evaluation (attempt %d/3)",
+                            node.node_id, node.asset, node.recovery_count + 1)
+                continue
+            if node.status != RotationNodeStatus.OPEN:
                 continue
             # Skip roots that already have a deadline (will be handled by expiry)
             # But backfill entry_cost if it was missed (price cache was cold)
@@ -1342,6 +1400,7 @@ class SchedulerRuntime:
                 order_side=entry_side,
                 confidence=confidence,
                 entry_cost=entry_cost,
+                ta_direction=direction,
             )
             logger.info(
                 "Root %s deadline set: %s (%.1fh, TA=%s, conf=%.2f)",
@@ -1392,6 +1451,7 @@ class SchedulerRuntime:
                 self._rotation_tree, node.node_id,
                 deadline_at=new_deadline,
                 window_hours=window_hours,
+                ta_direction=direction,
             )
             logger.info(
                 "Root %s still bullish — extended deadline to %s (%.1fh)",
@@ -1415,12 +1475,16 @@ class SchedulerRuntime:
             pair=pair, details={"direction": direction},
         ))
 
-        # Set entry_pair and order_side on the root so _close_rotation_node can use them
+        # Set entry_pair, order_side, and current price on the root so
+        # _close_rotation_node can place the exit order even without WebSocket price
+        last_close = Decimal(str(bars["close"].iloc[-1]))
         self._rotation_tree = update_node(
             self._rotation_tree, node.node_id,
             entry_pair=pair,
             order_side=entry_side,
+            entry_price=last_close,
             exit_reason="root_exit_" + direction,
+            ta_direction=direction,
         )
         # Refresh the node reference after update
         updated_node = node_by_id(self._rotation_tree, node.node_id)
@@ -1749,6 +1813,7 @@ class SchedulerRuntime:
             rotation_tree=_build_rotation_tree_snapshot(
                 self._rotation_tree, tree_value_usd=tree_value,
                 current_prices=state.current_prices,
+                cached_root_prices=self._root_usd_prices,
             ),
             pending_orders=tuple(
                 {"client_order_id": po.client_order_id, "pair": po.pair, "side": po.side.value if hasattr(po.side, "value") else str(po.side or ""), "kind": po.kind, "base_qty": str(po.base_qty), "rotation_node_id": po.rotation_node_id or ""}
@@ -1972,16 +2037,20 @@ def _build_rotation_tree_snapshot(
     *,
     tree_value_usd: str = "0",
     current_prices: dict[str, object] | None = None,
+    cached_root_prices: dict[str, Decimal] | None = None,
 ) -> RotationTreeSnapshot:
     if tree is None:
         return RotationTreeSnapshot()
 
     # Build prices map for unrealized P&L on roots
+    # Start from cached prices (includes REST OHLCV fallback), overlay fresh WebSocket
     root_usd_prices: dict[str, Decimal] = {
         "USD": Decimal("1"),
         "USDT": Decimal("1"),
         "USDC": Decimal("1"),
     }
+    if cached_root_prices:
+        root_usd_prices.update(cached_root_prices)
     if current_prices and isinstance(current_prices, dict):
         for pair_key, snap in current_prices.items():
             if "/" in pair_key:
@@ -2009,8 +2078,8 @@ def _build_rotation_tree_snapshot(
             realized_pnl = str(pnl)
             total_realized_pnl += pnl
             closed_count += 1
-        # Compute unrealized P&L for open root nodes
-        elif n.depth == 0 and n.status == RotationNodeStatus.OPEN and n.entry_cost is not None:
+        # Compute unrealized P&L for root nodes that still hold the asset
+        elif n.depth == 0 and n.status in (RotationNodeStatus.OPEN, RotationNodeStatus.CLOSING, RotationNodeStatus.EXPIRED) and n.entry_cost is not None:
             usd_price = root_usd_prices.get(n.asset)
             if usd_price and usd_price > ZERO_DECIMAL:
                 current_value = n.quantity_total * usd_price
@@ -2042,6 +2111,7 @@ def _build_rotation_tree_snapshot(
             closed_at=n.closed_at.isoformat() if n.closed_at else None,
             exit_proceeds=str(n.exit_proceeds) if n.exit_proceeds else None,
             realized_pnl=realized_pnl,
+            ta_direction=n.ta_direction,
         ))
 
     return RotationTreeSnapshot(

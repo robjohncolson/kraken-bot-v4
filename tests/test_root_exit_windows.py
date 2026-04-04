@@ -360,6 +360,81 @@ class TestUnrealizedPnL:
         node_snap = snap.nodes[0]
         assert node_snap.realized_pnl is None
 
+    def test_cached_price_fallback(self):
+        """Asset with no WebSocket price uses cached REST price for P&L."""
+        from runtime_loop import _build_rotation_tree_snapshot
+        root = _make_root("BABY", qty=Decimal("1000"))
+        root = replace(root, entry_cost=Decimal("14"))
+        tree = _make_tree(root)
+        cached = {"BABY": Decimal("0.015")}
+        snap = _build_rotation_tree_snapshot(
+            tree, cached_root_prices=cached,
+        )
+        node_snap = snap.nodes[0]
+        assert node_snap.realized_pnl is not None
+        # current_value = 1000 * 0.015 = 15, entry_cost = 14, P&L = 1
+        assert Decimal(node_snap.realized_pnl) == Decimal("1")
+
+    def test_websocket_overrides_cached_price(self):
+        """Fresh WebSocket price takes precedence over stale cached price."""
+        from guardian import PriceSnapshot as PS
+        from runtime_loop import _build_rotation_tree_snapshot
+        root = _make_root("ADA", qty=Decimal("100"))
+        root = replace(root, entry_cost=Decimal("50"))
+        tree = _make_tree(root)
+        cached = {"ADA": Decimal("0.50")}  # stale
+        prices = {"ADA/USD": PS(price=Decimal("0.70"))}  # fresh
+        snap = _build_rotation_tree_snapshot(
+            tree, current_prices=prices, cached_root_prices=cached,
+        )
+        node_snap = snap.nodes[0]
+        # Should use 0.70 (WebSocket), not 0.50 (cached)
+        # current_value = 100 * 0.70 = 70, entry_cost = 50, P&L = 20
+        assert Decimal(node_snap.realized_pnl) == Decimal("20")
+
+
+# ---------------------------------------------------------------------------
+# Persistence round-trip: entry_cost survives restart
+# ---------------------------------------------------------------------------
+
+class TestEntryCostPersistence:
+    def test_entry_cost_round_trip(self):
+        """entry_cost saved to SQLite is restored on fetch."""
+        import sqlite3
+        from persistence.sqlite import SqliteReader, SqliteWriter, ensure_schema
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        ensure_schema(conn)
+        writer = SqliteWriter(conn)
+        reader = SqliteReader(conn)
+
+        root = _make_root("ADA", qty=Decimal("100"))
+        root = replace(root, entry_cost=Decimal("45.50"), deadline_at=datetime(2026, 4, 3, tzinfo=timezone.utc))
+        tree = _make_tree(root)
+        writer.save_rotation_tree(tree)
+
+        loaded = reader.fetch_rotation_tree()
+        assert len(loaded.nodes) == 1
+        assert loaded.nodes[0].entry_cost == Decimal("45.50")
+        assert loaded.nodes[0].deadline_at is not None
+
+    def test_entry_cost_none_round_trip(self):
+        """Nodes without entry_cost load as None (not crash)."""
+        import sqlite3
+        from persistence.sqlite import SqliteReader, SqliteWriter, ensure_schema
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        ensure_schema(conn)
+        writer = SqliteWriter(conn)
+        reader = SqliteReader(conn)
+
+        root = _make_root("ADA", qty=Decimal("100"))
+        tree = _make_tree(root)
+        writer.save_rotation_tree(tree)
+
+        loaded = reader.fetch_rotation_tree()
+        assert loaded.nodes[0].entry_cost is None
+
 
 # ---------------------------------------------------------------------------
 # Cached root USD prices tests

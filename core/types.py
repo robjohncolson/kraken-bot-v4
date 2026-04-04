@@ -432,6 +432,8 @@ class RotationNode:
     stop_loss_price: Price | None = None
     trailing_stop_high: Price | None = None
     exit_reason: str | None = None  # "take_profit", "stop_loss", "timer", "cancelled"
+    ta_direction: str | None = None  # "bullish", "bearish", "neutral" — last TA evaluation
+    recovery_count: int = 0  # times recovered from EXPIRED → OPEN (capped at MAX_ROOT_RECOVERIES)
 
     # P&L tracking (populated on fill settlement)
     entry_cost: Decimal | None = None  # Original parent-denomination allocation (before unit conversion)

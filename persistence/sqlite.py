@@ -126,6 +126,8 @@ _ROTATION_NODE_MIGRATIONS = (
     ("stop_loss_price", "TEXT"),
     ("trailing_stop_high", "TEXT"),
     ("exit_reason", "TEXT"),
+    ("ta_direction", "TEXT"),
+    ("recovery_count", "INTEGER DEFAULT 0"),
 )
 
 
@@ -317,7 +319,7 @@ class SqliteReader:
         """Fetch persisted rotation tree state."""
         try:
             cursor = self._conn.execute(
-                "SELECT * FROM rotation_nodes WHERE status IN ('planned', 'open', 'closing') "
+                "SELECT * FROM rotation_nodes WHERE status IN ('planned', 'open', 'closing', 'expired') "
                 "ORDER BY depth, node_id"
             )
             nodes: list[RotationNode] = []
@@ -340,6 +342,17 @@ class SqliteReader:
                     window_hours=row["window_hours"],
                     confidence=row["confidence"] or 0.0,
                     status=RotationNodeStatus(row["status"]),
+                    entry_cost=Decimal(row["entry_cost"]) if row["entry_cost"] else None,
+                    fill_price=Decimal(row["fill_price"]) if row["fill_price"] else None,
+                    exit_price=Decimal(row["exit_price"]) if row["exit_price"] else None,
+                    closed_at=datetime.fromisoformat(row["closed_at"]) if row["closed_at"] else None,
+                    exit_proceeds=Decimal(row["exit_proceeds"]) if row["exit_proceeds"] else None,
+                    take_profit_price=Decimal(row["take_profit_price"]) if row["take_profit_price"] else None,
+                    stop_loss_price=Decimal(row["stop_loss_price"]) if row["stop_loss_price"] else None,
+                    trailing_stop_high=Decimal(row["trailing_stop_high"]) if row["trailing_stop_high"] else None,
+                    exit_reason=row["exit_reason"],
+                    ta_direction=row["ta_direction"],
+                    recovery_count=row["recovery_count"] or 0,
                 )
                 nodes.append(node)
                 if node.parent_node_id is None:
@@ -542,7 +555,7 @@ class SqliteWriter:
         try:
             # Clear stale live nodes
             self._conn.execute(
-                "DELETE FROM rotation_nodes WHERE status IN ('planned', 'open', 'closing')"
+                "DELETE FROM rotation_nodes WHERE status IN ('planned', 'open', 'closing', 'expired')"
             )
             for node in tree.nodes:
                 if node.status not in (
@@ -550,6 +563,7 @@ class SqliteWriter:
                     RotationNodeStatus.OPEN,
                     RotationNodeStatus.CLOSING,
                     RotationNodeStatus.CLOSED,
+                    RotationNodeStatus.EXPIRED,
                 ):
                     continue
                 self._conn.execute(
@@ -559,8 +573,8 @@ class SqliteWriter:
                     "order_side, entry_price, position_id, deadline_at, "
                     "window_hours, confidence, status, "
                     "entry_cost, fill_price, exit_price, closed_at, exit_proceeds, "
-                    "take_profit_price, stop_loss_price, trailing_stop_high, exit_reason"
-                    ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "take_profit_price, stop_loss_price, trailing_stop_high, exit_reason, ta_direction, recovery_count"
+                    ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         node.node_id,
                         node.parent_node_id,
@@ -587,6 +601,8 @@ class SqliteWriter:
                         str(node.stop_loss_price) if node.stop_loss_price else None,
                         str(node.trailing_stop_high) if node.trailing_stop_high else None,
                         node.exit_reason,
+                        node.ta_direction,
+                        node.recovery_count,
                     ),
                 )
             self._conn.commit()

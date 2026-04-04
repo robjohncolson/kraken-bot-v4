@@ -171,6 +171,49 @@ h1 {
   }
 }
 
+/* ── Rotation tree ──────────────────────────────────────── */
+
+.rotation-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.badge {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.badge-bullish { background: rgba(21, 128, 61, 0.12); color: #15803d; }
+.badge-bearish { background: rgba(185, 28, 28, 0.12); color: #b91c1c; }
+.badge-neutral { background: rgba(89, 98, 116, 0.12); color: #596274; }
+.badge-unknown { background: transparent; color: #94a3b8; }
+
+.badge-status {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.badge-status-open { background: rgba(21, 128, 61, 0.10); color: #15803d; }
+.badge-status-closed { background: rgba(89, 98, 116, 0.10); color: #596274; }
+.badge-status-planned { background: rgba(37, 99, 235, 0.10); color: #2563eb; }
+.badge-status-closing { background: rgba(217, 119, 6, 0.10); color: #d97706; }
+
+.ttl-green { color: #15803d; font-weight: 600; }
+.ttl-yellow { color: #d97706; font-weight: 600; }
+.ttl-red { color: #b91c1c; font-weight: 600; }
+.ttl-expired { color: #b91c1c; font-weight: 700; text-transform: uppercase; }
+
 @media (max-width: 859px) {
   #app {
     width: min(1200px, calc(100% - 1rem));

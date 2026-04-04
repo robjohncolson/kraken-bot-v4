@@ -24,7 +24,7 @@ Bot running on WSL `work:2.3` pane with **rotation tree LIVE**:
 | ALLOWED_PAIRS | Empty (all pairs enabled for rotation) |
 | Scanner timeout | 45s (`SCANNER_TIMEOUT_SEC=45`) |
 | Dashboard | `http://10.0.0.24:58392` |
-| Tests | 597 passing |
+| Tests | 607 passing |
 | Belief confidence gate | `MIN_BELIEF_CONFIDENCE=0.5` — beliefs below threshold shown dimmed in TUI |
 | Price-aware exits | TP=3%, SL=-2%, dynamic entry timeout (25% of window, 30-120min), exit timeout=5min→MARKET |
 | Ordermin enforcement | Dynamic from Kraken AssetPairs API, cached 24h in SQLite |
@@ -37,6 +37,14 @@ Bot running on WSL `work:2.3` pane with **rotation tree LIVE**:
 | One order per cycle | PLANNED nodes sorted by confidence, only one entry placed per 30s cycle |
 | Pair cooldown persistence | Rotation pair cooldowns survive restart (SQLite-backed) |
 | TUI cancelled node pruning | Cancelled nodes hidden from TUI rotation tree view |
+| P&L persistence | `entry_cost` + deadline fields survive restart via SQLite round-trip |
+| Snapshot price fallback | Snapshot uses runtime REST-cached prices when WebSocket lacks `{ASSET}/USD` |
+| TUI TTL column | Time-to-deadline column: green >2h, yellow <2h, red <30min, EXPIRED |
+| Dashboard rotation tree | Full-width panel: tree table with direction badges, status badges, TTL, P&L + summary bar |
+| Dashboard rotation events | Chronological event feed with color-coded type badges, updates via SSE |
+| TA direction persistence | `ta_direction` stored on RotationNode, persisted in SQLite, exposed in API |
+| Expired root recovery | EXPIRED roots reset to OPEN (max 3 attempts), OHLCV close price as sell fallback |
+| Restart-safe status | CLOSING/EXPIRED status + recovery_count survive restart via SQLite |
 
 ### Portfolio (actual Kraken balances as of 2026-04-03)
 
@@ -181,6 +189,23 @@ The `/api/rotation-tree` endpoint could show:
 - **Portfolio fragmentation**: Rotation tree creates many small positions. Without root exit windows, these accumulate and become individually untradeable.
 - **Root exit pair matching**: `_close_rotation_node` expects `order_side` to be the *entry* side (reverses it for exit). Root exits must simulate entry side, not set the desired exit side directly.
 
+## What shipped 2026-04-04
+
+- **Dashboard rotation tree panel**: Full-width panel with tree table (Asset, Status, Direction badges, Confidence, Deadline, TTL, P&L), summary bar (tree value, open/closed, deployed, realized P&L). DFS-ordered with depth indentation. `updateRotationTree` handler in app.js, initial fetch from `/api/rotation-tree`
+- **Dashboard rotation events panel**: Chronological event feed with color-coded type badges (fill=blue, tp=green, sl=red, root_exit=red, root_extended=green). `updateRotationEvents` handler
+- **TA direction persistence**: `ta_direction` field on `RotationNode`, persisted in SQLite, exposed in `RotationNodeSnapshot`. Set in `_evaluate_root_deadlines` and `_handle_root_expiry`
+- **Expired root recovery**: EXPIRED roots reset to OPEN with `deadline_at=None` for re-evaluation. Max 3 attempts via `recovery_count` field (persisted in SQLite). OHLCV close price stored as `entry_price` fallback so `_close_rotation_node` can place sell order without WebSocket price
+- **P&L for CLOSING/EXPIRED roots**: Snapshot builder computes unrealized P&L for CLOSING and EXPIRED roots (previously only OPEN)
+- **Restart-safe status restore**: Broadened root metadata merge on startup — restores CLOSING/EXPIRED status, ta_direction, recovery_count, entry_pair, confidence (previously gated only on entry_cost). EXPIRED nodes now included in SQLite save/fetch
+- Spec at `tasks/specs/dashboard-rotation-tree.md`
+
+## What shipped 2026-04-03 (late session)
+
+- **P&L persistence**: `fetch_rotation_tree()` now loads all migration columns (`entry_cost`, `fill_price`, `exit_price`, `deadline_at`, etc.). On startup, persisted fields merged onto fresh root nodes so P&L reflects original cost basis, not current price
+- **Snapshot price fallback**: `_build_rotation_tree_snapshot()` receives runtime's `_root_usd_prices` cache (REST OHLCV fallback) as base, overlays fresh WebSocket prices. Assets without `{ASSET}/USD` WebSocket subscriptions now show P&L
+- **TUI TTL column**: Time-to-deadline column in rotation tree table. Green >2h, yellow <2h, red <30min, EXPIRED. Between Deadline and P&L columns
+- 4 new tests (cached price fallback, WebSocket override, entry_cost SQLite round-trip)
+
 ## What shipped 2026-04-03 (spec-and-ship)
 
 - **Root exit windows**: Roots get TA-evaluated deadlines (EMA/RSI/MACD, 2-48h). On expiry: re-evaluate → sell if bearish/neutral, extend if bullish. `evaluate_root_ta()` in pair_scanner, `_evaluate_root_deadlines()` + `_handle_root_expiry()` in runtime_loop
@@ -220,7 +245,7 @@ The `/api/rotation-tree` endpoint could show:
 ## Validation
 
 ```bash
-python -m pytest                    # 597 tests
+python -m pytest                    # 607 tests
 python -m ruff check .              # clean
 curl http://127.0.0.1:58392/api/health         # dashboard up
 curl http://127.0.0.1:58392/api/rotation-tree  # rotation tree state

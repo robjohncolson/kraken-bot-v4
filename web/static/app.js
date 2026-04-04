@@ -9,6 +9,8 @@ var handlers = {
   reconciliation: updateReconciliation,
   alert: updateAlerts,
   alerts: updateAlerts,
+  rotation_tree: updateRotationTree,
+  rotation_events: updateRotationEvents,
 };
 
 /* Global so D3 modules can install placeholder bridges */
@@ -36,6 +38,7 @@ function fetchInitialState() {
     { url: "/api/beliefs", handler: updateBeliefs },
     { url: "/api/reconciliation", handler: updateReconciliation },
     { url: "/api/stats", handler: updateStats },
+    { url: "/api/rotation-tree", handler: updateRotationTree },
   ];
   endpoints.forEach(function fetchEndpoint(ep) {
     fetch(ep.url)
@@ -290,6 +293,196 @@ function appendAlert(message) {
   item.textContent = now.toLocaleTimeString() + " " + message;
   list.prepend(item);
   while (list.children.length > 50) list.removeChild(list.lastChild);
+}
+
+/* ── Rotation Tree panel ────────────────────────────────── */
+
+function updateRotationTree(data) {
+  var target = document.getElementById("rotation-tree-content");
+  var summary = document.getElementById("rotation-tree-summary");
+  if (!target || !isRecord(data)) {
+    window.renderPlaceholder("rotation-tree-content", data, "Rotation Tree");
+    return;
+  }
+
+  // Summary bar
+  if (summary) {
+    summary.innerHTML = '<div class="rotation-summary-grid">'
+      + summaryCard("Tree Value", "$" + fmt(data.rotation_tree_value_usd, 2))
+      + summaryCard("Open", String(data.open_count || 0))
+      + summaryCard("Closed", String(data.closed_count || 0))
+      + summaryCard("Deployed", "$" + fmt(data.total_deployed, 2))
+      + summaryCard("Realized P&L", "$" + fmt(data.total_realized_pnl, 2))
+      + '</div>';
+  }
+
+  var nodes = Array.isArray(data.nodes) ? data.nodes : [];
+  if (nodes.length === 0) {
+    target.innerHTML = '<div style="color:#596274;padding:8px">No rotation nodes</div>';
+    target.classList.remove("placeholder");
+    return;
+  }
+
+  target.innerHTML = "";
+  target.classList.remove("placeholder");
+
+  var table = document.createElement("table");
+  table.style.cssText = "width:100%;border-collapse:collapse;font-size:0.85rem";
+  table.innerHTML = '<thead><tr style="text-align:left;color:#596274;font-size:0.75rem;text-transform:uppercase;letter-spacing:0.05em">'
+    + '<th style="padding:6px 8px">Asset</th><th>Status</th><th>Direction</th>'
+    + '<th>Conf</th><th>Deadline</th><th>TTL</th><th>P&L</th></tr></thead>';
+
+  // Build parent lookup for tree ordering
+  var byId = {};
+  nodes.forEach(function(n) { byId[n.node_id] = n; });
+  var rootIds = Array.isArray(data.root_node_ids) ? data.root_node_ids : [];
+  var ordered = [];
+  function dfs(nodeId, depth) {
+    var node = byId[nodeId];
+    if (!node) return;
+    if (node.status === "cancelled") return;
+    ordered.push(node);
+    // Find children
+    nodes.forEach(function(n) {
+      if (n.parent_node_id === nodeId) dfs(n.node_id, depth + 1);
+    });
+  }
+  rootIds.forEach(function(id) { dfs(id, 0); });
+  // Add any orphans not reached by DFS
+  nodes.forEach(function(n) {
+    if (ordered.indexOf(n) === -1 && n.status !== "cancelled") ordered.push(n);
+  });
+
+  var tbody = document.createElement("tbody");
+  ordered.forEach(function(node) {
+    var tr = document.createElement("tr");
+    tr.style.borderTop = "1px solid rgba(108,79,57,0.1)";
+    if (node.depth === 0) tr.style.fontWeight = "600";
+
+    var indent = node.depth * 20;
+    var assetHtml = '<span style="padding-left:' + indent + 'px">'
+      + (node.depth > 0 ? '<span style="color:#94a3b8;margin-right:4px">&#x2514;</span>' : '')
+      + node.asset + '</span>';
+
+    var dirHtml = directionBadge(node.ta_direction);
+    var ttlHtml = computeTtl(node.deadline_at);
+    var pnlNum = Number(node.realized_pnl) || 0;
+    var pnlColor = pnlNum >= 0 ? "#15803d" : "#b91c1c";
+    var pnlStr = node.realized_pnl !== null && node.realized_pnl !== undefined
+      ? '<span style="color:' + pnlColor + '">$' + fmt(pnlNum, 2) + '</span>' : '--';
+
+    var deadlineStr = node.deadline_at ? formatDeadline(node.deadline_at) : '--';
+
+    tr.innerHTML = '<td style="padding:6px 8px">' + assetHtml + '</td>'
+      + '<td>' + statusBadge(node.status) + '</td>'
+      + '<td>' + dirHtml + '</td>'
+      + '<td>' + (node.confidence ? fmt(node.confidence, 2) : '--') + '</td>'
+      + '<td style="font-size:0.8rem">' + deadlineStr + '</td>'
+      + '<td>' + ttlHtml + '</td>'
+      + '<td>' + pnlStr + '</td>';
+    tbody.appendChild(tr);
+  });
+  table.appendChild(tbody);
+  target.appendChild(table);
+}
+
+function summaryCard(label, value) {
+  return '<div style="padding:8px 12px;border-radius:10px;background:rgba(15,118,110,0.06)">'
+    + '<div style="font-size:0.72rem;color:#596274;text-transform:uppercase;letter-spacing:0.06em">' + label + '</div>'
+    + '<div style="font-size:1.1rem;font-weight:700;margin-top:2px">' + value + '</div></div>';
+}
+
+function directionBadge(dir) {
+  if (!dir) return '<span class="badge badge-unknown">--</span>';
+  var cls = dir === "bullish" ? "badge-bullish" : dir === "bearish" ? "badge-bearish" : "badge-neutral";
+  return '<span class="badge ' + cls + '">' + dir + '</span>';
+}
+
+function statusBadge(status) {
+  var cls = "badge-status";
+  if (status === "open") cls += " badge-status-open";
+  else if (status === "closed") cls += " badge-status-closed";
+  else if (status === "planned") cls += " badge-status-planned";
+  else if (status === "closing") cls += " badge-status-closing";
+  return '<span class="' + cls + '">' + status + '</span>';
+}
+
+function computeTtl(deadlineIso) {
+  if (!deadlineIso) return '<span style="color:#94a3b8">--</span>';
+  var deadline = new Date(deadlineIso);
+  var now = new Date();
+  var diffMs = deadline - now;
+  if (diffMs <= 0) return '<span class="ttl-expired">EXPIRED</span>';
+  var diffMin = diffMs / 60000;
+  var cls = diffMin > 120 ? "ttl-green" : diffMin > 30 ? "ttl-yellow" : "ttl-red";
+  var h = Math.floor(diffMin / 60);
+  var m = Math.floor(diffMin % 60);
+  var text = h > 0 ? h + "h " + m + "m" : m + "m";
+  return '<span class="' + cls + '">' + text + '</span>';
+}
+
+function formatDeadline(iso) {
+  var d = new Date(iso);
+  var month = d.getMonth() + 1;
+  var day = d.getDate();
+  var hours = d.getHours();
+  var mins = d.getMinutes();
+  return (month < 10 ? "0" : "") + month + "/" + (day < 10 ? "0" : "") + day
+    + " " + (hours < 10 ? "0" : "") + hours + ":" + (mins < 10 ? "0" : "") + mins;
+}
+
+/* ── Rotation Events panel ──────────────────────────────── */
+
+function updateRotationEvents(data) {
+  var target = document.getElementById("rotation-events-content");
+  if (!target) return;
+
+  var events = Array.isArray(data) ? data : [];
+  if (events.length === 0) return;
+
+  // Clear placeholder text
+  if (target.children.length === 1 && target.firstElementChild.textContent === "No rotation events yet.") {
+    target.textContent = "";
+  }
+
+  // Replace entire list with most-recent-first
+  target.innerHTML = "";
+  var reversed = events.slice().reverse();
+  reversed.forEach(function(evt) {
+    var li = document.createElement("li");
+    var time = evt.timestamp ? new Date(evt.timestamp).toLocaleTimeString() : "";
+    var badge = eventTypeBadge(evt.event_type);
+    var pair = evt.pair || "";
+    var details = evt.details ? formatEventDetails(evt.details) : "";
+    li.innerHTML = '<span style="color:#94a3b8;font-size:0.8rem">' + time + '</span> '
+      + badge + ' <strong>' + pair + '</strong>'
+      + (details ? ' <span style="color:#596274">' + details + '</span>' : '');
+    target.appendChild(li);
+  });
+
+  // Cap at 50 visible
+  while (target.children.length > 50) target.removeChild(target.lastChild);
+}
+
+function eventTypeBadge(type) {
+  var colors = {
+    fill_entry: "#2563eb", fill_exit: "#7c3aed",
+    tp_hit: "#15803d", sl_hit: "#b91c1c",
+    entry_timeout: "#d97706", exit_escalation: "#d97706",
+    root_extended: "#15803d", root_exit: "#b91c1c",
+  };
+  var color = colors[type] || "#596274";
+  return '<span style="display:inline-block;padding:1px 6px;border-radius:4px;font-size:0.75rem;'
+    + 'font-weight:600;color:white;background:' + color + '">' + (type || "unknown") + '</span>';
+}
+
+function formatEventDetails(details) {
+  if (!isRecord(details)) return "";
+  var parts = [];
+  Object.entries(details).forEach(function(entry) {
+    parts.push(entry[0] + "=" + entry[1]);
+  });
+  return parts.join(", ");
 }
 
 /* ── Utilities ───────────────────────────────────────────── */

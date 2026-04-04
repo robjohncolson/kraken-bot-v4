@@ -26,7 +26,32 @@ def _format_deadline_et(iso_str: str) -> str:
     except (ValueError, TypeError):
         return iso_str[:16] if len(iso_str) >= 16 else iso_str
 
-_COLUMNS = ("Node", "Asset", "Qty", "Free", "Status", "Pair", "Side", "Conf", "Deadline", "P&L")
+
+def _format_ttl(iso_str: str | None) -> Text:
+    """Compute time remaining until deadline, colour-coded."""
+    if not iso_str:
+        return Text("\u2014", style=MUTED)
+    try:
+        dt = datetime.fromisoformat(iso_str)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=_UTC)
+        now = datetime.now(tz=_UTC)
+        delta = dt - now
+        total_sec = int(delta.total_seconds())
+        if total_sec <= 0:
+            return Text("EXPIRED", style=UNHEALTHY)
+        hours, rem = divmod(total_sec, 3600)
+        minutes = rem // 60
+        if hours >= 1:
+            label = f"{hours}h{minutes:02d}m"
+        else:
+            label = f"{minutes}m"
+        style = UNHEALTHY if total_sec < 1800 else WARNING if total_sec < 7200 else HEALTHY
+        return Text(label, style=style)
+    except (ValueError, TypeError):
+        return Text("\u2014", style=MUTED)
+
+_COLUMNS = ("Node", "Asset", "Qty", "Free", "Status", "Pair", "Side", "Conf", "Deadline", "TTL", "P&L")
 
 _STATUS_STYLES: dict[str, Style] = {
     "open": HEALTHY,
@@ -69,7 +94,7 @@ class RotationTreeTable(DataTable):
     def refresh_content(self, tree: RotationTreeState) -> None:
         self.clear()
         if not tree.nodes:
-            self.add_row("\u2014", "", "", "", "disabled", "", "", "", "", "")
+            self.add_row("\u2014", "", "", "", "disabled", "", "", "", "", "", "")
             self.border_subtitle = ""
             return
 
@@ -107,6 +132,7 @@ class RotationTreeTable(DataTable):
                 node.order_side.upper() if node.order_side else "\u2014",
                 confidence_text(node.confidence),
                 _format_deadline_et(node.deadline_at) if node.deadline_at else "\u2014",
+                _format_ttl(node.deadline_at),
                 pnl_display,
             )
             # Push children in reverse so they come out in order
