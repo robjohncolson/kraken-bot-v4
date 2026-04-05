@@ -13,28 +13,35 @@
 
 ## Current state (as of 2026-04-05)
 
-**POST-MORTEM RECOVERY COMPLETE (all phases shipped)**. The bot suffered a ~10% portfolio decline (Kraken shows $486.91). Root cause: execution layer was broken — zero trades ever completed. All 5 phases of the recovery plan are now implemented.
+**POST-MORTEM RECOVERY COMPLETE — BOT IS LIVE** (2026-04-05 18:53 ET). All recovery phases shipped. Bot running and cycling on REST fallback (WebSocket blocked by network, falls back gracefully).
 
 | Field | Value |
 |-------|-------|
 | Belief model | `llm_council` (CC+Codex via tmux-bridge) |
-| Portfolio | ~$487 across 15 roots (TA-driven exits managing consolidation) |
-| Rotation tree | **LIVE** — `ENABLE_ROTATION_TREE=true`, 15 root nodes, all OPEN |
+| Portfolio | ~$487 across 12 active roots (3 skipped: XLTC, XXLM, XXMR — unknown Kraken pairs) |
+| Rotation tree | **LIVE** — `ENABLE_ROTATION_TREE=true`, cycling every 30s |
 | Tests | **624 passing** |
+| Position sizing | `MAX_POSITION_USD=50` (bumped from 10), Kelly sizing prompt ready at `tasks/codex-kelly-sizing-prompt.md` |
 | Execution layer | **FIXED** — startup + periodic reconciliation, child rehydration, cancel persistence |
 | Risk management | **FIXED** — TP=5%, SL=2.5%, trailing stops (1.5% activation), root SL=10% |
 | Signal quality | **FIXED** — peak window floor 6h, council weighted majority, MIN_CONFIDENCE=0.70 |
 | Observability | **FIXED** — trade_outcomes table, child node unrealized P&L |
-| Dashboard | `http://10.0.0.24:58392` |
+| WebSocket | Falls back to REST polling — `CancelledError` now handled in connect path |
+| Dashboard | Port 58392 — may conflict if previous instance still bound |
 
-### Portfolio (from SQLite, 2026-04-05)
+### Live root evaluations (first cycle, 2026-04-05)
 
-All 15 roots are OPEN. DB orphaned orders (82) cleaned up, CLOSING roots reset. Bot is live with TA-driven exits — no blanket USD consolidation.
+| Root | TA Direction | Confidence | Action |
+|------|-------------|-----------|--------|
+| ALPHA | bullish | 0.67 | Below MIN_CONFIDENCE (0.70) — no children spawned |
+| BOBA | bearish | 1.00 | Will sell on deadline expiry (6h) |
+| ADX, AIO, APU, BTR | neutral | 0.33 | Will sell on deadline expiry (6h) |
+| EUR, GBP, TON, USDC, USDT | stablecoin/fiat | — | Skipped by root SL (QUOTE_ASSETS) |
 
-| Assets | Notes |
-|--------|-------|
-| USD ($78), EUR ($22), USDT ($17), TON ($17), GBP ($11), USDC ($10) | Stablecoins/fiat |
-| BTC, ETH, SOL, KSM, LINK, ATOM, XRP, RAVE, UNITAS | Altcoins — root exit windows will evaluate and rotate |
+### Known issues at startup
+
+- **Port 58392 conflict**: Previous bot instance may hold the port. Kill old PID or ignore (trading works without dashboard)
+- **XLTC, XXLM, XXMR**: Kraken X-prefixed internal names — OHLCV lookup fails. These are dust positions, not critical
 
 ## Belief models
 

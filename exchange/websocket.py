@@ -104,7 +104,11 @@ async def _default_connector(url: str) -> SupportsWebSocket:
 
 
 def _connect_error_types() -> tuple[type[BaseException], ...]:
-    error_types: list[type[BaseException]] = [OSError, TimeoutError]
+    error_types: list[type[BaseException]] = [
+        OSError,
+        TimeoutError,
+        asyncio.CancelledError,
+    ]
     try:
         from websockets.exceptions import InvalidHandshake, InvalidURI
 
