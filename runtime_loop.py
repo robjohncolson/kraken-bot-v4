@@ -270,7 +270,9 @@ class SchedulerRuntime:
         # Rotation tree (denomination-agnostic recursive trading)
         self._rotation_tree: RotationTreeState | None = None
         self._rotation_planner: RotationTreePlanner | None = None
-        self._rotation_fill_queue: list[tuple[str, Decimal, Decimal, str]] = []
+        self._rotation_fill_queue: list[
+            tuple[str, Decimal, Decimal, str, Decimal | None]
+        ] = []
         self._rotation_entry_retry_counts: dict[str, int] = {}
         self._rotation_pair_cooldowns: dict[str, float] = {}  # pair → monotonic expiry
         self._root_usd_prices: dict[str, Decimal] = {"USD": Decimal("1")}
@@ -601,6 +603,7 @@ class SchedulerRuntime:
                     fill.quantity,
                     fill.price,
                     matched_pending.kind,
+                    fill.fee,
                 )
             )
 
@@ -1430,7 +1433,7 @@ class SchedulerRuntime:
         fills = list(self._rotation_fill_queue)
         self._rotation_fill_queue.clear()
 
-        for node_id, fill_qty, fill_price, kind in fills:
+        for node_id, fill_qty, fill_price, kind, fill_fee in fills:
             node = node_by_id(self._rotation_tree, node_id)
             if node is None:
                 logger.warning("Rotation fill for unknown node %s", node_id)
@@ -1524,6 +1527,41 @@ class SchedulerRuntime:
                     closed_at=now,
                     exit_proceeds=proceeds,
                 )
+                entry_cost = (
+                    node.entry_cost if node.entry_cost is not None else ZERO_DECIMAL
+                )
+                entry_fill_price = (
+                    node.fill_price
+                    if node.fill_price is not None
+                    else node.entry_price
+                    if node.entry_price is not None
+                    else fill_price
+                )
+                hold_hours = (
+                    (now - node.opened_at).total_seconds() / 3600
+                    if node.opened_at is not None
+                    else None
+                )
+                self._writer.insert_trade_outcome(
+                    node_id=node.node_id,
+                    pair=node.entry_pair or "",
+                    direction=node.order_side.value,
+                    entry_price=entry_fill_price,
+                    exit_price=fill_price,
+                    entry_cost=entry_cost,
+                    exit_proceeds=proceeds,
+                    net_pnl=proceeds - entry_cost,
+                    fee_total=fill_fee,
+                    exit_reason=node.exit_reason or "unknown",
+                    hold_hours=hold_hours,
+                    confidence=node.confidence,
+                    opened_at=(
+                        node.opened_at.isoformat()
+                        if node.opened_at is not None
+                        else now.isoformat()
+                    ),
+                    closed_at=now.isoformat(),
+                )
                 # Return proceeds to parent
                 if node.parent_node_id:
                     parent = node_by_id(self._rotation_tree, node.parent_node_id)
@@ -1539,7 +1577,7 @@ class SchedulerRuntime:
                     proceeds,
                     node.parent_node_id,
                 )
-                pnl = str(proceeds - node.entry_cost) if node.entry_cost else ""
+                pnl = str(proceeds - entry_cost)
                 self._rotation_events.append(
                     RotationEvent(
                         timestamp=now,
@@ -2796,6 +2834,29 @@ def _build_rotation_tree_snapshot(
                 current_value = n.quantity_total * usd_price
                 pnl = current_value - n.entry_cost
                 realized_pnl = str(pnl)
+        elif n.depth > 0 and n.status in (
+            RotationNodeStatus.OPEN,
+            RotationNodeStatus.CLOSING,
+        ):
+            if (
+                n.entry_pair
+                and n.fill_price is not None
+                and n.entry_cost is not None
+                and current_prices
+            ):
+                snap = current_prices.get(n.entry_pair)
+                if snap is not None:
+                    current_price = snap.price if hasattr(snap, "price") else snap
+                    if current_price is not None:
+                        if n.order_side == OrderSide.BUY:
+                            unrealized = (
+                                current_price - n.fill_price
+                            ) * n.quantity_total
+                        else:
+                            unrealized = (
+                                n.fill_price - current_price
+                            ) * n.quantity_total
+                        realized_pnl = str(unrealized)
         if (
             n.status in (RotationNodeStatus.OPEN, RotationNodeStatus.CLOSING)
             and n.depth > 0

@@ -15,7 +15,7 @@ from core.types import (
     RotationTreeState,
 )
 
-MIN_CONFIDENCE: Final[float] = 0.55
+MIN_CONFIDENCE: Final[float] = 0.70
 PARENT_DEPLOY_RATIO: Final[Decimal] = Decimal("0.80")
 MAX_CHILD_RATIO: Final[Decimal] = Decimal("0.60")
 MIN_REMAINING_HOURS: Final[float] = 2.0
@@ -29,7 +29,8 @@ def children_of(tree: RotationTreeState, node_id: str) -> tuple[RotationNode, ..
 def live_nodes(tree: RotationTreeState) -> tuple[RotationNode, ...]:
     """Return all nodes that are PLANNED or OPEN."""
     return tuple(
-        n for n in tree.nodes
+        n
+        for n in tree.nodes
         if n.status in (RotationNodeStatus.PLANNED, RotationNodeStatus.OPEN)
     )
 
@@ -70,20 +71,24 @@ def build_root_nodes(
         if qty <= 0:
             continue
         # Skip dust: check USD value if price available
-        usd_price = usd_prices.get(asset, Decimal("1") if asset == "USD" else Decimal("0"))
+        usd_price = usd_prices.get(
+            asset, Decimal("1") if asset == "USD" else Decimal("0")
+        )
         usd_value = qty * usd_price
         if usd_value < min_value_usd:
             continue
 
-        roots.append(RotationNode(
-            node_id=f"root-{asset.lower()}",
-            parent_node_id=None,
-            depth=0,
-            asset=asset,
-            quantity_total=qty,
-            quantity_free=qty,
-            status=RotationNodeStatus.OPEN,
-        ))
+        roots.append(
+            RotationNode(
+                node_id=f"root-{asset.lower()}",
+                parent_node_id=None,
+                depth=0,
+                asset=asset,
+                quantity_total=qty,
+                quantity_free=qty,
+                status=RotationNodeStatus.OPEN,
+            )
+        )
     return tuple(roots)
 
 
@@ -165,7 +170,9 @@ def make_child_node(
 
 
 def entry_base_quantity(
-    order_side: OrderSide, allocated_qty: Decimal, entry_price: Decimal,
+    order_side: OrderSide,
+    allocated_qty: Decimal,
+    entry_price: Decimal,
 ) -> Decimal:
     """Compute base-asset order quantity for a rotation entry.
 
@@ -178,7 +185,9 @@ def entry_base_quantity(
 
 
 def destination_quantity(
-    order_side: OrderSide, fill_qty: Decimal, fill_price: Decimal,
+    order_side: OrderSide,
+    fill_qty: Decimal,
+    fill_price: Decimal,
 ) -> Decimal:
     """Compute destination-asset quantity after a fill.
 
@@ -191,7 +200,9 @@ def destination_quantity(
 
 
 def exit_base_quantity(
-    entry_side: OrderSide, held_qty: Decimal, current_price: Decimal,
+    entry_side: OrderSide,
+    held_qty: Decimal,
+    current_price: Decimal,
 ) -> Decimal:
     """Compute base-asset order quantity for a rotation exit (reverse of entry).
 
@@ -204,7 +215,9 @@ def exit_base_quantity(
 
 
 def exit_proceeds(
-    entry_side: OrderSide, fill_qty: Decimal, fill_price: Decimal,
+    entry_side: OrderSide,
+    fill_qty: Decimal,
+    fill_price: Decimal,
 ) -> Decimal:
     """Compute proceeds returning to parent denomination after exit fill.
 
@@ -223,8 +236,7 @@ def close_node(
 ) -> RotationTreeState:
     """Mark a node as closed/expired. Does NOT cascade to children."""
     nodes = tuple(
-        replace(n, status=status) if n.node_id == node_id else n
-        for n in tree.nodes
+        replace(n, status=status) if n.node_id == node_id else n for n in tree.nodes
     )
     return replace(tree, nodes=nodes)
 
@@ -238,8 +250,7 @@ def cascade_close(
     # Find all descendant IDs
     to_close = _descendants(tree, node_id) | {node_id}
     nodes = tuple(
-        replace(n, status=status) if n.node_id in to_close else n
-        for n in tree.nodes
+        replace(n, status=status) if n.node_id in to_close else n for n in tree.nodes
     )
     return replace(tree, nodes=nodes)
 
@@ -264,8 +275,7 @@ def add_node(tree: RotationTreeState, node: RotationNode) -> RotationTreeState:
 def update_node(tree: RotationTreeState, node_id: str, **kwargs) -> RotationTreeState:
     """Update fields on a specific node."""
     nodes = tuple(
-        replace(n, **kwargs) if n.node_id == node_id else n
-        for n in tree.nodes
+        replace(n, **kwargs) if n.node_id == node_id else n for n in tree.nodes
     )
     return replace(tree, nodes=nodes)
 
@@ -288,7 +298,8 @@ def cancel_planned_node(tree: RotationTreeState, node_id: str) -> RotationTreeSt
                 parent.node_id,
                 quantity_free=parent.quantity_free + node.quantity_total,
                 quantity_reserved=max(
-                    Decimal("0"), parent.quantity_reserved - node.quantity_total,
+                    Decimal("0"),
+                    parent.quantity_reserved - node.quantity_total,
                 ),
             )
 

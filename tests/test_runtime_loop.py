@@ -769,7 +769,7 @@ def test_rotation_entry_fill_sets_fee_aware_buy_tp_and_sl() -> None:
             root_node_ids=("root-usd",),
         )
         runtime._rotation_fill_queue.append(
-            (child.node_id, Decimal("1"), Decimal("100"), "rotation_entry")
+            (child.node_id, Decimal("1"), Decimal("100"), "rotation_entry", None)
         )
 
         await runtime._settle_rotation_fills(NOW)
@@ -825,7 +825,7 @@ def test_rotation_entry_fill_sets_fee_aware_sell_tp_and_sl() -> None:
             root_node_ids=("root-doge",),
         )
         runtime._rotation_fill_queue.append(
-            (child.node_id, Decimal("1"), Decimal("100"), "rotation_entry")
+            (child.node_id, Decimal("1"), Decimal("100"), "rotation_entry", None)
         )
 
         await runtime._settle_rotation_fills(NOW)
@@ -846,6 +846,71 @@ def test_rotation_entry_fill_sets_fee_aware_sell_tp_and_sl() -> None:
 
         assert tp_net_pct == Decimal(str(runtime._settings.rotation_take_profit_pct))
         assert sl_net_loss_pct == Decimal(str(runtime._settings.rotation_stop_loss_pct))
+
+    asyncio.run(scenario())
+
+
+def test_rotation_exit_fill_persists_trade_outcome() -> None:
+    async def scenario() -> None:
+        runtime = _runtime()
+        root = RotationNode(
+            node_id="root-usd",
+            parent_node_id=None,
+            depth=0,
+            asset="USD",
+            quantity_total=Decimal("100"),
+            quantity_free=Decimal("0"),
+            status=RotationNodeStatus.OPEN,
+        )
+        child = RotationNode(
+            node_id="root-usd-eth-0",
+            parent_node_id="root-usd",
+            depth=1,
+            asset="ETH",
+            quantity_total=Decimal("1"),
+            quantity_free=Decimal("0"),
+            entry_pair="ETH/USD",
+            from_asset="USD",
+            order_side=OrderSide.BUY,
+            entry_price=Decimal("100"),
+            fill_price=Decimal("100"),
+            entry_cost=Decimal("100"),
+            opened_at=NOW - timedelta(hours=2),
+            confidence=0.83,
+            exit_reason="take_profit",
+            status=RotationNodeStatus.CLOSING,
+        )
+        runtime._rotation_tree = RotationTreeState(
+            nodes=(root, child),
+            root_node_ids=("root-usd",),
+        )
+        runtime._rotation_fill_queue.append(
+            (
+                child.node_id,
+                Decimal("1"),
+                Decimal("110"),
+                "rotation_exit",
+                Decimal("0.25"),
+            )
+        )
+
+        await runtime._settle_rotation_fills(NOW)
+
+        outcomes = runtime._reader.fetch_trade_outcomes(lookback_days=3650)
+        assert len(outcomes) == 1
+        outcome = outcomes[0]
+        assert outcome["node_id"] == child.node_id
+        assert outcome["pair"] == "ETH/USD"
+        assert outcome["direction"] == "buy"
+        assert outcome["entry_price"] == "100"
+        assert outcome["exit_price"] == "110"
+        assert outcome["entry_cost"] == "100"
+        assert outcome["exit_proceeds"] == "110"
+        assert outcome["net_pnl"] == "10"
+        assert outcome["fee_total"] == "0.25"
+        assert outcome["exit_reason"] == "take_profit"
+        assert outcome["confidence"] == 0.83
+        assert outcome["hold_hours"] == 2.0
 
     asyncio.run(scenario())
 

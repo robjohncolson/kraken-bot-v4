@@ -94,6 +94,25 @@ CREATE TABLE IF NOT EXISTS pair_metadata (
     updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
 )"""
 
+TRADE_OUTCOMES_DDL = """\
+CREATE TABLE IF NOT EXISTS trade_outcomes (
+    id            INTEGER PRIMARY KEY,
+    node_id       TEXT NOT NULL,
+    pair          TEXT NOT NULL,
+    direction     TEXT NOT NULL,
+    entry_price   TEXT NOT NULL,
+    exit_price    TEXT NOT NULL,
+    entry_cost    TEXT NOT NULL,
+    exit_proceeds TEXT NOT NULL,
+    net_pnl       TEXT NOT NULL,
+    fee_total     TEXT,
+    exit_reason   TEXT NOT NULL,
+    hold_hours    REAL,
+    confidence    REAL,
+    opened_at     TEXT NOT NULL,
+    closed_at     TEXT NOT NULL
+)"""
+
 SCHEMA_STATEMENTS = (
     POSITIONS_DDL,
     ORDERS_DDL,
@@ -101,6 +120,7 @@ SCHEMA_STATEMENTS = (
     COOLDOWNS_DDL,
     ROTATION_NODES_DDL,
     PAIR_METADATA_DDL,
+    TRADE_OUTCOMES_DDL,
 )
 
 # Columns added after initial schema — safe to run repeatedly.
@@ -194,7 +214,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         _migrate_columns(conn, "rotation_nodes", _ROTATION_NODE_MIGRATIONS)
         conn.commit()
         logger.info(
-            "SQLite schema verified (positions, orders, ledger, cooldowns, rotation_nodes, pair_metadata)"
+            "SQLite schema verified (positions, orders, ledger, cooldowns, rotation_nodes, pair_metadata, trade_outcomes)"
         )
     except sqlite3.Error as exc:
         raise SqliteSchemaError(f"Schema bootstrap failed: {exc}") from exc
@@ -422,6 +442,23 @@ class SqliteReader:
         )
         return RecordedState(positions=positions, orders=orders)
 
+    def fetch_trade_outcomes(
+        self,
+        lookback_days: int = 30,
+    ) -> tuple[sqlite3.Row, ...]:
+        """Fetch recent trade outcomes, newest first."""
+        horizon_days = max(0, lookback_days)
+        try:
+            cursor = self._conn.execute(
+                "SELECT * FROM trade_outcomes "
+                "WHERE julianday(closed_at) >= julianday('now', ?) "
+                "ORDER BY julianday(closed_at) DESC, id DESC",
+                (f"-{horizon_days} days",),
+            )
+            return tuple(cursor.fetchall())
+        except sqlite3.Error as exc:
+            raise SqliteReadError(f"Failed to read trade outcomes: {exc}") from exc
+
 
 class SqliteWriter:
     """Write adapter for idempotent position mutations."""
@@ -495,6 +532,56 @@ class SqliteWriter:
             self._conn.rollback()
             raise SqliteWriteError(
                 f"Failed to insert ledger entry for {pair!r}: {exc}"
+            ) from exc
+
+    def insert_trade_outcome(
+        self,
+        *,
+        node_id: str,
+        pair: str,
+        direction: str,
+        entry_price: Decimal | str,
+        exit_price: Decimal | str,
+        entry_cost: Decimal | str,
+        exit_proceeds: Decimal | str,
+        net_pnl: Decimal | str,
+        fee_total: Decimal | str | None,
+        exit_reason: str,
+        hold_hours: float | None,
+        confidence: float | None,
+        opened_at: str,
+        closed_at: str,
+    ) -> None:
+        """Append a settled trade outcome."""
+        try:
+            self._conn.execute(
+                "INSERT INTO trade_outcomes ("
+                "node_id, pair, direction, entry_price, exit_price, entry_cost, "
+                "exit_proceeds, net_pnl, fee_total, exit_reason, hold_hours, "
+                "confidence, opened_at, closed_at"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    node_id,
+                    pair,
+                    direction,
+                    str(entry_price),
+                    str(exit_price),
+                    str(entry_cost),
+                    str(exit_proceeds),
+                    str(net_pnl),
+                    str(fee_total) if fee_total is not None else None,
+                    exit_reason,
+                    hold_hours,
+                    confidence,
+                    opened_at,
+                    closed_at,
+                ),
+            )
+            self._conn.commit()
+        except sqlite3.Error as exc:
+            self._conn.rollback()
+            raise SqliteWriteError(
+                f"Failed to insert trade outcome for node {node_id!r}: {exc}"
             ) from exc
 
     def upsert_position(self, position: Position) -> None:

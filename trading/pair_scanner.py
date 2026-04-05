@@ -3,7 +3,12 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable, Mapping
-from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError as FuturesTimeoutError, as_completed
+from concurrent.futures import (
+    Future,
+    ThreadPoolExecutor,
+    TimeoutError as FuturesTimeoutError,
+    as_completed,
+)
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Final
@@ -17,7 +22,12 @@ from core.errors import ExchangeError
 from core.types import BeliefDirection, BullCandidate, OrderSide, RotationCandidate
 from exchange.client import KrakenClient
 from exchange.ohlcv import OHLCVFetchError, fetch_ohlcv
-from exchange.symbols import SymbolNormalizationError, normalize_asset_symbol, normalize_pair, split_normalized_pair
+from exchange.symbols import (
+    SymbolNormalizationError,
+    normalize_asset_symbol,
+    normalize_pair,
+    split_normalized_pair,
+)
 from exchange.transport import KRAKEN_BASE_URL
 
 logger = logging.getLogger(__name__)
@@ -109,7 +119,9 @@ class PairScanner:
                 futures[future] = pair
 
             candidates: list[BullCandidate] = []
-            for future in as_completed(futures, timeout=self._settings.scanner_timeout_sec):
+            for future in as_completed(
+                futures, timeout=self._settings.scanner_timeout_sec
+            ):
                 candidate = future.result()
                 if candidate is not None:
                     candidates.append(candidate)
@@ -155,7 +167,9 @@ class PairScanner:
         try:
             belief = self._technical_source.analyze(pair, bars)
         except Exception as exc:
-            logger.warning("Pair scan skipped %s due to analysis failure: %s", pair, exc)
+            logger.warning(
+                "Pair scan skipped %s due to analysis failure: %s", pair, exc
+            )
             return None
 
         if belief.direction is not BeliefDirection.BULLISH:
@@ -164,12 +178,18 @@ class PairScanner:
         try:
             estimated_peak_hours = _estimate_bull_peak_hours(bars)
         except ValueError as exc:
-            logger.warning("Pair scan skipped %s due to peak-hour estimation failure: %s", pair, exc)
+            logger.warning(
+                "Pair scan skipped %s due to peak-hour estimation failure: %s",
+                pair,
+                exc,
+            )
             return None
         if estimated_peak_hours <= 0:
             return None
 
-        reference_price_hint = Decimal(str(pd.to_numeric(bars["close"], errors="raise").iloc[-1]))
+        reference_price_hint = Decimal(
+            str(pd.to_numeric(bars["close"], errors="raise").iloc[-1])
+        )
         return BullCandidate(
             pair=pair,
             belief=belief,
@@ -178,8 +198,9 @@ class PairScanner:
             estimated_peak_hours=estimated_peak_hours,
         )
 
-
-    def discover_asset_pairs(self, source_asset: str) -> tuple[tuple[str, str, str], ...]:
+    def discover_asset_pairs(
+        self, source_asset: str
+    ) -> tuple[tuple[str, str, str], ...]:
         """Discover all spot pairs involving source_asset.
 
         Returns tuples of (normalized_pair, base, quote) where source_asset
@@ -202,7 +223,8 @@ class PairScanner:
             all_pairs = getattr(self, "_all_pairs_cache", ())
 
         return tuple(
-            (pair, base, quote) for pair, base, quote in all_pairs
+            (pair, base, quote)
+            for pair, base, quote in all_pairs
             if base == source_asset or quote == source_asset
         )
 
@@ -236,35 +258,44 @@ class PairScanner:
                     side = OrderSide.SELL  # Sell base to get quote
                 else:
                     dest_asset = base
-                    side = OrderSide.BUY   # Buy base with quote
+                    side = OrderSide.BUY  # Buy base with quote
 
                 if dest_asset in excluded_assets:
                     continue
 
                 future = executor.submit(
-                    self._scan_rotation_pair, pair, source_asset, dest_asset, side,
+                    self._scan_rotation_pair,
+                    pair,
+                    source_asset,
+                    dest_asset,
+                    side,
                     max_window_hours,
                 )
                 futures[future] = pair
 
-            for future in as_completed(futures, timeout=self._settings.scanner_timeout_sec):
+            for future in as_completed(
+                futures, timeout=self._settings.scanner_timeout_sec
+            ):
                 result = future.result()
                 if result is not None:
                     candidates.append(result)
         except FuturesTimeoutError:
             logger.warning(
                 "Rotation scan timed out for %s (%d candidates found so far)",
-                source_asset, len(candidates),
+                source_asset,
+                len(candidates),
             )
             executor.shutdown(wait=False, cancel_futures=True)
         finally:
             if not any(f.cancelled() for f in futures):
                 executor.shutdown(wait=True, cancel_futures=False)
 
-        return tuple(sorted(
-            candidates,
-            key=lambda c: (-c.confidence, c.estimated_window_hours, c.pair),
-        ))
+        return tuple(
+            sorted(
+                candidates,
+                key=lambda c: (-c.confidence, c.estimated_window_hours, c.pair),
+            )
+        )
 
     def _scan_rotation_pair(
         self,
@@ -319,7 +350,9 @@ class PairScanner:
         )
 
 
-def _normalize_all_spot_pairs(raw_pairs: Mapping[str, object]) -> tuple[tuple[str, str, str], ...]:
+def _normalize_all_spot_pairs(
+    raw_pairs: Mapping[str, object],
+) -> tuple[tuple[str, str, str], ...]:
     """Normalize all spot pairs. Returns (pair, base, quote) tuples."""
     result: list[tuple[str, str, str]] = []
 
@@ -361,7 +394,9 @@ def _looks_like_any_spot_pair(raw_name: str, metadata: Mapping[str, object]) -> 
     return True
 
 
-def _fetch_asset_pairs_http(client: KrakenClient, timeout_sec: float) -> Mapping[str, object]:
+def _fetch_asset_pairs_http(
+    client: KrakenClient, timeout_sec: float
+) -> Mapping[str, object]:
     prepared = client.get_asset_pairs()
     url = f"{KRAKEN_BASE_URL}{prepared.endpoint}"
 
@@ -370,7 +405,9 @@ def _fetch_asset_pairs_http(client: KrakenClient, timeout_sec: float) -> Mapping
         response.raise_for_status()
         data = response.json()
     except (httpx.HTTPError, ValueError) as exc:
-        raise AssetPairDiscoveryError(f"Failed to fetch Kraken AssetPairs: {exc}") from exc
+        raise AssetPairDiscoveryError(
+            f"Failed to fetch Kraken AssetPairs: {exc}"
+        ) from exc
 
     errors = data.get("error")
     if errors:
@@ -378,7 +415,9 @@ def _fetch_asset_pairs_http(client: KrakenClient, timeout_sec: float) -> Mapping
 
     result = data.get("result")
     if not isinstance(result, Mapping):
-        raise AssetPairDiscoveryError("Kraken AssetPairs response missing result mapping.")
+        raise AssetPairDiscoveryError(
+            "Kraken AssetPairs response missing result mapping."
+        )
     return result
 
 
@@ -441,7 +480,8 @@ def _raw_pair_symbol(raw_name: str, metadata: Mapping[str, object]) -> str | Non
 
 
 def _estimate_rotation_window_hours(
-    bars: pd.DataFrame, take_profit_pct: float = 3.0,
+    bars: pd.DataFrame,
+    take_profit_pct: float = 3.0,
 ) -> float:
     """Estimate hours to reach take-profit based on hourly volatility."""
     close = pd.to_numeric(bars["close"], errors="coerce").astype(float)
@@ -451,7 +491,7 @@ def _estimate_rotation_window_hours(
     if hourly_vol <= 0 or pd.isna(hourly_vol):
         return 48.0
     hours_to_tp = (take_profit_pct / 100) / hourly_vol
-    return max(2.0, min(48.0, hours_to_tp))
+    return max(6.0, min(48.0, hours_to_tp))
 
 
 def _estimate_bull_peak_hours(bars: pd.DataFrame) -> int:
@@ -469,7 +509,11 @@ def _estimate_bull_peak_hours(bars: pd.DataFrame) -> int:
     bullish_count = sum((macd_bullish, rsi_bullish, ema_bullish))
     bucket_index = bullish_count
 
-    if bucket_index > 0 and macd_bullish and _histogram_is_getting_more_positive(histogram):
+    if (
+        bucket_index > 0
+        and macd_bullish
+        and _histogram_is_getting_more_positive(histogram)
+    ):
         bucket_index = min(bucket_index + 1, len(PEAK_HOUR_BUCKETS) - 1)
     if bucket_index > 0 and rsi > RSI_OVERBOUGHT_THRESHOLD:
         bucket_index = max(bucket_index - 1, 0)
@@ -478,11 +522,17 @@ def _estimate_bull_peak_hours(bars: pd.DataFrame) -> int:
 
 
 def _coerce_close_series(bars: pd.DataFrame) -> pd.Series:
-    close = pd.to_numeric(bars["close"], errors="coerce").astype(float).reset_index(drop=True)
+    close = (
+        pd.to_numeric(bars["close"], errors="coerce")
+        .astype(float)
+        .reset_index(drop=True)
+    )
     if close.isna().any():
         raise ValueError("close prices must be numeric and non-null")
     if len(close) < EMA_SLOW_SPAN:
-        raise ValueError(f"Need at least {EMA_SLOW_SPAN} close prices to estimate peak hours.")
+        raise ValueError(
+            f"Need at least {EMA_SLOW_SPAN} close prices to estimate peak hours."
+        )
     return close
 
 
@@ -498,8 +548,12 @@ def _compute_rsi(close: pd.Series) -> float:
     delta = close.diff()
     gains = delta.clip(lower=0.0)
     losses = -delta.clip(upper=0.0)
-    avg_gain = float(gains.rolling(window=RSI_PERIOD, min_periods=RSI_PERIOD).mean().iloc[-1])
-    avg_loss = float(losses.rolling(window=RSI_PERIOD, min_periods=RSI_PERIOD).mean().iloc[-1])
+    avg_gain = float(
+        gains.rolling(window=RSI_PERIOD, min_periods=RSI_PERIOD).mean().iloc[-1]
+    )
+    avg_loss = float(
+        losses.rolling(window=RSI_PERIOD, min_periods=RSI_PERIOD).mean().iloc[-1]
+    )
 
     if avg_loss == 0.0:
         return 100.0 if avg_gain > 0.0 else 50.0
@@ -550,9 +604,19 @@ def evaluate_root_ta(
 
 
 # Assets that ARE quote currencies — never set exit windows on these
-QUOTE_ASSETS: frozenset[str] = frozenset({
-    "USD", "USDT", "USDC", "EUR", "GBP", "CAD", "AUD", "JPY", "CHF",
-})
+QUOTE_ASSETS: frozenset[str] = frozenset(
+    {
+        "USD",
+        "USDT",
+        "USDC",
+        "EUR",
+        "GBP",
+        "CAD",
+        "AUD",
+        "JPY",
+        "CHF",
+    }
+)
 
 # Preferred quote currencies for root exit (best first)
 PREFERRED_QUOTES: tuple[str, ...] = ("USD", "USDT", "USDC", "EUR")

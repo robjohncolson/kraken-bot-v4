@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections import Counter
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,7 +26,8 @@ class CouncilRequest:
     def to_json(self) -> str:
         return json.dumps(
             {"schema_version": SCHEMA_VERSION, **asdict(self)},
-            indent=2, default=str,
+            indent=2,
+            default=str,
         )
 
     @classmethod
@@ -76,7 +78,8 @@ class CouncilConsensus:
     def to_json(self) -> str:
         return json.dumps(
             {"schema_version": SCHEMA_VERSION, **asdict(self)},
-            indent=2, default=str,
+            indent=2,
+            default=str,
         )
 
     @classmethod
@@ -88,11 +91,19 @@ class CouncilConsensus:
             as_of=data["as_of"],
             status=data.get("status", "completed"),
             votes=data.get("votes", {}),
-            direction=data.get("direction", data.get("consensus", {}).get("direction", "neutral")),
-            confidence=float(data.get("confidence", data.get("consensus", {}).get("confidence", 0.0))),
-            regime=data.get("regime", data.get("consensus", {}).get("regime", "unknown")),
+            direction=data.get(
+                "direction", data.get("consensus", {}).get("direction", "neutral")
+            ),
+            confidence=float(
+                data.get("confidence", data.get("consensus", {}).get("confidence", 0.0))
+            ),
+            regime=data.get(
+                "regime", data.get("consensus", {}).get("regime", "unknown")
+            ),
             completed_at=data.get("completed_at", ""),
-            valid_vote_count=int(data.get("valid_vote_count", len(data.get("votes", {})))),
+            valid_vote_count=int(
+                data.get("valid_vote_count", len(data.get("votes", {})))
+            ),
             expected_vote_count=int(data.get("expected_vote_count", 2)),
         )
 
@@ -108,21 +119,49 @@ def compute_consensus(votes: list[CouncilVote]) -> tuple[str, float, str]:
 
     Single-agent vote: returns that direction at that confidence.
     Unanimous multi-agent: returns shared direction at average confidence.
-    Split (2 agents disagree): returns neutral/0.0 (safe for direction-based trading).
+    Majority disagreement: returns the majority direction at scaled confidence.
+    Perfect splits remain neutral/0.0.
     """
     valid = [v for v in votes if v.direction in ("bullish", "bearish", "neutral")]
     if not valid:
         return "neutral", 0.0, "unknown"
 
-    directions = [v.direction for v in valid]
-    if len(set(directions)) == 1:
-        # Unanimous (includes single-agent case)
-        avg_conf = sum(v.confidence for v in valid) / len(valid)
-        regime = valid[0].regime
-        return directions[0], round(avg_conf, 4), regime
+    direction_counts = Counter(v.direction for v in valid)
+    majority_count = max(direction_counts.values())
+    winners = [
+        direction
+        for direction, count in direction_counts.items()
+        if count == majority_count
+    ]
+    if len(winners) != 1 or (majority_count * 2) <= len(valid):
+        return "neutral", 0.0, "unknown"
 
-    # Split — neutral (safe: direction-based trading would act on any non-neutral)
-    return "neutral", 0.0, "unknown"
+    winning_direction = winners[0]
+    winning_votes = [vote for vote in valid if vote.direction == winning_direction]
+    avg_confidence = sum(v.confidence for v in winning_votes) / len(winning_votes)
+    if majority_count == len(valid):
+        confidence = avg_confidence
+    else:
+        confidence = avg_confidence * (majority_count / len(valid))
+    return (
+        winning_direction,
+        round(confidence, 4),
+        _majority_regime(winning_votes),
+    )
+
+
+def _majority_regime(votes: list[CouncilVote]) -> str:
+    regimes = [vote.regime for vote in votes if vote.regime]
+    if not regimes:
+        return "unknown"
+    regime_counts = Counter(regimes)
+    majority_count = max(regime_counts.values())
+    winners = [
+        regime for regime, count in regime_counts.items() if count == majority_count
+    ]
+    if len(winners) != 1:
+        return "unknown"
+    return winners[0]
 
 
 def council_paths(base_dir: str | Path = COUNCIL_DIR) -> dict[str, Path]:

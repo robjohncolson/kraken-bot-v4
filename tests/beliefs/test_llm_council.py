@@ -26,6 +26,7 @@ from scheduler import BeliefRefreshRequest
 # Protocol tests
 # ---------------------------------------------------------------------------
 
+
 def test_make_call_id_format() -> None:
     now = datetime(2026, 3, 31, 14, 0, 0, tzinfo=timezone.utc)
     call_id = make_call_id("DOGE/USD", now)
@@ -47,13 +48,15 @@ def test_council_request_roundtrip() -> None:
 
 
 def test_council_vote_from_json() -> None:
-    raw = json.dumps({
-        "agent": "claude",
-        "direction": "bullish",
-        "confidence": 0.72,
-        "regime": "trending",
-        "reasoning": "RSI rising",
-    })
+    raw = json.dumps(
+        {
+            "agent": "claude",
+            "direction": "bullish",
+            "confidence": 0.72,
+            "regime": "trending",
+            "reasoning": "RSI rising",
+        }
+    )
     vote = CouncilVote.from_json(raw)
     assert vote.agent == "claude"
     assert vote.direction == "bullish"
@@ -79,6 +82,30 @@ def test_consensus_split_is_neutral() -> None:
     direction, confidence, regime = compute_consensus(votes)
     assert direction == "neutral"
     assert confidence == 0.0
+
+
+def test_consensus_two_of_three_majority_scales_confidence() -> None:
+    votes = [
+        CouncilVote("claude", "bullish", 0.8, "trending"),
+        CouncilVote("codex", "bullish", 0.6, "trending"),
+        CouncilVote("gemini", "bearish", 0.7, "ranging"),
+    ]
+    direction, confidence, regime = compute_consensus(votes)
+    assert direction == "bullish"
+    assert confidence == 0.4667
+    assert regime == "trending"
+
+
+def test_consensus_three_way_split_is_neutral() -> None:
+    votes = [
+        CouncilVote("claude", "bullish", 0.8, "trending"),
+        CouncilVote("codex", "bearish", 0.7, "ranging"),
+        CouncilVote("gemini", "neutral", 0.6, "unknown"),
+    ]
+    direction, confidence, regime = compute_consensus(votes)
+    assert direction == "neutral"
+    assert confidence == 0.0
+    assert regime == "unknown"
 
 
 def test_consensus_empty_is_neutral() -> None:
@@ -125,7 +152,9 @@ def test_consensus_roundtrip_with_vote_counts() -> None:
         pair="DOGE/USD",
         as_of="2026-03-31T14:00:00+00:00",
         status="partial",
-        votes={"claude": {"direction": "bearish", "confidence": 0.6, "regime": "trending"}},
+        votes={
+            "claude": {"direction": "bearish", "confidence": 0.6, "regime": "trending"}
+        },
         direction="bearish",
         confidence=0.6,
         regime="trending",
@@ -141,17 +170,22 @@ def test_consensus_roundtrip_with_vote_counts() -> None:
 
 def test_consensus_backward_compat_no_vote_counts() -> None:
     """Old consensus files without vote count fields still parse."""
-    raw = json.dumps({
-        "schema_version": "llm-council/v1",
-        "call_id": "old-1",
-        "pair": "DOGE/USD",
-        "as_of": "2026-03-31T14:00:00+00:00",
-        "status": "completed",
-        "votes": {"claude": {"direction": "bullish"}, "codex": {"direction": "bullish"}},
-        "direction": "bullish",
-        "confidence": 0.7,
-        "regime": "trending",
-    })
+    raw = json.dumps(
+        {
+            "schema_version": "llm-council/v1",
+            "call_id": "old-1",
+            "pair": "DOGE/USD",
+            "as_of": "2026-03-31T14:00:00+00:00",
+            "status": "completed",
+            "votes": {
+                "claude": {"direction": "bullish"},
+                "codex": {"direction": "bullish"},
+            },
+            "direction": "bullish",
+            "confidence": 0.7,
+            "regime": "trending",
+        }
+    )
     restored = CouncilConsensus.from_json(raw)
     assert restored.valid_vote_count == 2  # defaults to len(votes)
     assert restored.expected_vote_count == 2
@@ -161,15 +195,22 @@ def test_consensus_backward_compat_no_vote_counts() -> None:
 # Handler tests
 # ---------------------------------------------------------------------------
 
+
 def _mock_bars() -> pd.DataFrame:
-    return pd.DataFrame({
-        "open": np.ones(50), "high": np.ones(50),
-        "low": np.ones(50), "close": np.ones(50) * 0.09,
-        "volume": np.ones(50) * 100,
-    })
+    return pd.DataFrame(
+        {
+            "open": np.ones(50),
+            "high": np.ones(50),
+            "low": np.ones(50),
+            "close": np.ones(50) * 0.09,
+            "volume": np.ones(50) * 100,
+        }
+    )
 
 
-def _make_request(pair: str = "DOGE/USD", now: datetime | None = None) -> BeliefRefreshRequest:
+def _make_request(
+    pair: str = "DOGE/USD", now: datetime | None = None
+) -> BeliefRefreshRequest:
     return BeliefRefreshRequest(
         pair=pair,
         position_id="",
@@ -233,7 +274,9 @@ def test_handler_fallback_to_technical_ensemble(tmp_path: Path) -> None:
     )
     mock_fallback = lambda req: mock_belief  # noqa: E731
 
-    handler = make_fallback_council_handler(council_dir=tmp_path, fallback_handler=mock_fallback)
+    handler = make_fallback_council_handler(
+        council_dir=tmp_path, fallback_handler=mock_fallback
+    )
     with patch("beliefs.llm_council_handler.fetch_ohlcv", return_value=_mock_bars()):
         result = handler(_make_request())
 
@@ -270,7 +313,9 @@ def test_handler_council_wins_over_fallback(tmp_path: Path) -> None:
         fallback_called = True
         return None
 
-    handler = make_fallback_council_handler(council_dir=tmp_path, fallback_handler=mock_fallback)
+    handler = make_fallback_council_handler(
+        council_dir=tmp_path, fallback_handler=mock_fallback
+    )
     result = handler(_make_request(now=now))
 
     assert result is not None
@@ -292,7 +337,9 @@ def test_handler_accepts_partial_consensus(tmp_path: Path) -> None:
         pair="DOGE/USD",
         as_of=now.isoformat(),
         status="partial",
-        votes={"claude": {"direction": "bearish", "confidence": 0.8, "regime": "trending"}},
+        votes={
+            "claude": {"direction": "bearish", "confidence": 0.8, "regime": "trending"}
+        },
         direction="bearish",
         confidence=0.8,
         regime="trending",
@@ -361,6 +408,7 @@ def test_request_backoff_skips_duplicate(tmp_path: Path) -> None:
 # Broker helper tests
 # ---------------------------------------------------------------------------
 
+
 def test_cleanup_stale_files(tmp_path: Path) -> None:
     from scripts.llm_council_broker import _cleanup_stale_files
 
@@ -377,6 +425,7 @@ def test_cleanup_stale_files(tmp_path: Path) -> None:
     old_file.write_text("{}")
     # Set mtime to 48 hours ago
     import os
+
     old_mtime = time.time() - 48 * 3600
     os.utime(old_file, (old_mtime, old_mtime))
 
@@ -393,7 +442,9 @@ def test_cleanup_stale_files(tmp_path: Path) -> None:
 def test_pane_exists_returns_false_when_tmux_missing() -> None:
     from scripts.llm_council_broker import _pane_exists
 
-    with patch("scripts.llm_council_broker.subprocess.run", side_effect=FileNotFoundError):
+    with patch(
+        "scripts.llm_council_broker.subprocess.run", side_effect=FileNotFoundError
+    ):
         assert _pane_exists("work:2.0") is False
 
 

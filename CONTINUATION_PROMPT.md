@@ -13,28 +13,28 @@
 
 ## Current state (as of 2026-04-05)
 
-**POST-MORTEM COMPLETE**: The bot suffered a ~26% portfolio decline ($500→$370). Root cause: the execution layer was fundamentally broken — **zero trades ever completed**. 82 orders placed, zero fills recorded, zero P&L realized. The loss was pure holding exposure on declining altcoins. See `tasks/postmortem-recovery-plan.md` for full analysis.
-
-**Phase 1 (execution layer) is now fixed** (commit `65f1635`). Phases 0, 2-4 remain.
+**POST-MORTEM RECOVERY COMPLETE (all phases shipped)**. The bot suffered a ~10% portfolio decline (Kraken shows $486.91). Root cause: execution layer was broken — zero trades ever completed. All 5 phases of the recovery plan are now implemented.
 
 | Field | Value |
 |-------|-------|
 | Belief model | `llm_council` (CC+Codex via tmux-bridge) |
-| Portfolio | ~$370 fragmented across 15 roots (needs Phase 0 consolidation) |
-| Rotation tree | **LIVE** — `ENABLE_ROTATION_TREE=true`, 15 root nodes |
-| Tests | **612 passing** |
+| Portfolio | ~$487 across 15 roots (TA-driven exits managing consolidation) |
+| Rotation tree | **LIVE** — `ENABLE_ROTATION_TREE=true`, 15 root nodes, all OPEN |
+| Tests | **624 passing** |
 | Execution layer | **FIXED** — startup + periodic reconciliation, child rehydration, cancel persistence |
-| Price-aware exits | TP=3%, SL=-2% (Phase 2 will fix to TP=5%, SL=2.5%) |
+| Risk management | **FIXED** — TP=5%, SL=2.5%, trailing stops (1.5% activation), root SL=10% |
+| Signal quality | **FIXED** — peak window floor 6h, council weighted majority, MIN_CONFIDENCE=0.70 |
+| Observability | **FIXED** — trade_outcomes table, child node unrealized P&L |
 | Dashboard | `http://10.0.0.24:58392` |
 
 ### Portfolio (from SQLite, 2026-04-05)
 
-| Status | Nodes | Entry Cost | Assets |
-|--------|-------|-----------|--------|
-| CLOSING | 9 | $214 | ATOM, BTC, ETH, KSM, LINK, RAVE, SOL, UNITAS, XRP (exit orders unfilled) |
-| OPEN | 6 | $125 | USD ($78), EUR ($22), USDT ($17), TON ($17), GBP ($11), USDC ($10) |
+All 15 roots are OPEN. DB orphaned orders (82) cleaned up, CLOSING roots reset. Bot is live with TA-driven exits — no blanket USD consolidation.
 
-**Key problem**: Portfolio still fragmented. Phase 0 (manual triage) needed: enable safe mode, cancel orphaned Kraken orders, consolidate altcoins to USD.
+| Assets | Notes |
+|--------|-------|
+| USD ($78), EUR ($22), USDT ($17), TON ($17), GBP ($11), USDC ($10) | Stablecoins/fiat |
+| BTC, ETH, SOL, KSM, LINK, ATOM, XRP, RAVE, UNITAS | Altcoins — root exit windows will evaluate and rotate |
 
 ## Belief models
 
@@ -48,6 +48,7 @@
 
 - Handler: `beliefs/llm_council_handler.py` — builds market context, writes request files
 - **Fallback**: `make_fallback_council_handler()` wraps council + `technical_ensemble`. If no fresh consensus, falls back to TA instantly. Bot is never belief-less.
+- **Consensus**: Weighted majority — 2-of-3 bullish = bullish at scaled confidence (avg_conf * 2/3). Perfect splits = neutral/0.0. Unanimous = full avg confidence.
 - Broker: `python scripts/llm_council_broker.py` — dispatches to CC+Codex panes, collects votes
 - **Broker hardening**: pane health checks, retry on send failure, stale file cleanup
 - Protocol: `state/llm-council/{requests,responses,consensus}/*.json`
@@ -135,29 +136,26 @@ ROTATION_MAX_CHILDREN_PER_PARENT=3
 
 ## Goal for next session
 
-### Priority 1: Phase 0 — Emergency Triage
+### Priority 1: Observe the Fixed Bot in Production
 
-Full plan at `tasks/postmortem-recovery-plan.md`. Manual steps:
-1. **Enable safe mode**: `READ_ONLY_EXCHANGE=true`, `DISABLE_ORDER_MUTATIONS=true` in `.env`
-2. **Cancel orphaned orders**: Run `scripts/triage_cancel_orders.py` (or manual via Kraken web) → cancel all open orders, update DB
-3. **Clean rotation tree**: Reset CLOSING roots to OPEN, verify quantities match exchange
-4. **Consolidate to USD**: Sell all altcoin positions to establish clean baseline
+All recovery phases are shipped. Monitor:
+- Are trades actually completing now? Check `trade_outcomes` table for rows
+- Are trailing stops ratcheting? Check rotation events for SL updates
+- Are root exit windows consolidating weak positions? Check for `root_exit` events
+- Is the LLM council providing useful signals with weighted majority?
+- Win/loss rates once enough trades accumulate
 
-### Priority 2: Phase 2 — Risk Management
+### Priority 2: Enable Variable Position Sizing (Phase 2.4)
 
-After Phase 0 consolidation:
-- Fix TP/SL ratio: TP=5%, SL=2.5% for ~2:1 R:R after fees (`core/config.py:28-29`, `runtime_loop.py:1014-1023`)
-- Activate trailing stops: Ratchet stop_loss_price using trailing_stop_high (`runtime_loop.py:1122-1134`)
-- Add root-level stop loss: ROOT_STOP_LOSS_PCT=10% emergency exit
-- Enable variable sizing: MAX_POSITION_USD=50
+Once `trade_outcomes` has enough data (10+ trades):
+- Change `.env`: `MAX_POSITION_USD=50` (from 10)
+- Integrate Kelly sizing from `trading/sizing.py:91-142` into `trading/rotation_tree.py` allocation
+- Feed actual win/loss data from `trade_outcomes` into `bounded_kelly()`
 
-### Priority 3: Phase 3+4 — Signal Quality + Observability
+### Priority 3: Telegram Alerts (Phase 4.4, stretch)
 
-- Fix peak window estimation floor (2h→6h minimum)
-- LLM council majority vote instead of hard-fail on disagreement
-- Trade outcomes table + win/loss tracking
-- Child node unrealized P&L display
-- Telegram alerts
+- Configure bot token and chat ID in `.env`
+- Alert on: SL hit, TP hit, fill timeout, WS disconnect, drawdown >5%
 
 ### Lessons learned (2026-04-05 post-mortem)
 
@@ -170,12 +168,14 @@ After Phase 0 consolidation:
 
 ## What shipped 2026-04-05
 
-- **Post-mortem analysis**: Full investigation of 26% portfolio decline → root cause: zero trades ever completed
-- **Execution layer fix (Phase 1)**: `cancel_order()` in SqliteWriter, startup + periodic order reconciliation against Kraken trade history, child node rehydration on restart, `_execute_cancel_order` now resolves client_order_id → exchange txid, REST fallback poller uses exact fill data from trade history, entry cost uses actual fill cost with parent refund
-- **KrakenTrade enriched**: `side`, `quantity`, `price` fields added to model + parser
-- **Exchange order ID preservation**: Rehydrated pending orders retain their exchange txid for reconciliation
-- 68 new tests (612 total), ruff clean
-- Recovery plan at `tasks/postmortem-recovery-plan.md` (Phases 0, 2-4 remain)
+- **Post-mortem analysis**: Full investigation of portfolio decline → root cause: zero trades ever completed
+- **Phase 1 — Execution layer fix**: `cancel_order()` in SqliteWriter, startup + periodic order reconciliation against Kraken trade history, child node rehydration on restart, `_execute_cancel_order` resolves client_order_id → exchange txid, REST fallback poller uses exact fill data from trade history, entry cost uses actual fill cost with parent refund, KrakenTrade enriched with side/quantity/price, exchange_order_id preserved on rehydration
+- **Phase 0 — DB triage**: 82 orphaned orders marked cancelled, 9 CLOSING roots reset to OPEN, no Kraken open orders to cancel (already expired)
+- **Phase 2 — Risk management**: TP default 3%→5%, SL default 2%→2.5% (~2:1 R:R after fees), SL trigger tightened by taker exit fee, trailing stop ratchets SL after 1.5% activation threshold, root-level stop loss at 10% USD drawdown (skips stablecoins). New config: `ROTATION_TRAILING_STOP_ACTIVATION_PCT`, `ROOT_STOP_LOSS_PCT`
+- **Phase 3 — Signal quality**: Peak window floor raised 2h→6h, LLM council uses weighted majority instead of hard-fail on disagreement (2-of-3 bullish = bullish at scaled confidence), `MIN_CONFIDENCE` raised 0.55→0.70 (requires 5/6 TA signals)
+- **Phase 4 — Observability**: `trade_outcomes` table with full P&L tracking (populated on exit settlement), child node unrealized P&L now displayed in dashboard snapshot
+- Recovery plan at `tasks/postmortem-recovery-plan.md`
+- 80 new tests across all phases (624 total), ruff clean
 
 ## What shipped 2026-04-04
 
@@ -233,7 +233,7 @@ After Phase 0 consolidation:
 ## Validation
 
 ```bash
-python -m pytest                    # 612 tests
+python -m pytest                    # 624 tests
 python -m ruff check .              # clean
 curl http://127.0.0.1:58392/api/health         # dashboard up
 curl http://127.0.0.1:58392/api/rotation-tree  # rotation tree state

@@ -8,6 +8,7 @@ from decimal import Decimal
 import numpy as np
 import pandas as pd
 import pytest
+from unittest.mock import patch
 
 from core.types import (
     OrderSide,
@@ -22,16 +23,19 @@ from trading.pair_scanner import QUOTE_ASSETS, evaluate_root_ta
 # evaluate_root_ta unit tests
 # ---------------------------------------------------------------------------
 
+
 def _make_bars(prices: list[float]) -> pd.DataFrame:
     """Create a minimal OHLCV DataFrame from close prices."""
     n = len(prices)
-    return pd.DataFrame({
-        "open": prices,
-        "high": [p * 1.01 for p in prices],
-        "low": [p * 0.99 for p in prices],
-        "close": prices,
-        "volume": [1000.0] * n,
-    })
+    return pd.DataFrame(
+        {
+            "open": prices,
+            "high": [p * 1.01 for p in prices],
+            "low": [p * 0.99 for p in prices],
+            "close": prices,
+            "volume": [1000.0] * n,
+        }
+    )
 
 
 def _trending_up_bars(n: int = 50, start: float = 100.0) -> pd.DataFrame:
@@ -59,20 +63,32 @@ class TestEvaluateRootTa:
         bars = _trending_up_bars()
         direction, window, confidence = evaluate_root_ta(bars)
         assert direction == "bullish"
-        assert 2.0 <= window <= 48.0
+        assert 6.0 <= window <= 48.0
         assert 0.0 < confidence <= 1.0
 
     def test_bearish_trend_returns_bearish(self):
         bars = _trending_down_bars()
         direction, window, confidence = evaluate_root_ta(bars)
         assert direction == "bearish"
-        assert 2.0 <= window <= 48.0
+        assert 6.0 <= window <= 48.0
         assert confidence == 1.0  # all 3 signals agree
 
     def test_window_clamped_within_range(self):
         bars = _trending_up_bars()
         _, window, _ = evaluate_root_ta(bars)
-        assert 2.0 <= window <= 48.0
+        assert 6.0 <= window <= 48.0
+
+    def test_window_floor_clamps_high_volatility_pair_to_six_hours(self):
+        from trading.pair_scanner import _estimate_rotation_window_hours
+
+        bars = _trending_up_bars()
+        with patch("pandas.core.series.Series.std", return_value=0.02):
+            window = _estimate_rotation_window_hours(
+                bars,
+                take_profit_pct=5.0,
+            )
+
+        assert window == 6.0
 
     def test_returns_tuple_of_three(self):
         bars = _trending_up_bars()
@@ -99,6 +115,7 @@ class TestEvaluateRootTa:
 # QUOTE_ASSETS constant tests
 # ---------------------------------------------------------------------------
 
+
 class TestQuoteAssets:
     def test_usd_is_quote(self):
         assert "USD" in QUOTE_ASSETS
@@ -119,8 +136,15 @@ class TestQuoteAssets:
 # Root node deadline setting tests (via runtime loop mocking)
 # ---------------------------------------------------------------------------
 
-def _make_root(asset: str, qty: Decimal = Decimal("100"), deadline_at=None,
-               status=RotationNodeStatus.OPEN, entry_pair=None, order_side=None) -> RotationNode:
+
+def _make_root(
+    asset: str,
+    qty: Decimal = Decimal("100"),
+    deadline_at=None,
+    status=RotationNodeStatus.OPEN,
+    entry_pair=None,
+    order_side=None,
+) -> RotationNode:
     return RotationNode(
         node_id=f"root-{asset.lower()}",
         parent_node_id=None,
@@ -171,6 +195,7 @@ class TestRootExitPairMatching:
 # Root expiry re-evaluation tests
 # ---------------------------------------------------------------------------
 
+
 class TestRootExpiryReEvaluation:
     """Test that expired roots are re-evaluated, not hard-sold."""
 
@@ -182,6 +207,7 @@ class TestRootExpiryReEvaluation:
 
         # After re-evaluation with bullish TA, deadline should be extended
         from trading.rotation_tree import update_node
+
         new_deadline = now + timedelta(hours=10)
         updated = update_node(tree, root.node_id, deadline_at=new_deadline)
 
@@ -192,6 +218,7 @@ class TestRootExpiryReEvaluation:
     def test_expired_root_is_detected(self):
         """expired_nodes should include root nodes with past deadlines."""
         from trading.rotation_tree import expired_nodes
+
         now = datetime(2026, 4, 3, 12, 0, tzinfo=timezone.utc)
         root = _make_root("ADA", deadline_at=now - timedelta(hours=1))
         tree = _make_tree(root)
@@ -203,6 +230,7 @@ class TestRootExpiryReEvaluation:
     def test_root_without_deadline_not_expired(self):
         """Root with no deadline should not appear in expired_nodes."""
         from trading.rotation_tree import expired_nodes
+
         now = datetime(2026, 4, 3, 12, 0, tzinfo=timezone.utc)
         root = _make_root("ADA")  # deadline_at=None
         tree = _make_tree(root)
@@ -213,6 +241,7 @@ class TestRootExpiryReEvaluation:
     def test_root_with_future_deadline_not_expired(self):
         """Root with future deadline should not appear in expired_nodes."""
         from trading.rotation_tree import expired_nodes
+
         now = datetime(2026, 4, 3, 12, 0, tzinfo=timezone.utc)
         root = _make_root("ADA", deadline_at=now + timedelta(hours=5))
         tree = _make_tree(root)
@@ -258,9 +287,11 @@ class TestEvaluateRootDeadlinesSkips:
 # Deadline timezone formatting tests
 # ---------------------------------------------------------------------------
 
+
 class TestDeadlineFormatting:
     def test_utc_to_eastern(self):
         from tui.widgets.rotation_tree import _format_deadline_et
+
         # 2026-04-03T18:30:00+00:00 (UTC) = 2:30 PM ET (EDT in April)
         result = _format_deadline_et("2026-04-03T18:30:00+00:00")
         assert "ET" in result
@@ -269,12 +300,14 @@ class TestDeadlineFormatting:
 
     def test_naive_datetime_treated_as_utc(self):
         from tui.widgets.rotation_tree import _format_deadline_et
+
         result = _format_deadline_et("2026-04-03T18:30:00")
         assert "ET" in result
         assert "14:30" in result
 
     def test_invalid_string_falls_back(self):
         from tui.widgets.rotation_tree import _format_deadline_et
+
         result = _format_deadline_et("not-a-date")
         assert result == "not-a-date"
 
@@ -283,11 +316,13 @@ class TestDeadlineFormatting:
 # Unrealized P&L tests
 # ---------------------------------------------------------------------------
 
+
 class TestUnrealizedPnL:
     def test_root_unrealized_pnl_computed(self):
         """Open root with entry_cost should show unrealized P&L."""
         from guardian import PriceSnapshot as PS
         from runtime_loop import _build_rotation_tree_snapshot
+
         root = _make_root("ADA", qty=Decimal("100"))
         root = replace(root, entry_cost=Decimal("50"))
         tree = _make_tree(root)
@@ -302,6 +337,7 @@ class TestUnrealizedPnL:
     def test_root_no_entry_cost_shows_none(self):
         """Root without entry_cost should show no P&L."""
         from runtime_loop import _build_rotation_tree_snapshot
+
         root = _make_root("ADA", qty=Decimal("100"))
         tree = _make_tree(root)
         snap = _build_rotation_tree_snapshot(tree)
@@ -311,6 +347,7 @@ class TestUnrealizedPnL:
     def test_usd_root_pnl_is_zero(self):
         """USD root should have P&L of 0 (1 USD = 1 USD)."""
         from runtime_loop import _build_rotation_tree_snapshot
+
         root = _make_root("USD", qty=Decimal("100"))
         root = replace(root, entry_cost=Decimal("100"))
         tree = _make_tree(root)
@@ -326,6 +363,7 @@ class TestUnrealizedPnL:
         """Fiat root priced via inverse pair (USD/EUR) shows correct P&L."""
         from guardian import PriceSnapshot as PS
         from runtime_loop import _build_rotation_tree_snapshot
+
         root = _make_root("EUR", qty=Decimal("200"))
         root = replace(root, entry_cost=Decimal("210"))
         tree = _make_tree(root)
@@ -342,6 +380,7 @@ class TestUnrealizedPnL:
     def test_stablecoin_defaults_without_price_data(self):
         """USDT/USDC roots use $1 default even without WebSocket prices."""
         from runtime_loop import _build_rotation_tree_snapshot
+
         root = _make_root("USDT", qty=Decimal("500"))
         root = replace(root, entry_cost=Decimal("500"))
         tree = _make_tree(root)
@@ -353,6 +392,7 @@ class TestUnrealizedPnL:
     def test_missing_asset_no_pnl(self):
         """Asset with no price in map and no default shows no P&L."""
         from runtime_loop import _build_rotation_tree_snapshot
+
         root = _make_root("GBP", qty=Decimal("100"))
         root = replace(root, entry_cost=Decimal("120"))
         tree = _make_tree(root)
@@ -363,12 +403,14 @@ class TestUnrealizedPnL:
     def test_cached_price_fallback(self):
         """Asset with no WebSocket price uses cached REST price for P&L."""
         from runtime_loop import _build_rotation_tree_snapshot
+
         root = _make_root("BABY", qty=Decimal("1000"))
         root = replace(root, entry_cost=Decimal("14"))
         tree = _make_tree(root)
         cached = {"BABY": Decimal("0.015")}
         snap = _build_rotation_tree_snapshot(
-            tree, cached_root_prices=cached,
+            tree,
+            cached_root_prices=cached,
         )
         node_snap = snap.nodes[0]
         assert node_snap.realized_pnl is not None
@@ -379,29 +421,63 @@ class TestUnrealizedPnL:
         """Fresh WebSocket price takes precedence over stale cached price."""
         from guardian import PriceSnapshot as PS
         from runtime_loop import _build_rotation_tree_snapshot
+
         root = _make_root("ADA", qty=Decimal("100"))
         root = replace(root, entry_cost=Decimal("50"))
         tree = _make_tree(root)
         cached = {"ADA": Decimal("0.50")}  # stale
         prices = {"ADA/USD": PS(price=Decimal("0.70"))}  # fresh
         snap = _build_rotation_tree_snapshot(
-            tree, current_prices=prices, cached_root_prices=cached,
+            tree,
+            current_prices=prices,
+            cached_root_prices=cached,
         )
         node_snap = snap.nodes[0]
         # Should use 0.70 (WebSocket), not 0.50 (cached)
         # current_value = 100 * 0.70 = 70, entry_cost = 50, P&L = 20
         assert Decimal(node_snap.realized_pnl) == Decimal("20")
 
+    def test_child_unrealized_pnl_computed_from_pair_price(self):
+        from guardian import PriceSnapshot as PS
+        from runtime_loop import _build_rotation_tree_snapshot
+
+        root = _make_root("USD", qty=Decimal("100"))
+        child = RotationNode(
+            node_id="root-usd-eth-0",
+            parent_node_id=root.node_id,
+            depth=1,
+            asset="ETH",
+            quantity_total=Decimal("2"),
+            quantity_free=Decimal("2"),
+            status=RotationNodeStatus.OPEN,
+            entry_pair="ETH/USD",
+            from_asset="USD",
+            order_side=OrderSide.BUY,
+            entry_price=Decimal("100"),
+            fill_price=Decimal("100"),
+            entry_cost=Decimal("200"),
+        )
+        tree = _make_tree(root, child)
+        prices = {"ETH/USD": PS(price=Decimal("110"))}
+
+        snap = _build_rotation_tree_snapshot(tree, current_prices=prices)
+        child_snap = next(node for node in snap.nodes if node.node_id == child.node_id)
+
+        assert child_snap.realized_pnl is not None
+        assert Decimal(child_snap.realized_pnl) == Decimal("20")
+
 
 # ---------------------------------------------------------------------------
 # Persistence round-trip: entry_cost survives restart
 # ---------------------------------------------------------------------------
+
 
 class TestEntryCostPersistence:
     def test_entry_cost_round_trip(self):
         """entry_cost saved to SQLite is restored on fetch."""
         import sqlite3
         from persistence.sqlite import SqliteReader, SqliteWriter, ensure_schema
+
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
         ensure_schema(conn)
@@ -409,7 +485,11 @@ class TestEntryCostPersistence:
         reader = SqliteReader(conn)
 
         root = _make_root("ADA", qty=Decimal("100"))
-        root = replace(root, entry_cost=Decimal("45.50"), deadline_at=datetime(2026, 4, 3, tzinfo=timezone.utc))
+        root = replace(
+            root,
+            entry_cost=Decimal("45.50"),
+            deadline_at=datetime(2026, 4, 3, tzinfo=timezone.utc),
+        )
         tree = _make_tree(root)
         writer.save_rotation_tree(tree)
 
@@ -422,6 +502,7 @@ class TestEntryCostPersistence:
         """Nodes without entry_cost load as None (not crash)."""
         import sqlite3
         from persistence.sqlite import SqliteReader, SqliteWriter, ensure_schema
+
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
         ensure_schema(conn)
@@ -440,11 +521,13 @@ class TestEntryCostPersistence:
 # Cached root USD prices tests
 # ---------------------------------------------------------------------------
 
+
 class TestCachedRootPrices:
     def test_collect_root_prices_includes_stablecoins(self):
         """_collect_root_prices always includes USD=1 default."""
         from unittest.mock import patch
         from runtime_loop import _collect_root_prices
+
         with patch("exchange.ohlcv.fetch_ohlcv", side_effect=Exception("no network")):
             prices = _collect_root_prices({}, {"USDT": Decimal("100")})
         assert prices["USD"] == Decimal("1")
@@ -454,6 +537,7 @@ class TestCachedRootPrices:
         from guardian import PriceSnapshot as PS
         from unittest.mock import patch
         from runtime_loop import _collect_root_prices
+
         ws_prices = {"ADA/USD": PS(price=Decimal("0.45"))}
         with patch("exchange.ohlcv.fetch_ohlcv") as mock_fetch:
             prices = _collect_root_prices(ws_prices, {"ADA": Decimal("100")})
@@ -465,6 +549,7 @@ class TestCachedRootPrices:
         import pandas as pd
         from unittest.mock import patch
         from runtime_loop import _collect_root_prices
+
         bars = pd.DataFrame({"close": ["1.25"]})
         with patch("exchange.ohlcv.fetch_ohlcv", return_value=bars):
             prices = _collect_root_prices({}, {"EUR": Decimal("100")})

@@ -12,7 +12,6 @@ from core.types import (
     RotationNode,
     RotationNodeStatus,
     RotationTreeState,
-    ZERO_DECIMAL,
 )
 from trading.rotation_tree import (
     add_node,
@@ -23,7 +22,6 @@ from trading.rotation_tree import (
     compute_child_allocations,
     expired_nodes,
     leaf_nodes,
-    live_nodes,
     make_child_node,
     node_by_id,
     remaining_hours,
@@ -64,7 +62,11 @@ def _candidate(
 
 
 def test_build_root_nodes_from_balances() -> None:
-    balances = {"USD": Decimal("80"), "DOGE": Decimal("5000"), "TRIA": Decimal("0.0001")}
+    balances = {
+        "USD": Decimal("80"),
+        "DOGE": Decimal("5000"),
+        "TRIA": Decimal("0.0001"),
+    }
     prices = {"USD": Decimal("1"), "DOGE": Decimal("0.09"), "TRIA": Decimal("0.001")}
     roots = build_root_nodes(balances, min_value_usd=Decimal("1"), prices_usd=prices)
     assets = {r.asset for r in roots}
@@ -76,9 +78,13 @@ def test_build_root_nodes_from_balances() -> None:
 def test_children_of() -> None:
     parent = _root()
     child = RotationNode(
-        node_id="root-usd-eth-0", parent_node_id="root-usd",
-        depth=1, asset="ETH", quantity_total=Decimal("50"),
-        quantity_free=Decimal("50"), status=RotationNodeStatus.OPEN,
+        node_id="root-usd-eth-0",
+        parent_node_id="root-usd",
+        depth=1,
+        asset="ETH",
+        quantity_total=Decimal("50"),
+        quantity_free=Decimal("50"),
+        status=RotationNodeStatus.OPEN,
     )
     tree = RotationTreeState(nodes=(parent, child))
     assert len(children_of(tree, "root-usd")) == 1
@@ -88,9 +94,13 @@ def test_children_of() -> None:
 def test_leaf_nodes() -> None:
     root = _root()
     child = RotationNode(
-        node_id="root-usd-eth-0", parent_node_id="root-usd",
-        depth=1, asset="ETH", quantity_total=Decimal("50"),
-        quantity_free=Decimal("50"), status=RotationNodeStatus.OPEN,
+        node_id="root-usd-eth-0",
+        parent_node_id="root-usd",
+        depth=1,
+        asset="ETH",
+        quantity_total=Decimal("50"),
+        quantity_free=Decimal("50"),
+        status=RotationNodeStatus.OPEN,
     )
     tree = RotationTreeState(nodes=(root, child))
     leaves = leaf_nodes(tree)
@@ -106,7 +116,7 @@ def test_remaining_hours() -> None:
 
 def test_compute_allocations_single_candidate() -> None:
     parent = _root(qty=Decimal("100"))
-    candidates = (_candidate(confidence=0.7),)
+    candidates = (_candidate(confidence=0.83),)
     allocs = compute_child_allocations(parent, candidates)
     assert len(allocs) == 1
     _, qty = allocs[0]
@@ -124,13 +134,27 @@ def test_compute_allocations_below_min_confidence() -> None:
 def test_compute_allocations_two_candidates() -> None:
     parent = _root(qty=Decimal("200"))
     candidates = (
-        _candidate(pair="ETH/USD", to_asset="ETH", confidence=0.8),
-        _candidate(pair="SOL/USD", to_asset="SOL", confidence=0.7),
+        _candidate(pair="ETH/USD", to_asset="ETH", confidence=0.9),
+        _candidate(pair="SOL/USD", to_asset="SOL", confidence=0.83),
     )
     allocs = compute_child_allocations(parent, candidates, min_position=Decimal("5"))
     assert len(allocs) == 2
     total = sum(qty for _, qty in allocs)
     assert total <= Decimal("160")  # PARENT_DEPLOY_RATIO * 200
+
+
+def test_compute_allocations_rejects_four_of_six_confidence() -> None:
+    parent = _root(qty=Decimal("100"))
+    candidates = (_candidate(confidence=0.67),)
+    allocs = compute_child_allocations(parent, candidates)
+    assert allocs == []
+
+
+def test_compute_allocations_accepts_five_of_six_confidence() -> None:
+    parent = _root(qty=Decimal("100"))
+    candidates = (_candidate(confidence=0.83),)
+    allocs = compute_child_allocations(parent, candidates)
+    assert len(allocs) == 1
 
 
 def test_make_child_node_respects_parent_deadline() -> None:
@@ -157,14 +181,22 @@ def test_close_node() -> None:
 def test_cascade_close() -> None:
     root = _root()
     child = RotationNode(
-        node_id="root-usd-eth-0", parent_node_id="root-usd",
-        depth=1, asset="ETH", quantity_total=Decimal("50"),
-        quantity_free=Decimal("50"), status=RotationNodeStatus.OPEN,
+        node_id="root-usd-eth-0",
+        parent_node_id="root-usd",
+        depth=1,
+        asset="ETH",
+        quantity_total=Decimal("50"),
+        quantity_free=Decimal("50"),
+        status=RotationNodeStatus.OPEN,
     )
     grandchild = RotationNode(
-        node_id="root-usd-eth-0-sol-0", parent_node_id="root-usd-eth-0",
-        depth=2, asset="SOL", quantity_total=Decimal("20"),
-        quantity_free=Decimal("20"), status=RotationNodeStatus.OPEN,
+        node_id="root-usd-eth-0-sol-0",
+        parent_node_id="root-usd-eth-0",
+        depth=2,
+        asset="SOL",
+        quantity_total=Decimal("20"),
+        quantity_free=Decimal("20"),
+        status=RotationNodeStatus.OPEN,
     )
     tree = RotationTreeState(nodes=(root, child, grandchild))
     result = cascade_close(tree, "root-usd")
@@ -177,9 +209,14 @@ def test_expired_nodes() -> None:
     future = NOW + timedelta(hours=1)
     expired_node = replace(_root(), node_id="expired", deadline_at=past)
     live_node = RotationNode(
-        node_id="live", parent_node_id=None, depth=0, asset="ETH",
-        quantity_total=Decimal("10"), quantity_free=Decimal("10"),
-        deadline_at=future, status=RotationNodeStatus.OPEN,
+        node_id="live",
+        parent_node_id=None,
+        depth=0,
+        asset="ETH",
+        quantity_total=Decimal("10"),
+        quantity_free=Decimal("10"),
+        deadline_at=future,
+        status=RotationNodeStatus.OPEN,
     )
     tree = RotationTreeState(nodes=(expired_node, live_node))
     result = expired_nodes(tree, NOW)
@@ -199,18 +236,26 @@ def test_add_and_update_node() -> None:
 # cancel_planned_node tests
 # ---------------------------------------------------------------------------
 
+
 def test_cancel_planned_node_returns_reserved_qty_to_parent() -> None:
     from trading.rotation_tree import cancel_planned_node
 
     parent = RotationNode(
-        node_id="root-usd", parent_node_id=None, depth=0,
-        asset="USD", quantity_total=Decimal("100"),
-        quantity_free=Decimal("40"), quantity_reserved=Decimal("60"),
+        node_id="root-usd",
+        parent_node_id=None,
+        depth=0,
+        asset="USD",
+        quantity_total=Decimal("100"),
+        quantity_free=Decimal("40"),
+        quantity_reserved=Decimal("60"),
         status=RotationNodeStatus.OPEN,
     )
     child = RotationNode(
-        node_id="child-eth", parent_node_id="root-usd", depth=1,
-        asset="ETH", quantity_total=Decimal("60"),
+        node_id="child-eth",
+        parent_node_id="root-usd",
+        depth=1,
+        asset="ETH",
+        quantity_total=Decimal("60"),
         quantity_free=Decimal("60"),
         status=RotationNodeStatus.PLANNED,
     )
@@ -230,14 +275,21 @@ def test_cancel_planned_node_is_noop_for_non_planned_node() -> None:
     from trading.rotation_tree import cancel_planned_node
 
     parent = RotationNode(
-        node_id="root-usd", parent_node_id=None, depth=0,
-        asset="USD", quantity_total=Decimal("100"),
-        quantity_free=Decimal("40"), quantity_reserved=Decimal("60"),
+        node_id="root-usd",
+        parent_node_id=None,
+        depth=0,
+        asset="USD",
+        quantity_total=Decimal("100"),
+        quantity_free=Decimal("40"),
+        quantity_reserved=Decimal("60"),
         status=RotationNodeStatus.OPEN,
     )
     child = RotationNode(
-        node_id="child-eth", parent_node_id="root-usd", depth=1,
-        asset="ETH", quantity_total=Decimal("60"),
+        node_id="child-eth",
+        parent_node_id="root-usd",
+        depth=1,
+        asset="ETH",
+        quantity_total=Decimal("60"),
         quantity_free=Decimal("60"),
         status=RotationNodeStatus.OPEN,  # NOT PLANNED
     )
