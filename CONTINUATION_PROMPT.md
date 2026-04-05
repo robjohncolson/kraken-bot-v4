@@ -11,58 +11,30 @@
 - **Platform**: Windows 11, Python 3.13, WSL for runtime
 - **Repo**: `git@github.com:robjohncolson/kraken-bot-v4.git`, branch `master`
 
-## Current live state (as of 2026-04-03)
+## Current state (as of 2026-04-05)
 
-Bot running on WSL `work:2.3` pane with **rotation tree LIVE**:
+**POST-MORTEM COMPLETE**: The bot suffered a ~26% portfolio decline ($500→$370). Root cause: the execution layer was fundamentally broken — **zero trades ever completed**. 82 orders placed, zero fills recorded, zero P&L realized. The loss was pure holding exposure on declining altcoins. See `tasks/postmortem-recovery-plan.md` for full analysis.
+
+**Phase 1 (execution layer) is now fixed** (commit `65f1635`). Phases 0, 2-4 remain.
 
 | Field | Value |
 |-------|-------|
 | Belief model | `llm_council` (CC+Codex via tmux-bridge) |
-| Poll interval | 1 hour (`BELIEF_STALE_HOURS=2`) |
-| Portfolio | ~$500 fragmented across ~20 assets (see below) |
-| Rotation tree | **LIVE** — `ENABLE_ROTATION_TREE=true`, 18 root nodes |
-| ALLOWED_PAIRS | Empty (all pairs enabled for rotation) |
-| Scanner timeout | 45s (`SCANNER_TIMEOUT_SEC=45`) |
+| Portfolio | ~$370 fragmented across 15 roots (needs Phase 0 consolidation) |
+| Rotation tree | **LIVE** — `ENABLE_ROTATION_TREE=true`, 15 root nodes |
+| Tests | **612 passing** |
+| Execution layer | **FIXED** — startup + periodic reconciliation, child rehydration, cancel persistence |
+| Price-aware exits | TP=3%, SL=-2% (Phase 2 will fix to TP=5%, SL=2.5%) |
 | Dashboard | `http://10.0.0.24:58392` |
-| Tests | 607 passing |
-| Belief confidence gate | `MIN_BELIEF_CONFIDENCE=0.5` — beliefs below threshold shown dimmed in TUI |
-| Price-aware exits | TP=3%, SL=-2%, dynamic entry timeout (25% of window, 30-120min), exit timeout=5min→MARKET |
-| Ordermin enforcement | Dynamic from Kraken AssetPairs API, cached 24h in SQLite |
-| Anti-churn | Max 3 children per parent (`ROTATION_MAX_CHILDREN_PER_PARENT=3`), top-3 by score |
-| OHLCV cache | 5-minute TTL, deduplicates same-pair scans across roots |
-| Pre-flight balance check | 2% safety margin, verifies exchange balance before placing rotation entries |
-| Rotation events | TP/SL/timeout/fill events in SSE + TUI rotation tree footer |
-| Settings validation | Startup warns on out-of-range TP/SL/confidence/timeout values |
-| Root exit windows | ALL roots get TA-evaluated deadlines (no currency special-casing); shows confidence + side + unrealized P&L |
-| One order per cycle | PLANNED nodes sorted by confidence, only one entry placed per 30s cycle |
-| Pair cooldown persistence | Rotation pair cooldowns survive restart (SQLite-backed) |
-| TUI cancelled node pruning | Cancelled nodes hidden from TUI rotation tree view |
-| P&L persistence | `entry_cost` + deadline fields survive restart via SQLite round-trip |
-| Snapshot price fallback | Snapshot uses runtime REST-cached prices when WebSocket lacks `{ASSET}/USD` |
-| TUI TTL column | Time-to-deadline column: green >2h, yellow <2h, red <30min, EXPIRED |
-| Dashboard rotation tree | Full-width panel: tree table with direction badges, status badges, TTL, P&L + summary bar |
-| Dashboard rotation events | Chronological event feed with color-coded type badges, updates via SSE |
-| TA direction persistence | `ta_direction` stored on RotationNode, persisted in SQLite, exposed in API |
-| Expired root recovery | EXPIRED roots reset to OPEN (max 3 attempts), OHLCV close price as sell fallback |
-| Restart-safe status | CLOSING/EXPIRED status + recovery_count survive restart via SQLite |
 
-### Portfolio (actual Kraken balances as of 2026-04-03)
+### Portfolio (from SQLite, 2026-04-05)
 
-Previous sessions successfully traded: USD→BABY/BSU/CFG, ADA→AUD, PEPE→CAD. Fills happened during nonce corruption so tree never tracked them. Assets became orphan roots on restart.
+| Status | Nodes | Entry Cost | Assets |
+|--------|-------|-----------|--------|
+| CLOSING | 9 | $214 | ATOM, BTC, ETH, KSM, LINK, RAVE, SOL, UNITAS, XRP (exit orders unfilled) |
+| OPEN | 6 | $125 | USD ($78), EUR ($22), USDT ($17), TON ($17), GBP ($11), USDC ($10) |
 
-| Asset | Amount | ~USD | Notes |
-|-------|--------|------|-------|
-| USD | 15.86 | $15.86 | Was $79.89, spent on rotations |
-| ADA | 19.87 | ~$14 | Was 49.68, sold some for AUD |
-| BABY | 1,476 | ~$21 | Bought from USD rotation |
-| BSU | 441 | ~$21 | Bought from USD rotation |
-| CFG | 134 | ~$21 | Bought from USD rotation |
-| CAD | 29.30 | ~$21 | From PEPE→CAD rotation |
-| PEPE | 2.55M | ~$20 | Was 6.39M, sold some |
-| ALGO | 43.61 | ~$9 | Original holding |
-| + EUR, GBP, KSM, LINK, SOL, TON, UNITAS, USDC, USDT, WIF, XRP, ATOM, BTC, ETH | various | small | Most too small to trade further |
-
-**Key problem**: Portfolio is fragmented into ~20 small positions. Most roots are too small to split 3 ways above $10 minimum. Pre-flight correctly blocks orders that can't afford the 2% safety margin.
+**Key problem**: Portfolio still fragmented. Phase 0 (manual triage) needed: enable safe mode, cancel orphaned Kraken orders, consolidate altcoins to USD.
 
 ## Belief models
 
@@ -163,31 +135,47 @@ ROTATION_MAX_CHILDREN_PER_PARENT=3
 
 ## Goal for next session
 
-### Priority 1: Observe Root Exit Windows in Production
+### Priority 1: Phase 0 — Emergency Triage
 
-Root exit windows are now live. Monitor:
-- Are roots getting reasonable deadlines (2-48h range)?
-- Do bearish/neutral roots actually sell? Check rotation events for `root_exit` type
-- Do bullish roots properly extend? Check for `root_extended` events
-- Does the portfolio consolidation work (small bearish holdings → USD)?
+Full plan at `tasks/postmortem-recovery-plan.md`. Manual steps:
+1. **Enable safe mode**: `READ_ONLY_EXCHANGE=true`, `DISABLE_ORDER_MUTATIONS=true` in `.env`
+2. **Cancel orphaned orders**: Run `scripts/triage_cancel_orders.py` (or manual via Kraken web) → cancel all open orders, update DB
+3. **Clean rotation tree**: Reset CLOSING roots to OPEN, verify quantities match exchange
+4. **Consolidate to USD**: Sell all altcoin positions to establish clean baseline
 
-### Priority 2: Root Exit Settlement
+### Priority 2: Phase 2 — Risk Management
 
-When a root exits (sells to USD), the proceeds should create a new root node. Verify this happens correctly via fill settlement. The `_settle_rotation_fills` path may need adjustment since root nodes don't have the typical parent-child fill settlement flow.
+After Phase 0 consolidation:
+- Fix TP/SL ratio: TP=5%, SL=2.5% for ~2:1 R:R after fees (`core/config.py:28-29`, `runtime_loop.py:1014-1023`)
+- Activate trailing stops: Ratchet stop_loss_price using trailing_stop_high (`runtime_loop.py:1122-1134`)
+- Add root-level stop loss: ROOT_STOP_LOSS_PCT=10% emergency exit
+- Enable variable sizing: MAX_POSITION_USD=50
 
-### Priority 3: Dashboard Rotation Tree Enhancements
+### Priority 3: Phase 3+4 — Signal Quality + Observability
 
-The `/api/rotation-tree` endpoint could show:
-- Root deadline status (time remaining)
-- Root TA direction (bullish/bearish/neutral)
-- Root exit events in the event stream
+- Fix peak window estimation floor (2h→6h minimum)
+- LLM council majority vote instead of hard-fail on disagreement
+- Trade outcomes table + win/loss tracking
+- Child node unrealized P&L display
+- Telegram alerts
 
-### Lessons learned 2026-04-02/03
+### Lessons learned (2026-04-05 post-mortem)
 
-- **Nonce safety**: NEVER use a separate script to call authenticated Kraken API while the bot is running. Nonce conflict breaks all subsequent API calls. Cancel orders through the bot's own interface.
-- **Shadow ledger divergence**: The rotation tree's `quantity_free` can diverge from actual Kraken balances. Pre-flight check is essential but only as good as the balance staleness allows. One-order-per-cycle is the real fix.
-- **Portfolio fragmentation**: Rotation tree creates many small positions. Without root exit windows, these accumulate and become individually untradeable.
-- **Root exit pair matching**: `_close_rotation_node` expects `order_side` to be the *entry* side (reverses it for exit). Root exits must simulate entry side, not set the desired exit side directly.
+- **Execution layer was broken from day one**: No `cancel_order()` DB method existed — 82 orders stuck as `status='open'` forever. Child nodes were never rehydrated on restart. Orders that filled during bot downtime were permanently lost.
+- **Nonce safety**: NEVER use a separate script to call authenticated Kraken API while the bot is running.
+- **Shadow ledger divergence**: The rotation tree's `quantity_free` can diverge from actual Kraken balances. Periodic reconciliation now catches drift.
+- **Portfolio fragmentation**: Rotation tree creates many small positions. Without root exit windows + consolidation, these accumulate and become individually untradeable.
+- **TP/SL math was marginal**: 3% TP + 0.52% fees = 3.52% move needed. 2% SL without fee adj = effective R:R of ~1.3:1. Need 2:1 minimum.
+- **Entry cost was wrong**: Used planned allocation, not actual fill cost. Now uses `fill_qty * fill_price` with unspent capital refunded to parent.
+
+## What shipped 2026-04-05
+
+- **Post-mortem analysis**: Full investigation of 26% portfolio decline → root cause: zero trades ever completed
+- **Execution layer fix (Phase 1)**: `cancel_order()` in SqliteWriter, startup + periodic order reconciliation against Kraken trade history, child node rehydration on restart, `_execute_cancel_order` now resolves client_order_id → exchange txid, REST fallback poller uses exact fill data from trade history, entry cost uses actual fill cost with parent refund
+- **KrakenTrade enriched**: `side`, `quantity`, `price` fields added to model + parser
+- **Exchange order ID preservation**: Rehydrated pending orders retain their exchange txid for reconciliation
+- 68 new tests (612 total), ruff clean
+- Recovery plan at `tasks/postmortem-recovery-plan.md` (Phases 0, 2-4 remain)
 
 ## What shipped 2026-04-04
 
@@ -245,7 +233,7 @@ The `/api/rotation-tree` endpoint could show:
 ## Validation
 
 ```bash
-python -m pytest                    # 607 tests
+python -m pytest                    # 612 tests
 python -m ruff check .              # clean
 curl http://127.0.0.1:58392/api/health         # dashboard up
 curl http://127.0.0.1:58392/api/rotation-tree  # rotation tree state
