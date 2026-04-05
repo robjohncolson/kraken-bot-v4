@@ -25,12 +25,14 @@ DEFAULT_GRID_MAKER_OFFSET_PCT = 0.4
 DEFAULT_BELIEF_STALE_HOURS = 4
 DEFAULT_BELIEF_CONSENSUS_THRESHOLD = 2
 DEFAULT_MIN_BELIEF_CONFIDENCE = 0.5
-DEFAULT_ROTATION_TAKE_PROFIT_PCT = 3.0
-DEFAULT_ROTATION_STOP_LOSS_PCT = 2.0
+DEFAULT_ROTATION_TAKE_PROFIT_PCT = 5.0
+DEFAULT_ROTATION_STOP_LOSS_PCT = 2.5
+DEFAULT_ROTATION_TRAILING_STOP_ACTIVATION_PCT = 1.5
 DEFAULT_ROTATION_ENTRY_FILL_TIMEOUT_MIN = 30
 DEFAULT_ROTATION_EXIT_FILL_TIMEOUT_MIN = 5
 DEFAULT_KRAKEN_MAKER_FEE_PCT = 0.26
 DEFAULT_KRAKEN_TAKER_FEE_PCT = 0.40
+DEFAULT_ROOT_STOP_LOSS_PCT = 10.0
 DEFAULT_REENTRY_COOLDOWN_HOURS = 24
 DEFAULT_LOCAL_STATE_DIR = Path("./data")
 DEFAULT_SQLITE_PATH = Path("./data/bot.db")
@@ -91,10 +93,12 @@ class Settings:
     min_belief_confidence: float
     rotation_take_profit_pct: float
     rotation_stop_loss_pct: float
+    rotation_trailing_stop_activation_pct: float
     rotation_entry_fill_timeout_min: int
     rotation_exit_fill_timeout_min: int
     kraken_maker_fee_pct: float
     kraken_taker_fee_pct: float
+    root_stop_loss_pct: float
     reentry_cooldown_hours: int
     local_state_dir: Path
     web_port: int
@@ -129,14 +133,20 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
     return Settings(
         kraken_api_key=_read_required(env, "KRAKEN_API_KEY"),
         kraken_api_secret=_read_required(env, "KRAKEN_API_SECRET"),
-        kraken_tier=_read_choice(env, "KRAKEN_TIER", DEFAULT_KRAKEN_TIER, ALLOWED_KRAKEN_TIERS),
+        kraken_tier=_read_choice(
+            env, "KRAKEN_TIER", DEFAULT_KRAKEN_TIER, ALLOWED_KRAKEN_TIERS
+        ),
         sqlite_path=_read_path(env, "SQLITE_PATH", DEFAULT_SQLITE_PATH),
         web_host=_read_optional(env, "WEB_HOST") or DEFAULT_WEB_HOST,
         supabase_url=_read_optional(env, "SUPABASE_URL"),
         supabase_key=_read_optional(env, "SUPABASE_KEY"),
         max_positions=_read_int(env, "MAX_POSITIONS", DEFAULT_MAX_POSITIONS),
-        max_same_side_pct=_read_int(env, "MAX_SAME_SIDE_PCT", DEFAULT_MAX_SAME_SIDE_PCT),
-        max_single_pair_pct=_read_int(env, "MAX_SINGLE_PAIR_PCT", DEFAULT_MAX_SINGLE_PAIR_PCT),
+        max_same_side_pct=_read_int(
+            env, "MAX_SAME_SIDE_PCT", DEFAULT_MAX_SAME_SIDE_PCT
+        ),
+        max_single_pair_pct=_read_int(
+            env, "MAX_SINGLE_PAIR_PCT", DEFAULT_MAX_SINGLE_PAIR_PCT
+        ),
         max_drawdown_soft_pct=_read_int(
             env, "MAX_DRAWDOWN_SOFT_PCT", DEFAULT_MAX_DRAWDOWN_SOFT_PCT
         ),
@@ -148,7 +158,9 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
         max_position_usd=_read_int(env, "MAX_POSITION_USD", DEFAULT_MAX_POSITION_USD),
         default_stop_pct=_read_int(env, "DEFAULT_STOP_PCT", DEFAULT_STOP_PCT),
         default_target_pct=_read_int(env, "DEFAULT_TARGET_PCT", DEFAULT_TARGET_PCT),
-        grid_headroom_pct=_read_int(env, "GRID_HEADROOM_PCT", DEFAULT_GRID_HEADROOM_PCT),
+        grid_headroom_pct=_read_int(
+            env, "GRID_HEADROOM_PCT", DEFAULT_GRID_HEADROOM_PCT
+        ),
         grid_profit_redist_interval_sec=_read_int(
             env,
             "GRID_PROFIT_REDIST_INTERVAL_SEC",
@@ -157,7 +169,9 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
         grid_maker_offset_pct=_read_float(
             env, "GRID_MAKER_OFFSET_PCT", DEFAULT_GRID_MAKER_OFFSET_PCT
         ),
-        belief_stale_hours=_read_int(env, "BELIEF_STALE_HOURS", DEFAULT_BELIEF_STALE_HOURS),
+        belief_stale_hours=_read_int(
+            env, "BELIEF_STALE_HOURS", DEFAULT_BELIEF_STALE_HOURS
+        ),
         belief_consensus_threshold=_read_int(
             env, "BELIEF_CONSENSUS_THRESHOLD", DEFAULT_BELIEF_CONSENSUS_THRESHOLD
         ),
@@ -170,17 +184,29 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
         rotation_stop_loss_pct=_read_float(
             env, "ROTATION_STOP_LOSS_PCT", DEFAULT_ROTATION_STOP_LOSS_PCT
         ),
+        rotation_trailing_stop_activation_pct=_read_float(
+            env,
+            "ROTATION_TRAILING_STOP_ACTIVATION_PCT",
+            DEFAULT_ROTATION_TRAILING_STOP_ACTIVATION_PCT,
+        ),
         rotation_entry_fill_timeout_min=_read_int(
-            env, "ROTATION_ENTRY_FILL_TIMEOUT_MIN", DEFAULT_ROTATION_ENTRY_FILL_TIMEOUT_MIN
+            env,
+            "ROTATION_ENTRY_FILL_TIMEOUT_MIN",
+            DEFAULT_ROTATION_ENTRY_FILL_TIMEOUT_MIN,
         ),
         rotation_exit_fill_timeout_min=_read_int(
-            env, "ROTATION_EXIT_FILL_TIMEOUT_MIN", DEFAULT_ROTATION_EXIT_FILL_TIMEOUT_MIN
+            env,
+            "ROTATION_EXIT_FILL_TIMEOUT_MIN",
+            DEFAULT_ROTATION_EXIT_FILL_TIMEOUT_MIN,
         ),
         kraken_maker_fee_pct=_read_float(
             env, "KRAKEN_MAKER_FEE_PCT", DEFAULT_KRAKEN_MAKER_FEE_PCT
         ),
         kraken_taker_fee_pct=_read_float(
             env, "KRAKEN_TAKER_FEE_PCT", DEFAULT_KRAKEN_TAKER_FEE_PCT
+        ),
+        root_stop_loss_pct=_read_float(
+            env, "ROOT_STOP_LOSS_PCT", DEFAULT_ROOT_STOP_LOSS_PCT
         ),
         reentry_cooldown_hours=_read_int(
             env, "REENTRY_COOLDOWN_HOURS", DEFAULT_REENTRY_COOLDOWN_HOURS
@@ -207,7 +233,9 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
         stats_normality_check=_read_bool(
             env, "STATS_NORMALITY_CHECK", DEFAULT_STATS_NORMALITY_CHECK
         ),
-        stats_fail_closed=_read_bool(env, "STATS_FAIL_CLOSED", DEFAULT_STATS_FAIL_CLOSED),
+        stats_fail_closed=_read_bool(
+            env, "STATS_FAIL_CLOSED", DEFAULT_STATS_FAIL_CLOSED
+        ),
         read_only_exchange=_read_bool(
             env, "READ_ONLY_EXCHANGE", DEFAULT_READ_ONLY_EXCHANGE
         ),

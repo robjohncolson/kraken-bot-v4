@@ -16,6 +16,7 @@ from core.types import (
     CancelOrder,
     MarketRegime,
     OrderSide,
+    OrderType,
     PendingOrder,
     Portfolio,
     Position,
@@ -129,6 +130,27 @@ def _position(pair: str = "DOGE/USD") -> Position:
         entry_price=Decimal("0.12"),
         stop_price=Decimal("0.10"),
         target_price=Decimal("0.20"),
+    )
+
+
+def _runtime(*, settings: Settings | None = None) -> SchedulerRuntime:
+    return SchedulerRuntime(
+        settings=_settings() if settings is None else settings,
+        executor=FakeExecutor(KrakenState()),
+        conn=_memory_db(),
+        initial_state=build_initial_scheduler_state(
+            kraken_state=KrakenState(),
+            recorded_state=RecordedState(),
+            report=ReconciliationReport(),
+            now=NOW,
+        ),
+        websocket_factory=lambda on_tick, on_fill: FakeRuntimeWebSocket(
+            on_tick, on_fill
+        ),
+        serve_dashboard=False,
+        sse_publisher=_noop_publish,
+        heartbeat_writer=lambda snapshot: None,
+        utc_now=lambda: NOW,
     )
 
 
@@ -714,6 +736,227 @@ def test_rotation_tree_rehydrates_persisted_child_nodes() -> None:
         "root-usd",
         "root-usd-eth-0",
     }
+
+
+def test_rotation_entry_fill_sets_fee_aware_buy_tp_and_sl() -> None:
+    async def scenario() -> None:
+        runtime = _runtime()
+        root = RotationNode(
+            node_id="root-usd",
+            parent_node_id=None,
+            depth=0,
+            asset="USD",
+            quantity_total=Decimal("100"),
+            quantity_free=Decimal("0"),
+            quantity_reserved=Decimal("100"),
+            status=RotationNodeStatus.OPEN,
+        )
+        child = RotationNode(
+            node_id="root-usd-eth-0",
+            parent_node_id="root-usd",
+            depth=1,
+            asset="ETH",
+            quantity_total=Decimal("100"),
+            quantity_free=Decimal("100"),
+            entry_pair="ETH/USD",
+            from_asset="USD",
+            order_side=OrderSide.BUY,
+            entry_price=Decimal("100"),
+            status=RotationNodeStatus.PLANNED,
+        )
+        runtime._rotation_tree = RotationTreeState(
+            nodes=(root, child),
+            root_node_ids=("root-usd",),
+        )
+        runtime._rotation_fill_queue.append(
+            (child.node_id, Decimal("1"), Decimal("100"), "rotation_entry")
+        )
+
+        await runtime._settle_rotation_fills(NOW)
+
+        opened = next(
+            n for n in runtime._rotation_tree.nodes if n.node_id == child.node_id
+        )
+        assert opened.take_profit_price == Decimal("105.52")
+        assert opened.stop_loss_price == Decimal("97.9")
+
+        tp_net_pct = (
+            (opened.take_profit_price / opened.fill_price - Decimal("1"))
+            * Decimal("100")
+        ) - Decimal(str(runtime._settings.kraken_maker_fee_pct * 2))
+        sl_net_loss_pct = (
+            (Decimal("1") - opened.stop_loss_price / opened.fill_price) * Decimal("100")
+        ) + Decimal(str(runtime._settings.kraken_taker_fee_pct))
+
+        assert tp_net_pct == Decimal(str(runtime._settings.rotation_take_profit_pct))
+        assert sl_net_loss_pct == Decimal(str(runtime._settings.rotation_stop_loss_pct))
+
+    asyncio.run(scenario())
+
+
+def test_rotation_entry_fill_sets_fee_aware_sell_tp_and_sl() -> None:
+    async def scenario() -> None:
+        runtime = _runtime()
+        root = RotationNode(
+            node_id="root-doge",
+            parent_node_id=None,
+            depth=0,
+            asset="DOGE",
+            quantity_total=Decimal("1"),
+            quantity_free=Decimal("0"),
+            quantity_reserved=Decimal("1"),
+            status=RotationNodeStatus.OPEN,
+        )
+        child = RotationNode(
+            node_id="root-doge-usd-0",
+            parent_node_id="root-doge",
+            depth=1,
+            asset="USD",
+            quantity_total=Decimal("1"),
+            quantity_free=Decimal("1"),
+            entry_pair="DOGE/USD",
+            from_asset="DOGE",
+            order_side=OrderSide.SELL,
+            entry_price=Decimal("100"),
+            status=RotationNodeStatus.PLANNED,
+        )
+        runtime._rotation_tree = RotationTreeState(
+            nodes=(root, child),
+            root_node_ids=("root-doge",),
+        )
+        runtime._rotation_fill_queue.append(
+            (child.node_id, Decimal("1"), Decimal("100"), "rotation_entry")
+        )
+
+        await runtime._settle_rotation_fills(NOW)
+
+        opened = next(
+            n for n in runtime._rotation_tree.nodes if n.node_id == child.node_id
+        )
+        assert opened.take_profit_price == Decimal("94.48")
+        assert opened.stop_loss_price == Decimal("102.1")
+
+        tp_net_pct = (
+            (Decimal("1") - opened.take_profit_price / opened.fill_price)
+            * Decimal("100")
+        ) - Decimal(str(runtime._settings.kraken_maker_fee_pct * 2))
+        sl_net_loss_pct = (
+            (opened.stop_loss_price / opened.fill_price - Decimal("1")) * Decimal("100")
+        ) + Decimal(str(runtime._settings.kraken_taker_fee_pct))
+
+        assert tp_net_pct == Decimal(str(runtime._settings.rotation_take_profit_pct))
+        assert sl_net_loss_pct == Decimal(str(runtime._settings.rotation_stop_loss_pct))
+
+    asyncio.run(scenario())
+
+
+def test_monitor_rotation_prices_ratchets_buy_stop_after_trailing_activation() -> None:
+    async def scenario() -> None:
+        runtime = _runtime()
+        root = RotationNode(
+            node_id="root-usd",
+            parent_node_id=None,
+            depth=0,
+            asset="USD",
+            quantity_total=Decimal("100"),
+            quantity_free=Decimal("100"),
+            status=RotationNodeStatus.OPEN,
+        )
+        child = RotationNode(
+            node_id="root-usd-eth-0",
+            parent_node_id="root-usd",
+            depth=1,
+            asset="ETH",
+            quantity_total=Decimal("1"),
+            quantity_free=Decimal("1"),
+            entry_pair="ETH/USD",
+            from_asset="USD",
+            order_side=OrderSide.BUY,
+            entry_price=Decimal("100"),
+            fill_price=Decimal("100"),
+            entry_cost=Decimal("100"),
+            take_profit_price=Decimal("110"),
+            stop_loss_price=Decimal("97.5"),
+            trailing_stop_high=Decimal("100"),
+            status=RotationNodeStatus.OPEN,
+            opened_at=NOW,
+        )
+        runtime._rotation_tree = RotationTreeState(
+            nodes=(root, child),
+            root_node_ids=("root-usd",),
+        )
+        runtime._state = replace(
+            runtime._state,
+            current_prices={"ETH/USD": PriceSnapshot(price=Decimal("105"))},
+        )
+
+        await runtime._monitor_rotation_prices(NOW)
+
+        updated = next(
+            n for n in runtime._rotation_tree.nodes if n.node_id == child.node_id
+        )
+        assert updated.trailing_stop_high == Decimal("105")
+        assert updated.stop_loss_price == Decimal("102.375")
+
+    asyncio.run(scenario())
+
+
+def test_monitor_rotation_prices_triggers_root_stop_loss_and_skips_quote_roots() -> (
+    None
+):
+    async def scenario() -> None:
+        runtime = _runtime()
+        risk_root = RotationNode(
+            node_id="root-ada",
+            parent_node_id=None,
+            depth=0,
+            asset="ADA",
+            quantity_total=Decimal("100"),
+            quantity_free=Decimal("100"),
+            entry_pair="ADA/USD",
+            order_side=OrderSide.BUY,
+            entry_cost=Decimal("100"),
+            status=RotationNodeStatus.OPEN,
+        )
+        stable_root = RotationNode(
+            node_id="root-usdt",
+            parent_node_id=None,
+            depth=0,
+            asset="USDT",
+            quantity_total=Decimal("100"),
+            quantity_free=Decimal("100"),
+            entry_pair="USDT/USD",
+            order_side=OrderSide.BUY,
+            entry_cost=Decimal("100"),
+            status=RotationNodeStatus.OPEN,
+        )
+        runtime._rotation_tree = RotationTreeState(
+            nodes=(risk_root, stable_root),
+            root_node_ids=("root-ada", "root-usdt"),
+        )
+        runtime._root_usd_prices = {
+            "USD": Decimal("1"),
+            "ADA": Decimal("0.89"),
+            "USDT": Decimal("0.89"),
+        }
+        close_calls: list[tuple[str, OrderType]] = []
+
+        async def close_stub(
+            node, *, reason: str = "", now=None, order_type=OrderType.LIMIT
+        ):
+            del reason, now
+            close_calls.append((node.node_id, order_type))
+
+        runtime._close_rotation_node = close_stub  # type: ignore[method-assign]
+
+        await runtime._monitor_rotation_prices(NOW)
+
+        nodes = {node.node_id: node for node in runtime._rotation_tree.nodes}
+        assert close_calls == [("root-ada", OrderType.MARKET)]
+        assert nodes["root-ada"].exit_reason == "root_stop_loss"
+        assert nodes["root-usdt"].exit_reason is None
+
+    asyncio.run(scenario())
 
 
 async def _noop_publish(*, event: str, data, event_id: str | None = None) -> None:

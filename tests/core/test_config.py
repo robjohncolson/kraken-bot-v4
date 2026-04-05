@@ -32,6 +32,10 @@ def test_load_settings_uses_spec_defaults() -> None:
     assert settings.scanner_max_concurrency == 4
     assert settings.scanner_timeout_sec == 15.0
     assert settings.enable_conditional_tree is False
+    assert settings.rotation_take_profit_pct == 5.0
+    assert settings.rotation_stop_loss_pct == 2.5
+    assert settings.rotation_trailing_stop_activation_pct == 1.5
+    assert settings.root_stop_loss_pct == 10.0
 
 
 @pytest.mark.parametrize("missing_name", sorted(REQUIRED_ENV))
@@ -81,3 +85,16 @@ def test_enable_conditional_tree_parses_from_environment() -> None:
     settings = load_settings({**REQUIRED_ENV, "ENABLE_CONDITIONAL_TREE": "true"})
 
     assert settings.enable_conditional_tree is True
+
+
+def test_rotation_risk_settings_parse_from_environment() -> None:
+    settings = load_settings(
+        {
+            **REQUIRED_ENV,
+            "ROTATION_TRAILING_STOP_ACTIVATION_PCT": "2.25",
+            "ROOT_STOP_LOSS_PCT": "12.5",
+        }
+    )
+
+    assert settings.rotation_trailing_stop_activation_pct == 2.25
+    assert settings.root_stop_loss_pct == 12.5

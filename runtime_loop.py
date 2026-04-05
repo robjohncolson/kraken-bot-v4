@@ -1451,12 +1451,17 @@ class SchedulerRuntime:
                 tp_pct = self._settings.rotation_take_profit_pct
                 sl_pct = self._settings.rotation_stop_loss_pct
                 fee_pct = self._settings.kraken_maker_fee_pct * 2  # round-trip
+                exit_fee = self._settings.kraken_taker_fee_pct
                 if node.order_side == OrderSide.BUY:
                     tp_price = fill_price * (1 + Decimal(str((tp_pct + fee_pct) / 100)))
-                    sl_price = fill_price * (1 - Decimal(str(sl_pct / 100)))
+                    sl_price = fill_price * (
+                        1 - Decimal(str((sl_pct - exit_fee) / 100))
+                    )
                 else:  # SELL side
                     tp_price = fill_price * (1 - Decimal(str((tp_pct + fee_pct) / 100)))
-                    sl_price = fill_price * (1 + Decimal(str(sl_pct / 100)))
+                    sl_price = fill_price * (
+                        1 + Decimal(str((sl_pct - exit_fee) / 100))
+                    )
                 # Transition PLANNED → OPEN with converted quantity + TP/SL
                 self._rotation_tree = update_node(
                     self._rotation_tree,
@@ -1564,9 +1569,33 @@ class SchedulerRuntime:
         }
 
         for node in tree.nodes:
-            if node.status != RotationNodeStatus.OPEN or node.depth == 0:
+            if node.status != RotationNodeStatus.OPEN:
                 continue
             if node.node_id in pending_exit_ids:
+                continue
+            if node.depth == 0:
+                if node.asset in QUOTE_ASSETS or node.entry_cost is None:
+                    continue
+                usd_price = self._root_usd_prices.get(node.asset)
+                if usd_price and usd_price > ZERO_DECIMAL:
+                    current_value = node.quantity_total * usd_price
+                    drawdown_pct = (
+                        Decimal("1") - current_value / node.entry_cost
+                    ) * 100
+                    if drawdown_pct >= Decimal(str(self._settings.root_stop_loss_pct)):
+                        logger.warning(
+                            "Root SL hit for %s: drawdown=%.1f%%",
+                            node.asset,
+                            float(drawdown_pct),
+                        )
+                        self._rotation_tree = update_node(
+                            self._rotation_tree,
+                            node.node_id,
+                            exit_reason="root_stop_loss",
+                        )
+                        await self._close_rotation_node(
+                            node, order_type=OrderType.MARKET
+                        )
                 continue
             if node.fill_price is None or node.order_side is None:
                 continue
@@ -1585,21 +1614,57 @@ class SchedulerRuntime:
                     node.trailing_stop_high is None
                     or current_price > node.trailing_stop_high
                 ):
+                    trailing_stop_high = current_price
                     self._rotation_tree = update_node(
                         self._rotation_tree,
                         node.node_id,
-                        trailing_stop_high=current_price,
+                        trailing_stop_high=trailing_stop_high,
                     )
+                    activation_pct = (
+                        self._settings.rotation_trailing_stop_activation_pct
+                    )
+                    activation_price = node.fill_price * (
+                        1 + Decimal(str(activation_pct / 100))
+                    )
+                    if trailing_stop_high >= activation_price:
+                        trail_pct = Decimal(
+                            str(self._settings.rotation_stop_loss_pct / 100)
+                        )
+                        new_sl = trailing_stop_high * (Decimal("1") - trail_pct)
+                        if new_sl > node.stop_loss_price:
+                            self._rotation_tree = update_node(
+                                self._rotation_tree,
+                                node.node_id,
+                                stop_loss_price=new_sl,
+                            )
             else:  # SELL: trailing low
                 if (
                     node.trailing_stop_high is None
                     or current_price < node.trailing_stop_high
                 ):
+                    trailing_stop_high = current_price
                     self._rotation_tree = update_node(
                         self._rotation_tree,
                         node.node_id,
-                        trailing_stop_high=current_price,
+                        trailing_stop_high=trailing_stop_high,
                     )
+                    activation_pct = (
+                        self._settings.rotation_trailing_stop_activation_pct
+                    )
+                    activation_price = node.fill_price * (
+                        1 - Decimal(str(activation_pct / 100))
+                    )
+                    if trailing_stop_high <= activation_price:
+                        trail_pct = Decimal(
+                            str(self._settings.rotation_stop_loss_pct / 100)
+                        )
+                        new_sl = trailing_stop_high * (Decimal("1") + trail_pct)
+                        if new_sl < node.stop_loss_price:
+                            self._rotation_tree = update_node(
+                                self._rotation_tree,
+                                node.node_id,
+                                stop_loss_price=new_sl,
+                            )
 
             # Check take-profit
             tp_hit = (
