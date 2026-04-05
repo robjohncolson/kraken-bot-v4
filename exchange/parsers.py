@@ -186,9 +186,7 @@ def parse_open_orders(result: Mapping[str, object]) -> tuple[KrakenOrder, ...]:
     orders: list[KrakenOrder] = []
     for order_id, order_data in open_dict.items():
         if not isinstance(order_data, Mapping):
-            raise KrakenResponseError(
-                f"Order data for {order_id!r} is not a mapping"
-            )
+            raise KrakenResponseError(f"Order data for {order_id!r} is not a mapping")
 
         descr = order_data.get("descr")
         if not isinstance(descr, Mapping):
@@ -225,13 +223,28 @@ def parse_trade_history(result: Mapping[str, object]) -> tuple[KrakenTrade, ...]
     trades: list[KrakenTrade] = []
     for trade_id, trade_data in trades_dict.items():
         if not isinstance(trade_data, Mapping):
-            raise KrakenResponseError(
-                f"Trade data for {trade_id!r} is not a mapping"
-            )
+            raise KrakenResponseError(f"Trade data for {trade_id!r} is not a mapping")
 
         pair = normalize_pair(trade_data["pair"])
         order_id = trade_data.get("ordertxid") or None
         client_order_id = trade_data.get("cl_ord_id") or None
+        side = (
+            trade_data.get("type") if isinstance(trade_data.get("type"), str) else None
+        )
+
+        try:
+            quantity = Decimal(str(trade_data["vol"]))
+        except (InvalidOperation, TypeError, KeyError) as exc:
+            raise KrakenResponseError(
+                f"Cannot parse quantity for trade {trade_id!r}"
+            ) from exc
+
+        try:
+            price = Decimal(str(trade_data["price"]))
+        except (InvalidOperation, TypeError, KeyError) as exc:
+            raise KrakenResponseError(
+                f"Cannot parse price for trade {trade_id!r}"
+            ) from exc
 
         try:
             fee = Decimal(str(trade_data["fee"]))
@@ -252,6 +265,9 @@ def parse_trade_history(result: Mapping[str, object]) -> tuple[KrakenTrade, ...]
                 order_id=order_id,
                 client_order_id=client_order_id,
                 position_id=position_id,
+                side=side,
+                quantity=quantity,
+                price=price,
                 fee=fee,
                 filled_at=filled_at,
             )

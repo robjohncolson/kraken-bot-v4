@@ -128,6 +128,9 @@ def test_parse_trade_history_basic() -> None:
             "TXXXXX-AAAAA-BBBBBB": {
                 "pair": "XDGUSD",
                 "ordertxid": "OXXXXX-CCCCC-DDDDDD",
+                "type": "buy",
+                "vol": "125.5",
+                "price": "0.1234",
                 "fee": "0.10",
                 "time": 1711296000.0,
                 "postxid": "PXXXXX-EEEEE-FFFFFF",
@@ -143,6 +146,9 @@ def test_parse_trade_history_basic() -> None:
     assert trade.trade_id == "TXXXXX-AAAAA-BBBBBB"
     assert trade.pair == "DOGE/USD"
     assert trade.order_id == "OXXXXX-CCCCC-DDDDDD"
+    assert trade.side == "buy"
+    assert trade.quantity == Decimal("125.5")
+    assert trade.price == Decimal("0.1234")
     assert trade.fee == Decimal("0.10")
     assert trade.filled_at is not None
     assert trade.filled_at.tzname() == "UTC"
@@ -155,6 +161,9 @@ def test_parse_trade_history_empty_position_id() -> None:
             "TYYYYY-11111-222222": {
                 "pair": "XDGUSD",
                 "ordertxid": "OYYYYY-33333-444444",
+                "type": "sell",
+                "vol": "50",
+                "price": "0.1250",
                 "fee": "0.05",
                 "time": 1711296000.0,
                 "postxid": "",

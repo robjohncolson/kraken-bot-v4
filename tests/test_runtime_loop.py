@@ -8,19 +8,26 @@ from decimal import Decimal
 
 from core.config import Settings, load_settings
 from core.types import (
+    Balance,
     BeliefDirection,
     BeliefSnapshot,
     BeliefSource,
     BotState,
+    CancelOrder,
     MarketRegime,
+    OrderSide,
+    PendingOrder,
     Portfolio,
     Position,
     PositionSide,
+    RotationNode,
+    RotationNodeStatus,
+    RotationTreeState,
 )
-from exchange.models import KrakenOrder, KrakenState
+from exchange.models import KrakenOrder, KrakenState, KrakenTrade
 from exchange.websocket import ConnectionState, FillConfirmed, PriceTick
 from guardian import PriceSnapshot
-from persistence.sqlite import ensure_schema
+from persistence.sqlite import SqliteReader, SqliteWriter, ensure_schema
 from runtime_loop import SchedulerRuntime, build_initial_scheduler_state
 from scheduler import SchedulerConfig
 from trading.conditional_tree import ConditionalTreeState
@@ -30,19 +37,38 @@ NOW = datetime(2026, 3, 25, 12, 0, tzinfo=timezone.utc)
 
 
 class FakeExecutor:
-    def __init__(self, kraken_state: KrakenState, *, ws_token: str = "ws-token-123") -> None:
+    def __init__(
+        self, kraken_state: KrakenState, *, ws_token: str = "ws-token-123"
+    ) -> None:
         self.kraken_state = kraken_state
         self.ws_token = ws_token
         self.fetch_calls = 0
         self.token_calls = 0
+        self.cancel_calls: list[str] = []
+        self.order_calls = 0
+        self._client = object()
 
     def fetch_kraken_state(self) -> KrakenState:
         self.fetch_calls += 1
         return self.kraken_state
 
+    def fetch_open_orders(self) -> tuple[KrakenOrder, ...]:
+        return self.kraken_state.open_orders
+
+    def fetch_trade_history(self) -> tuple[KrakenTrade, ...]:
+        return self.kraken_state.trade_history
+
     def get_ws_token(self) -> str:
         self.token_calls += 1
         return self.ws_token
+
+    def execute_cancel(self, order_id: str) -> int:
+        self.cancel_calls.append(order_id)
+        return 1
+
+    def execute_order(self, _order) -> str:
+        self.order_calls += 1
+        return f"order-{self.order_calls}"
 
 
 class FakeRuntimeWebSocket:
@@ -112,7 +138,9 @@ def test_start_connects_websocket_subscribes_and_publishes_dashboard_state() -> 
         heartbeats = []
         fake_websocket: FakeRuntimeWebSocket | None = None
 
-        async def capture_publish(*, event: str, data, event_id: str | None = None) -> None:
+        async def capture_publish(
+            *, event: str, data, event_id: str | None = None
+        ) -> None:
             published.append({"event": event, "data": data, "event_id": event_id})
 
         def websocket_factory(on_tick, on_fill) -> FakeRuntimeWebSocket:
@@ -305,7 +333,9 @@ def test_belief_refresh_handler_enqueues_and_applies_belief_on_next_cycle() -> N
     asyncio.run(scenario())
 
 
-def test_run_once_seeds_candidate_price_subscribes_pair_and_enqueues_rotation_belief() -> None:
+def test_run_once_seeds_candidate_price_subscribes_pair_and_enqueues_rotation_belief() -> (
+    None
+):
     async def scenario() -> None:
         fake_websocket: FakeRuntimeWebSocket | None = None
         candidate_belief = BeliefSnapshot(
@@ -437,6 +467,253 @@ def test_apply_exit_offset_preserves_fine_precision() -> None:
     price = Decimal("0.1234")
     result = _apply_exit_offset(price, PositionSide.LONG, 0.1)
     assert result == Decimal("0.1233")
+
+
+def test_build_initial_scheduler_state_rehydrates_pending_exchange_order_id() -> None:
+    pending = PendingOrder(
+        client_order_id="cl-1",
+        kind="rotation_entry",
+        pair="DOGE/USD",
+        side=OrderSide.BUY,
+        base_qty=Decimal("100"),
+        quote_qty=Decimal("12"),
+    )
+
+    state = build_initial_scheduler_state(
+        kraken_state=KrakenState(),
+        recorded_state=RecordedState(),
+        report=ReconciliationReport(),
+        now=NOW,
+        persisted_pending_orders=((pending, "EX-1"),),
+    )
+
+    assert len(state.bot_state.pending_orders) == 1
+    assert state.bot_state.pending_orders[0].exchange_order_id == "EX-1"
+
+
+def test_execute_cancel_order_resolves_client_order_id_and_persists_cancelled_status() -> (
+    None
+):
+    async def scenario() -> None:
+        conn = _memory_db()
+        writer = SqliteWriter(conn)
+        reader = SqliteReader(conn)
+        writer.upsert_order(
+            "EX-1",
+            "DOGE/USD",
+            "cl-1",
+            kind="rotation_entry",
+            side="buy",
+            exchange_order_id="EX-1",
+        )
+        executor = FakeExecutor(
+            KrakenState(
+                open_orders=(
+                    KrakenOrder(
+                        order_id="EX-1",
+                        pair="DOGE/USD",
+                        client_order_id="cl-1",
+                        opened_at=NOW,
+                    ),
+                ),
+            )
+        )
+        runtime = SchedulerRuntime(
+            settings=_settings(),
+            executor=executor,
+            conn=conn,
+            initial_state=build_initial_scheduler_state(
+                kraken_state=executor.kraken_state,
+                recorded_state=RecordedState(),
+                report=ReconciliationReport(),
+                now=NOW,
+                persisted_pending_orders=(
+                    (
+                        PendingOrder(
+                            client_order_id="cl-1",
+                            kind="rotation_entry",
+                            pair="DOGE/USD",
+                            side=OrderSide.BUY,
+                            base_qty=Decimal("100"),
+                            quote_qty=Decimal("12"),
+                        ),
+                        "EX-1",
+                    ),
+                ),
+            ),
+            websocket_factory=lambda on_tick, on_fill: FakeRuntimeWebSocket(
+                on_tick, on_fill
+            ),
+            serve_dashboard=False,
+            sse_publisher=_noop_publish,
+            heartbeat_writer=lambda snapshot: None,
+            utc_now=lambda: NOW,
+        )
+
+        await runtime._execute_cancel_order(CancelOrder(client_order_id="cl-1"))
+
+        assert executor.cancel_calls == ["EX-1"]
+        assert reader.fetch_open_orders() == ()
+
+    asyncio.run(scenario())
+
+
+def test_reconcile_pending_orders_recovers_fill_from_trade_history() -> None:
+    async def scenario() -> None:
+        conn = _memory_db()
+        writer = SqliteWriter(conn)
+        reader = SqliteReader(conn)
+        writer.upsert_order(
+            "EX-2",
+            "DOGE/USD",
+            "cl-2",
+            kind="position_entry",
+            side="buy",
+            base_qty=Decimal("125"),
+            quote_qty=Decimal("15.425"),
+            exchange_order_id="EX-2",
+        )
+        kraken_state = KrakenState(
+            trade_history=(
+                KrakenTrade(
+                    trade_id="T-1",
+                    pair="DOGE/USD",
+                    order_id="EX-2",
+                    client_order_id="cl-2",
+                    side="buy",
+                    quantity=Decimal("125"),
+                    price=Decimal("0.1234"),
+                    fee=Decimal("0.05"),
+                    filled_at=NOW,
+                ),
+            ),
+        )
+        executor = FakeExecutor(kraken_state)
+        runtime = SchedulerRuntime(
+            settings=_settings(),
+            executor=executor,
+            conn=conn,
+            initial_state=build_initial_scheduler_state(
+                kraken_state=kraken_state,
+                recorded_state=RecordedState(),
+                report=ReconciliationReport(),
+                now=NOW,
+                persisted_pending_orders=(
+                    (
+                        PendingOrder(
+                            client_order_id="cl-2",
+                            kind="position_entry",
+                            pair="DOGE/USD",
+                            side=OrderSide.BUY,
+                            base_qty=Decimal("125"),
+                            quote_qty=Decimal("15.425"),
+                            position_id="pos-2",
+                        ),
+                        "EX-2",
+                    ),
+                ),
+            ),
+            websocket_factory=lambda on_tick, on_fill: FakeRuntimeWebSocket(
+                on_tick, on_fill
+            ),
+            serve_dashboard=False,
+            sse_publisher=_noop_publish,
+            heartbeat_writer=lambda snapshot: None,
+            utc_now=lambda: NOW,
+        )
+
+        await runtime._reconcile_pending_orders(
+            now=NOW, kraken_state=kraken_state, source="startup"
+        )
+
+        assert runtime.state.bot_state.pending_orders == ()
+        assert len(runtime.state.bot_state.portfolio.positions) == 1
+        assert runtime.state.bot_state.portfolio.positions[0].position_id == "pos-2"
+        assert reader.fetch_open_orders() == ()
+        ledger_rows = conn.execute(
+            "SELECT pair, quantity, price, fee FROM ledger ORDER BY id"
+        ).fetchall()
+        assert len(ledger_rows) == 1
+        assert ledger_rows[0]["pair"] == "DOGE/USD"
+        assert ledger_rows[0]["quantity"] == "125"
+        assert ledger_rows[0]["price"] == "0.1234"
+        assert ledger_rows[0]["fee"] == "0.05"
+
+    asyncio.run(scenario())
+
+
+def test_rotation_tree_rehydrates_persisted_child_nodes() -> None:
+    conn = _memory_db()
+    writer = SqliteWriter(conn)
+    root = RotationNode(
+        node_id="root-usd",
+        parent_node_id=None,
+        depth=0,
+        asset="USD",
+        quantity_total=Decimal("100"),
+        quantity_free=Decimal("70"),
+        quantity_reserved=Decimal("30"),
+        status=RotationNodeStatus.OPEN,
+    )
+    child = RotationNode(
+        node_id="root-usd-eth-0",
+        parent_node_id="root-usd",
+        depth=1,
+        asset="ETH",
+        quantity_total=Decimal("0.01"),
+        quantity_free=Decimal("0.01"),
+        entry_pair="ETH/USD",
+        from_asset="USD",
+        order_side=OrderSide.BUY,
+        entry_price=Decimal("3000"),
+        fill_price=Decimal("3000"),
+        entry_cost=Decimal("30"),
+        take_profit_price=Decimal("3090"),
+        stop_loss_price=Decimal("2940"),
+        trailing_stop_high=Decimal("3000"),
+        status=RotationNodeStatus.OPEN,
+        opened_at=NOW,
+    )
+    writer.save_rotation_tree(
+        RotationTreeState(
+            nodes=(root, child),
+            root_node_ids=("root-usd",),
+        )
+    )
+    runtime = SchedulerRuntime(
+        settings=_settings(ENABLE_ROTATION_TREE="true"),
+        executor=FakeExecutor(
+            KrakenState(
+                balances=(
+                    Balance(asset="USD", available=Decimal("100"), held=Decimal("0")),
+                ),
+            )
+        ),
+        conn=conn,
+        initial_state=build_initial_scheduler_state(
+            kraken_state=KrakenState(
+                balances=(
+                    Balance(asset="USD", available=Decimal("100"), held=Decimal("0")),
+                ),
+            ),
+            recorded_state=RecordedState(),
+            report=ReconciliationReport(),
+            now=NOW,
+        ),
+        websocket_factory=lambda on_tick, on_fill: FakeRuntimeWebSocket(
+            on_tick, on_fill
+        ),
+        serve_dashboard=False,
+        sse_publisher=_noop_publish,
+        heartbeat_writer=lambda snapshot: None,
+        utc_now=lambda: NOW,
+    )
+
+    assert runtime._rotation_tree is not None
+    assert {node.node_id for node in runtime._rotation_tree.nodes} == {
+        "root-usd",
+        "root-usd-eth-0",
+    }
 
 
 async def _noop_publish(*, event: str, data, event_id: str | None = None) -> None:

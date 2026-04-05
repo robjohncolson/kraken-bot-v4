@@ -9,7 +9,7 @@ from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import Enum
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from core.errors import ExchangeError
 from exchange.symbols import normalize_pair
@@ -23,6 +23,9 @@ from exchange.ws_parsers import (
     parse_execution_payload,
     parse_ticker_payload,
 )
+
+if TYPE_CHECKING:
+    from exchange.models import KrakenTrade
 
 KRAKEN_WEBSOCKET_V2_URL = "wss://ws.kraken.com/v2"
 
@@ -39,6 +42,7 @@ PriceTickHandler = Callable[[PriceTick], Awaitable[None]]
 FillConfirmedHandler = Callable[[FillConfirmed], Awaitable[None]]
 TickerPoller = Callable[[tuple[str, ...]], Awaitable[Iterable[PriceTick]]]
 OpenOrdersPoller = Callable[[], Awaitable[Iterable["PolledOrderSnapshot"]]]
+TradeHistoryPoller = Callable[[], Awaitable[Iterable["KrakenTrade"]]]
 
 
 class ConnectionState(str, Enum):
@@ -78,13 +82,16 @@ class PolledOrderSnapshot:
 class ReconnectPolicy:
     __slots__ = ("base_delay_sec", "max_delay_sec")
 
-    def __init__(self, base_delay_sec: float = 2.0, max_delay_sec: float = 30.0) -> None:
+    def __init__(
+        self, base_delay_sec: float = 2.0, max_delay_sec: float = 30.0
+    ) -> None:
         self.base_delay_sec = base_delay_sec
         self.max_delay_sec = max_delay_sec
 
 
 def _default_utc_now():  # noqa: ANN202
     from datetime import datetime, timezone
+
     return datetime.now(timezone.utc)
 
 
@@ -100,6 +107,7 @@ def _connect_error_types() -> tuple[type[BaseException], ...]:
     error_types: list[type[BaseException]] = [OSError, TimeoutError]
     try:
         from websockets.exceptions import InvalidHandshake, InvalidURI
+
         error_types.extend([InvalidHandshake, InvalidURI])
     except ModuleNotFoundError:
         pass
@@ -110,6 +118,7 @@ def _disconnect_error_types() -> tuple[type[BaseException], ...]:
     error_types: list[type[BaseException]] = [OSError, TimeoutError]
     try:
         from websockets.exceptions import ConnectionClosed
+
         error_types.append(ConnectionClosed)
     except ModuleNotFoundError:
         pass
@@ -133,6 +142,7 @@ class FallbackPoller:
         *,
         ticker_fetcher: TickerPoller | None,
         open_orders_fetcher: OpenOrdersPoller | None,
+        trade_history_fetcher: TradeHistoryPoller | None = None,
         ticker_pairs: Callable[[], tuple[str, ...]],
         emit_price_tick: PriceTickHandler,
         emit_fill: FillConfirmedHandler,
@@ -143,6 +153,7 @@ class FallbackPoller:
     ) -> None:
         self._ticker_fetcher = ticker_fetcher
         self._open_orders_fetcher = open_orders_fetcher
+        self._trade_history_fetcher = trade_history_fetcher
         self._ticker_pairs = ticker_pairs
         self._emit_price_tick = emit_price_tick
         self._emit_fill = emit_fill
@@ -170,9 +181,17 @@ class FallbackPoller:
             return
         tasks: list[asyncio.Task[None]] = []
         if self._ticker_fetcher is not None:
-            tasks.append(asyncio.create_task(self._run_ticker_loop(), name="kraken-rest-fallback-ticker"))
+            tasks.append(
+                asyncio.create_task(
+                    self._run_ticker_loop(), name="kraken-rest-fallback-ticker"
+                )
+            )
         if self._open_orders_fetcher is not None:
-            tasks.append(asyncio.create_task(self._run_order_loop(), name="kraken-rest-fallback-orders"))
+            tasks.append(
+                asyncio.create_task(
+                    self._run_order_loop(), name="kraken-rest-fallback-orders"
+                )
+            )
         self._tasks = tuple(tasks)
 
     async def deactivate(self) -> None:
@@ -205,20 +224,64 @@ class FallbackPoller:
                 if order_id not in current_orders:
                     # While the private feed is unavailable, a missing open order
                     # is the only terminal signal available to downstream consumers.
-                    await self._emit_fill(
-                        FillConfirmed(
-                            order_id=snapshot.order_id,
-                            client_order_id=snapshot.client_order_id,
-                            pair=snapshot.pair,
-                            side=snapshot.side,
-                            quantity=snapshot.quantity,
-                            price=snapshot.price,
-                            fee=snapshot.fee,
-                            timestamp=self._utc_now(),
-                        )
-                    )
+                    fill = await self._resolve_terminal_fill(snapshot)
+                    await self._emit_fill(fill)
             self._known_orders = current_orders
             await self._sleep(self._order_poll_interval_sec)
+
+    async def _resolve_terminal_fill(
+        self, snapshot: PolledOrderSnapshot
+    ) -> FillConfirmed:
+        if self._trade_history_fetcher is None:
+            return self._snapshot_fill(snapshot)
+
+        trades = tuple(await self._trade_history_fetcher())
+        matches = tuple(
+            trade
+            for trade in trades
+            if trade.order_id == snapshot.order_id
+            or (
+                snapshot.client_order_id is not None
+                and trade.client_order_id == snapshot.client_order_id
+            )
+        )
+        total_quantity = sum((trade.quantity for trade in matches), start=Decimal("0"))
+        if total_quantity <= Decimal("0"):
+            return self._snapshot_fill(snapshot)
+
+        notional = sum(
+            (trade.quantity * trade.price for trade in matches), start=Decimal("0")
+        )
+        total_fee = sum((trade.fee for trade in matches), start=Decimal("0"))
+        timestamp = max(
+            (trade.filled_at for trade in matches if trade.filled_at is not None),
+            default=self._utc_now(),
+        )
+        side = next(
+            (trade.side for trade in reversed(matches) if trade.side), snapshot.side
+        )
+        return FillConfirmed(
+            order_id=snapshot.order_id,
+            client_order_id=snapshot.client_order_id,
+            pair=snapshot.pair,
+            side=side,
+            quantity=total_quantity,
+            price=notional / total_quantity,
+            fee=total_fee,
+            timestamp=timestamp,
+        )
+
+    def _snapshot_fill(self, snapshot: PolledOrderSnapshot) -> FillConfirmed:
+        return FillConfirmed(
+            order_id=snapshot.order_id,
+            client_order_id=snapshot.client_order_id,
+            pair=snapshot.pair,
+            side=snapshot.side,
+            quantity=snapshot.quantity,
+            price=snapshot.price,
+            fee=snapshot.fee,
+            timestamp=self._utc_now(),
+        )
 
 
 class KrakenWebSocketV2:
@@ -235,6 +298,7 @@ class KrakenWebSocketV2:
         fill_handler: FillConfirmedHandler | None = None,
         rest_ticker_poller: TickerPoller | None = None,
         rest_open_orders_poller: OpenOrdersPoller | None = None,
+        rest_trade_history_poller: TradeHistoryPoller | None = None,
         price_poll_interval_sec: float = 15.0,
         order_poll_interval_sec: float = 30.0,
         utc_now: UtcNow = _default_utc_now,
@@ -260,6 +324,7 @@ class KrakenWebSocketV2:
         self._fallback_poller = FallbackPoller(
             ticker_fetcher=rest_ticker_poller,
             open_orders_fetcher=rest_open_orders_poller,
+            trade_history_fetcher=rest_trade_history_poller,
             ticker_pairs=lambda: self._ticker_pairs,
             emit_price_tick=self._emit_price_tick,
             emit_fill=self._emit_fill_confirmed,
@@ -320,25 +385,41 @@ class KrakenWebSocketV2:
     async def subscribe_ticker(self, pairs: Iterable[str]) -> None:
         normalized = _normalize_pairs(pairs)
         if not normalized:
-            raise KrakenWebSocketSubscriptionError("Ticker subscription requires at least one pair.")
+            raise KrakenWebSocketSubscriptionError(
+                "Ticker subscription requires at least one pair."
+            )
         if self._websocket is None:
-            raise KrakenWebSocketSubscriptionError("Cannot subscribe to ticker while disconnected.")
+            raise KrakenWebSocketSubscriptionError(
+                "Cannot subscribe to ticker while disconnected."
+            )
         merged = list(self._ticker_pairs)
         for p in normalized:
             if p not in merged:
                 merged.append(p)
         self._ticker_pairs = tuple(merged)
-        await self._send_json({"method": "subscribe", "params": {"channel": "ticker", "symbol": list(normalized)}})
+        await self._send_json(
+            {
+                "method": "subscribe",
+                "params": {"channel": "ticker", "symbol": list(normalized)},
+            }
+        )
 
     async def subscribe_executions(self, token: str) -> None:
         if self._websocket is None:
-            raise KrakenWebSocketSubscriptionError("Cannot subscribe to executions while disconnected.")
+            raise KrakenWebSocketSubscriptionError(
+                "Cannot subscribe to executions while disconnected."
+            )
         normalized_token = token.strip()
         if not normalized_token:
-            raise KrakenWebSocketSubscriptionError("Execution subscription requires a WebSocket token.")
+            raise KrakenWebSocketSubscriptionError(
+                "Execution subscription requires a WebSocket token."
+            )
         self._execution_token = normalized_token
         await self._send_json(
-            {"method": "subscribe", "params": {"channel": "executions", "token": normalized_token}}
+            {
+                "method": "subscribe",
+                "params": {"channel": "executions", "token": normalized_token},
+            }
         )
 
     # --- internal ---
@@ -387,7 +468,7 @@ class KrakenWebSocketV2:
 
     def _next_delay(self) -> float:
         delay = min(
-            self._reconnect_policy.base_delay_sec * (2 ** self._reconnect_attempt),
+            self._reconnect_policy.base_delay_sec * (2**self._reconnect_attempt),
             self._reconnect_policy.max_delay_sec,
         )
         self._reconnect_attempt += 1
@@ -418,11 +499,17 @@ class KrakenWebSocketV2:
     async def _restore_subscriptions(self) -> None:
         if self._ticker_pairs:
             await self._send_json(
-                {"method": "subscribe", "params": {"channel": "ticker", "symbol": list(self._ticker_pairs)}}
+                {
+                    "method": "subscribe",
+                    "params": {"channel": "ticker", "symbol": list(self._ticker_pairs)},
+                }
             )
         if self._execution_token is not None:
             await self._send_json(
-                {"method": "subscribe", "params": {"channel": "executions", "token": self._execution_token}}
+                {
+                    "method": "subscribe",
+                    "params": {"channel": "executions", "token": self._execution_token},
+                }
             )
 
     async def _set_state(self, state: ConnectionState) -> None:
@@ -430,7 +517,10 @@ class KrakenWebSocketV2:
         if state is ConnectionState.CONNECTED:
             await self._fallback_poller.deactivate()
             return
-        if self._should_reconnect and state in (ConnectionState.DISCONNECTED, ConnectionState.RECONNECTING):
+        if self._should_reconnect and state in (
+            ConnectionState.DISCONNECTED,
+            ConnectionState.RECONNECTING,
+        ):
             self._fallback_poller.activate()
             return
         await self._fallback_poller.deactivate()
@@ -438,7 +528,9 @@ class KrakenWebSocketV2:
     async def _send_json(self, payload: dict[str, object]) -> None:
         ws = self._websocket
         if ws is None:
-            raise KrakenWebSocketSubscriptionError("Cannot send WebSocket message while disconnected.")
+            raise KrakenWebSocketSubscriptionError(
+                "Cannot send WebSocket message while disconnected."
+            )
         await ws.send(json.dumps(payload, separators=(",", ":")))
 
 

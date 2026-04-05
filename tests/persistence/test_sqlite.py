@@ -23,7 +23,9 @@ def _memory_db() -> sqlite3.Connection:
     return conn
 
 
-def _insert_position(conn: sqlite3.Connection, position_id: str, pair: str, *, closed: bool = False) -> None:
+def _insert_position(
+    conn: sqlite3.Connection, position_id: str, pair: str, *, closed: bool = False
+) -> None:
     closed_at = "2024-01-01T00:00:00" if closed else None
     conn.execute(
         "INSERT INTO positions (position_id, pair, closed_at) VALUES (?, ?, ?)",
@@ -58,9 +60,7 @@ def test_ensure_schema_creates_tables() -> None:
     ensure_schema(conn)
     tables = {
         row[0]
-        for row in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'"
-        )
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
     }
     assert "positions" in tables
     assert "orders" in tables
@@ -263,13 +263,18 @@ def test_upsert_position_updates_on_conflict() -> None:
     reader = SqliteReader(conn)
 
     pos = Position(
-        position_id="kbv4-1", pair="DOGE/USD", side=PositionSide.LONG,
-        quantity=Decimal("100"), entry_price=Decimal("0.09"),
-        stop_price=Decimal("0.085"), target_price=Decimal("0.10"),
+        position_id="kbv4-1",
+        pair="DOGE/USD",
+        side=PositionSide.LONG,
+        quantity=Decimal("100"),
+        entry_price=Decimal("0.09"),
+        stop_price=Decimal("0.085"),
+        target_price=Decimal("0.10"),
     )
     writer.upsert_position(pos)
 
     from dataclasses import replace
+
     updated = replace(pos, stop_price=Decimal("0.086"), quantity=Decimal("50"))
     writer.upsert_position(updated)
 
@@ -285,9 +290,13 @@ def test_closed_position_not_in_open_positions() -> None:
     reader = SqliteReader(conn)
 
     pos = Position(
-        position_id="kbv4-1", pair="DOGE/USD", side=PositionSide.LONG,
-        quantity=Decimal("100"), entry_price=Decimal("0.09"),
-        stop_price=Decimal("0.085"), target_price=Decimal("0.10"),
+        position_id="kbv4-1",
+        pair="DOGE/USD",
+        side=PositionSide.LONG,
+        quantity=Decimal("100"),
+        entry_price=Decimal("0.09"),
+        stop_price=Decimal("0.085"),
+        target_price=Decimal("0.10"),
     )
     writer.upsert_position(pos)
     writer.update_position_closed("kbv4-1")
@@ -324,9 +333,13 @@ def test_upsert_order_and_fetch_open() -> None:
     reader = SqliteReader(conn)
 
     writer.upsert_order(
-        "ord-1", "DOGE/USD", "cl-1",
-        kind="position_entry", side="buy",
-        base_qty=Decimal("100"), quote_qty=Decimal("9"),
+        "ord-1",
+        "DOGE/USD",
+        "cl-1",
+        kind="position_entry",
+        side="buy",
+        base_qty=Decimal("100"),
+        quote_qty=Decimal("9"),
         exchange_order_id="EX-001",
     )
     orders = reader.fetch_open_orders()
@@ -346,5 +359,16 @@ def test_close_order_removes_from_open() -> None:
 
     writer.upsert_order("ord-1", "DOGE/USD", "cl-1", kind="position_entry", side="buy")
     writer.close_order("ord-1")
+
+    assert reader.fetch_open_orders() == ()
+
+
+def test_cancel_order_removes_from_open() -> None:
+    conn = _memory_db()
+    writer = SqliteWriter(conn)
+    reader = SqliteReader(conn)
+
+    writer.upsert_order("ord-1", "DOGE/USD", "cl-1", kind="position_entry", side="buy")
+    writer.cancel_order("ord-1")
 
     assert reader.fetch_open_orders() == ()

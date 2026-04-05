@@ -94,7 +94,14 @@ CREATE TABLE IF NOT EXISTS pair_metadata (
     updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
 )"""
 
-SCHEMA_STATEMENTS = (POSITIONS_DDL, ORDERS_DDL, LEDGER_DDL, COOLDOWNS_DDL, ROTATION_NODES_DDL, PAIR_METADATA_DDL)
+SCHEMA_STATEMENTS = (
+    POSITIONS_DDL,
+    ORDERS_DDL,
+    LEDGER_DDL,
+    COOLDOWNS_DDL,
+    ROTATION_NODES_DDL,
+    PAIR_METADATA_DDL,
+)
 
 # Columns added after initial schema — safe to run repeatedly.
 _POSITION_MIGRATIONS = (
@@ -186,7 +193,9 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         _migrate_columns(conn, "orders", _ORDER_MIGRATIONS)
         _migrate_columns(conn, "rotation_nodes", _ROTATION_NODE_MIGRATIONS)
         conn.commit()
-        logger.info("SQLite schema verified (positions, orders, ledger, cooldowns, rotation_nodes, pair_metadata)")
+        logger.info(
+            "SQLite schema verified (positions, orders, ledger, cooldowns, rotation_nodes, pair_metadata)"
+        )
     except sqlite3.Error as exc:
         raise SqliteSchemaError(f"Schema bootstrap failed: {exc}") from exc
 
@@ -261,11 +270,21 @@ class SqliteReader:
                 Position(
                     position_id=row["position_id"],
                     pair=row["pair"],
-                    side=PositionSide(row["side"]) if row["side"] else PositionSide.LONG,
-                    quantity=Decimal(row["quantity"]) if row["quantity"] else ZERO_DECIMAL,
-                    entry_price=Decimal(row["entry_price"]) if row["entry_price"] else ZERO_DECIMAL,
-                    stop_price=Decimal(row["stop_price"]) if row["stop_price"] else ZERO_DECIMAL,
-                    target_price=Decimal(row["target_price"]) if row["target_price"] else ZERO_DECIMAL,
+                    side=PositionSide(row["side"])
+                    if row["side"]
+                    else PositionSide.LONG,
+                    quantity=Decimal(row["quantity"])
+                    if row["quantity"]
+                    else ZERO_DECIMAL,
+                    entry_price=Decimal(row["entry_price"])
+                    if row["entry_price"]
+                    else ZERO_DECIMAL,
+                    stop_price=Decimal(row["stop_price"])
+                    if row["stop_price"]
+                    else ZERO_DECIMAL,
+                    target_price=Decimal(row["target_price"])
+                    if row["target_price"]
+                    else ZERO_DECIMAL,
                 )
                 for row in cursor
             )
@@ -293,9 +312,15 @@ class SqliteReader:
                         kind=row["kind"] or "position_entry",
                         pair=row["pair"],
                         side=row["side"] or "buy",
-                        base_qty=Decimal(row["base_qty"]) if row["base_qty"] else ZERO_DECIMAL,
-                        filled_qty=Decimal(row["filled_qty"]) if row["filled_qty"] else ZERO_DECIMAL,
-                        quote_qty=Decimal(row["quote_qty"]) if row["quote_qty"] else ZERO_DECIMAL,
+                        base_qty=Decimal(row["base_qty"])
+                        if row["base_qty"]
+                        else ZERO_DECIMAL,
+                        filled_qty=Decimal(row["filled_qty"])
+                        if row["filled_qty"]
+                        else ZERO_DECIMAL,
+                        quote_qty=Decimal(row["quote_qty"])
+                        if row["quote_qty"]
+                        else ZERO_DECIMAL,
                         position_id=row["position_id"] or "",
                     ),
                     row["exchange_order_id"],
@@ -335,21 +360,43 @@ class SqliteReader:
                     quantity_reserved=Decimal(row["quantity_reserved"] or "0"),
                     entry_pair=row["entry_pair"],
                     from_asset=row["from_asset"],
-                    order_side=OrderSide(row["order_side"]) if row["order_side"] else None,
-                    entry_price=Decimal(row["entry_price"]) if row["entry_price"] else None,
+                    order_side=OrderSide(row["order_side"])
+                    if row["order_side"]
+                    else None,
+                    entry_price=Decimal(row["entry_price"])
+                    if row["entry_price"]
+                    else None,
                     position_id=row["position_id"],
-                    deadline_at=datetime.fromisoformat(row["deadline_at"]) if row["deadline_at"] else None,
+                    deadline_at=datetime.fromisoformat(row["deadline_at"])
+                    if row["deadline_at"]
+                    else None,
                     window_hours=row["window_hours"],
                     confidence=row["confidence"] or 0.0,
                     status=RotationNodeStatus(row["status"]),
-                    entry_cost=Decimal(row["entry_cost"]) if row["entry_cost"] else None,
-                    fill_price=Decimal(row["fill_price"]) if row["fill_price"] else None,
-                    exit_price=Decimal(row["exit_price"]) if row["exit_price"] else None,
-                    closed_at=datetime.fromisoformat(row["closed_at"]) if row["closed_at"] else None,
-                    exit_proceeds=Decimal(row["exit_proceeds"]) if row["exit_proceeds"] else None,
-                    take_profit_price=Decimal(row["take_profit_price"]) if row["take_profit_price"] else None,
-                    stop_loss_price=Decimal(row["stop_loss_price"]) if row["stop_loss_price"] else None,
-                    trailing_stop_high=Decimal(row["trailing_stop_high"]) if row["trailing_stop_high"] else None,
+                    entry_cost=Decimal(row["entry_cost"])
+                    if row["entry_cost"]
+                    else None,
+                    fill_price=Decimal(row["fill_price"])
+                    if row["fill_price"]
+                    else None,
+                    exit_price=Decimal(row["exit_price"])
+                    if row["exit_price"]
+                    else None,
+                    closed_at=datetime.fromisoformat(row["closed_at"])
+                    if row["closed_at"]
+                    else None,
+                    exit_proceeds=Decimal(row["exit_proceeds"])
+                    if row["exit_proceeds"]
+                    else None,
+                    take_profit_price=Decimal(row["take_profit_price"])
+                    if row["take_profit_price"]
+                    else None,
+                    stop_loss_price=Decimal(row["stop_loss_price"])
+                    if row["stop_loss_price"]
+                    else None,
+                    trailing_stop_high=Decimal(row["trailing_stop_high"])
+                    if row["trailing_stop_high"]
+                    else None,
                     exit_reason=row["exit_reason"],
                     ta_direction=row["ta_direction"],
                     recovery_count=row["recovery_count"] or 0,
@@ -391,7 +438,9 @@ class SqliteWriter:
             )
             self._conn.commit()
         except sqlite3.Error as exc:
-            raise SqliteWriteError(f"Failed to insert position {position_id!r}: {exc}") from exc
+            raise SqliteWriteError(
+                f"Failed to insert position {position_id!r}: {exc}"
+            ) from exc
 
     def insert_order(
         self,
@@ -421,7 +470,9 @@ class SqliteWriter:
             self._conn.commit()
         except sqlite3.Error as exc:
             self._conn.rollback()
-            raise SqliteWriteError(f"Failed to insert order {order_id!r}: {exc}") from exc
+            raise SqliteWriteError(
+                f"Failed to insert order {order_id!r}: {exc}"
+            ) from exc
 
     def insert_ledger_entry(
         self,
@@ -442,7 +493,9 @@ class SqliteWriter:
             self._conn.commit()
         except sqlite3.Error as exc:
             self._conn.rollback()
-            raise SqliteWriteError(f"Failed to insert ledger entry for {pair!r}: {exc}") from exc
+            raise SqliteWriteError(
+                f"Failed to insert ledger entry for {pair!r}: {exc}"
+            ) from exc
 
     def upsert_position(self, position: Position) -> None:
         """Insert or update a full position record."""
@@ -514,7 +567,9 @@ class SqliteWriter:
             self._conn.commit()
         except sqlite3.Error as exc:
             self._conn.rollback()
-            raise SqliteWriteError(f"Failed to upsert order {order_id!r}: {exc}") from exc
+            raise SqliteWriteError(
+                f"Failed to upsert order {order_id!r}: {exc}"
+            ) from exc
 
     def close_order(self, order_id: str) -> None:
         """Mark an order as filled/closed."""
@@ -526,7 +581,23 @@ class SqliteWriter:
             self._conn.commit()
         except sqlite3.Error as exc:
             self._conn.rollback()
-            raise SqliteWriteError(f"Failed to close order {order_id!r}: {exc}") from exc
+            raise SqliteWriteError(
+                f"Failed to close order {order_id!r}: {exc}"
+            ) from exc
+
+    def cancel_order(self, order_id: str) -> None:
+        """Mark an order as cancelled."""
+        try:
+            self._conn.execute(
+                "UPDATE orders SET status = 'cancelled' WHERE order_id = ?",
+                (order_id,),
+            )
+            self._conn.commit()
+        except sqlite3.Error as exc:
+            self._conn.rollback()
+            raise SqliteWriteError(
+                f"Failed to cancel order {order_id!r}: {exc}"
+            ) from exc
 
     def set_cooldown(self, pair: str, cooldown_until: str) -> None:
         """Upsert a cooldown for a pair."""
@@ -539,7 +610,9 @@ class SqliteWriter:
             self._conn.commit()
         except sqlite3.Error as exc:
             self._conn.rollback()
-            raise SqliteWriteError(f"Failed to set cooldown for {pair!r}: {exc}") from exc
+            raise SqliteWriteError(
+                f"Failed to set cooldown for {pair!r}: {exc}"
+            ) from exc
 
     def clear_cooldown(self, pair: str) -> None:
         """Remove a cooldown for a pair."""
@@ -548,7 +621,9 @@ class SqliteWriter:
             self._conn.commit()
         except sqlite3.Error as exc:
             self._conn.rollback()
-            raise SqliteWriteError(f"Failed to clear cooldown for {pair!r}: {exc}") from exc
+            raise SqliteWriteError(
+                f"Failed to clear cooldown for {pair!r}: {exc}"
+            ) from exc
 
     def save_rotation_tree(self, tree: RotationTreeState) -> None:
         """Persist the full rotation tree state (replace all live nodes + closed with P&L)."""
@@ -599,7 +674,9 @@ class SqliteWriter:
                         str(node.exit_proceeds) if node.exit_proceeds else None,
                         str(node.take_profit_price) if node.take_profit_price else None,
                         str(node.stop_loss_price) if node.stop_loss_price else None,
-                        str(node.trailing_stop_high) if node.trailing_stop_high else None,
+                        str(node.trailing_stop_high)
+                        if node.trailing_stop_high
+                        else None,
                         node.exit_reason,
                         node.ta_direction,
                         node.recovery_count,

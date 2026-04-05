@@ -74,16 +74,18 @@ def test_fetch_balances_returns_parsed_balances() -> None:
 
 
 def test_fetch_open_orders_returns_parsed_orders() -> None:
-    _, sender = _make_sender({
-        "open": {
-            "O3KQ7H-AAAA-BBBBBB": {
-                "descr": {"pair": "XDGUSD"},
-                "opentm": 1711296000.0,
-                "cl_ord_id": "kbv4-dogeusd-000001",
-                "status": "open",
+    _, sender = _make_sender(
+        {
+            "open": {
+                "O3KQ7H-AAAA-BBBBBB": {
+                    "descr": {"pair": "XDGUSD"},
+                    "opentm": 1711296000.0,
+                    "cl_ord_id": "kbv4-dogeusd-000001",
+                    "status": "open",
+                }
             }
         }
-    })
+    )
     executor = _executor(sender)
 
     orders = executor.fetch_open_orders()
@@ -95,23 +97,30 @@ def test_fetch_open_orders_returns_parsed_orders() -> None:
 
 
 def test_fetch_trade_history_returns_parsed_trades() -> None:
-    _, sender = _make_sender({
-        "trades": {
-            "T1234-ABCD-EFGH": {
-                "pair": "XDGUSD",
-                "ordertxid": "O9999-XXXX-YYYY",
-                "fee": "0.10",
-                "time": 1711296000.0,
-                "postxid": "",
+    _, sender = _make_sender(
+        {
+            "trades": {
+                "T1234-ABCD-EFGH": {
+                    "pair": "XDGUSD",
+                    "ordertxid": "O9999-XXXX-YYYY",
+                    "type": "buy",
+                    "vol": "125",
+                    "price": "0.1234",
+                    "fee": "0.10",
+                    "time": 1711296000.0,
+                    "postxid": "",
+                }
             }
         }
-    })
+    )
     executor = _executor(sender)
 
     trades = executor.fetch_trade_history()
 
     assert len(trades) == 1
     assert trades[0].trade_id == "T1234-ABCD-EFGH"
+    assert trades[0].quantity == Decimal("125")
+    assert trades[0].price == Decimal("0.1234")
     assert trades[0].fee == Decimal("0.10")
     assert trades[0].position_id is None
 

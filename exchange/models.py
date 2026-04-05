@@ -36,6 +36,9 @@ class KrakenTrade:
     order_id: OrderId | None = None
     client_order_id: ClientOrderId | None = None
     position_id: PositionId | None = None
+    side: str | None = None
+    quantity: Decimal = ZERO_DECIMAL
+    price: Decimal = ZERO_DECIMAL
     fee: Decimal = ZERO_DECIMAL
     filled_at: datetime | None = None
 

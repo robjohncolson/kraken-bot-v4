@@ -5,6 +5,7 @@ import json
 from datetime import datetime, timezone
 from decimal import Decimal
 
+from exchange.models import KrakenTrade
 from exchange.websocket import (
     ConnectionState,
     FillConfirmed,
@@ -122,27 +123,34 @@ def test_fallback_poller_activates_on_disconnect_and_deactivates_on_reconnect() 
         first_socket.queue_message(ConnectionDropError("dropped"))
 
         await _wait_for(
-            lambda: client.state is ConnectionState.RECONNECTING and client.fallback_poller.active
+            lambda: (
+                client.state is ConnectionState.RECONNECTING
+                and client.fallback_poller.active
+            )
         )
         await _wait_for(lambda: 1.5 in sleep.delays and 3.5 in sleep.delays)
         await _wait_for(
-            lambda: client.state is ConnectionState.CONNECTED
-            and connector.call_count == 3
-            and not client.fallback_poller.active
+            lambda: (
+                client.state is ConnectionState.CONNECTED
+                and connector.call_count == 3
+                and not client.fallback_poller.active
+            )
         )
 
         assert price_calls
         assert all(pairs == ("BTC/USD",) for pairs in price_calls)
         assert order_polls >= 1
         assert any(
-            json.loads(message) == {
+            json.loads(message)
+            == {
                 "method": "subscribe",
                 "params": {"channel": "ticker", "symbol": ["BTC/USD"]},
             }
             for message in second_socket.sent_messages
         )
         assert any(
-            json.loads(message) == {
+            json.loads(message)
+            == {
                 "method": "subscribe",
                 "params": {"channel": "executions", "token": "ws-token-123"},
             }
@@ -171,6 +179,7 @@ def test_fallback_poller_emits_polled_price_ticks_and_fill_confirmations() -> No
         fill_callbacks: list[FillConfirmed] = []
         ticker_polls = 0
         open_order_polls = 0
+        trade_history_polls = 0
 
         async def on_tick(tick: PriceTick) -> None:
             tick_callbacks.append(tick)
@@ -202,6 +211,23 @@ def test_fallback_poller_emits_polled_price_ticks_and_fill_confirmations() -> No
                 )
             return ()
 
+        async def poll_trade_history() -> tuple[KrakenTrade, ...]:
+            nonlocal trade_history_polls
+            trade_history_polls += 1
+            return (
+                KrakenTrade(
+                    trade_id="T-123",
+                    pair="BTC/USD",
+                    order_id="O-123",
+                    client_order_id="cid-123",
+                    side="buy",
+                    quantity=Decimal("0.012"),
+                    price=Decimal("85990.5"),
+                    fee=Decimal("0.18"),
+                    filled_at=now,
+                ),
+            )
+
         client = KrakenWebSocketV2(
             connector=connector,
             sleep=sleep,
@@ -209,6 +235,7 @@ def test_fallback_poller_emits_polled_price_ticks_and_fill_confirmations() -> No
             fill_handler=on_fill,
             rest_ticker_poller=poll_ticker,
             rest_open_orders_poller=poll_open_orders,
+            rest_trade_history_poller=poll_trade_history,
             price_poll_interval_sec=1.0,
             order_poll_interval_sec=1.0,
             utc_now=lambda: now,
@@ -220,8 +247,11 @@ def test_fallback_poller_emits_polled_price_ticks_and_fill_confirmations() -> No
         websocket.queue_message(ConnectionDropError("dropped"))
 
         await _wait_for(
-            lambda: client.state in (ConnectionState.DISCONNECTED, ConnectionState.RECONNECTING)
-            and client.fallback_poller.active
+            lambda: (
+                client.state
+                in (ConnectionState.DISCONNECTED, ConnectionState.RECONNECTING)
+                and client.fallback_poller.active
+            )
         )
 
         tick = await client.get_price_tick()
@@ -233,13 +263,14 @@ def test_fallback_poller_emits_polled_price_ticks_and_fill_confirmations() -> No
             client_order_id="cid-123",
             pair="BTC/USD",
             side="buy",
-            quantity=Decimal("0.010"),
-            price=Decimal("86000.15"),
-            fee=Decimal("0.21"),
+            quantity=Decimal("0.012"),
+            price=Decimal("85990.5"),
+            fee=Decimal("0.18"),
             timestamp=now,
         )
         assert tick_callbacks == [tick]
         assert fill_callbacks == [fill]
+        assert trade_history_polls >= 1
 
         await client.disconnect()
 
