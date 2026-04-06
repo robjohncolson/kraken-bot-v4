@@ -5,6 +5,8 @@ import sqlite3
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+import pandas as pd
+from unittest.mock import patch
 
 from core.config import Settings, load_settings
 from core.types import (
@@ -152,6 +154,35 @@ def _runtime(*, settings: Settings | None = None) -> SchedulerRuntime:
         heartbeat_writer=lambda snapshot: None,
         utc_now=lambda: NOW,
     )
+
+
+def _bars_with_closes(closes: list[float]) -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "open": closes,
+            "high": [price * 1.01 for price in closes],
+            "low": [price * 0.99 for price in closes],
+            "close": closes,
+            "volume": [1000.0] * len(closes),
+        }
+    )
+
+
+class FakeRootPairScanner:
+    def __init__(
+        self,
+        bars: pd.DataFrame,
+        *,
+        pairs: tuple[tuple[str, str, str], ...],
+    ) -> None:
+        self._bars = bars
+        self._pairs = pairs
+
+    def discover_asset_pairs(self, _asset: str) -> tuple[tuple[str, str, str], ...]:
+        return self._pairs
+
+    def _ohlcv_fetcher(self, _pair: str, **_kwargs) -> pd.DataFrame:
+        return self._bars
 
 
 def test_start_connects_websocket_subscribes_and_publishes_dashboard_state() -> None:
@@ -911,6 +942,138 @@ def test_rotation_exit_fill_persists_trade_outcome() -> None:
         assert outcome["exit_reason"] == "take_profit"
         assert outcome["confidence"] == 0.83
         assert outcome["hold_hours"] == 2.0
+        assert outcome["node_depth"] == 1
+
+    asyncio.run(scenario())
+
+
+def test_root_rotation_exit_fill_persists_trade_outcome_depth_zero() -> None:
+    async def scenario() -> None:
+        runtime = _runtime()
+        root = RotationNode(
+            node_id="root-ada",
+            parent_node_id=None,
+            depth=0,
+            asset="ADA",
+            quantity_total=Decimal("10"),
+            quantity_free=Decimal("0"),
+            entry_pair="ADA/USD",
+            order_side=OrderSide.BUY,
+            entry_price=Decimal("2"),
+            fill_price=Decimal("2"),
+            entry_cost=Decimal("20"),
+            opened_at=NOW - timedelta(hours=3),
+            confidence=0.67,
+            exit_reason="root_exit_bearish",
+            status=RotationNodeStatus.CLOSING,
+        )
+        runtime._rotation_tree = RotationTreeState(
+            nodes=(root,),
+            root_node_ids=(root.node_id,),
+        )
+        runtime._rotation_fill_queue.append(
+            (
+                root.node_id,
+                Decimal("10"),
+                Decimal("2.1"),
+                "rotation_exit",
+                Decimal("0.05"),
+            )
+        )
+
+        await runtime._settle_rotation_fills(NOW)
+
+        outcomes = runtime._reader.fetch_trade_outcomes(lookback_days=3650)
+        assert len(outcomes) == 1
+        assert outcomes[0]["node_depth"] == 0
+
+    asyncio.run(scenario())
+
+
+def test_evaluate_root_deadlines_sets_opened_at_once() -> None:
+    async def scenario() -> None:
+        runtime = _runtime()
+        root = RotationNode(
+            node_id="root-ada",
+            parent_node_id=None,
+            depth=0,
+            asset="ADA",
+            quantity_total=Decimal("100"),
+            quantity_free=Decimal("100"),
+            status=RotationNodeStatus.OPEN,
+        )
+        runtime._rotation_tree = RotationTreeState(
+            nodes=(root,),
+            root_node_ids=(root.node_id,),
+        )
+        runtime._pair_scanner = FakeRootPairScanner(
+            _bars_with_closes([0.5] * 50),
+            pairs=(("ADA/USD", "ADA", "USD"),),
+        )
+        runtime._root_usd_prices = {"USD": Decimal("1"), "ADA": Decimal("0.5")}
+        runtime._root_usd_prices_at = 10**12
+
+        with patch("runtime_loop.evaluate_root_ta", return_value=("bullish", 12.0, 0.9)):
+            await runtime._evaluate_root_deadlines(NOW)
+
+        updated = next(n for n in runtime._rotation_tree.nodes if n.node_id == root.node_id)
+        assert updated.opened_at == NOW
+        assert updated.deadline_at == NOW + timedelta(hours=12)
+
+        first_opened_at = updated.opened_at
+        first_deadline = updated.deadline_at
+
+        with patch("runtime_loop.evaluate_root_ta", return_value=("bearish", 6.0, 0.2)):
+            await runtime._evaluate_root_deadlines(NOW + timedelta(hours=1))
+
+        updated_again = next(
+            n for n in runtime._rotation_tree.nodes if n.node_id == root.node_id
+        )
+        assert updated_again.opened_at == first_opened_at
+        assert updated_again.deadline_at == first_deadline
+
+    asyncio.run(scenario())
+
+
+def test_handle_root_expiry_recalculates_entry_cost_from_last_close() -> None:
+    async def scenario() -> None:
+        runtime = _runtime()
+        root = RotationNode(
+            node_id="root-ada",
+            parent_node_id=None,
+            depth=0,
+            asset="ADA",
+            quantity_total=Decimal("25"),
+            quantity_free=Decimal("25"),
+            entry_cost=Decimal("999"),
+            status=RotationNodeStatus.OPEN,
+        )
+        runtime._rotation_tree = RotationTreeState(
+            nodes=(root,),
+            root_node_ids=(root.node_id,),
+        )
+        runtime._pair_scanner = FakeRootPairScanner(
+            _bars_with_closes(([0.4] * 49) + [0.42]),
+            pairs=(("ADA/USD", "ADA", "USD"),),
+        )
+
+        closed_nodes: list[RotationNode] = []
+
+        async def fake_close(node, *, reason: str, now: datetime, order_type=None) -> None:
+            closed_nodes.append(node)
+
+        runtime._close_rotation_node = fake_close  # type: ignore[method-assign]
+
+        with patch("runtime_loop.evaluate_root_ta", return_value=("bearish", 8.0, 0.7)):
+            await runtime._handle_root_expiry(root, NOW)
+
+        updated = next(n for n in runtime._rotation_tree.nodes if n.node_id == root.node_id)
+        expected_entry_cost = Decimal("25") * Decimal("0.42")
+        assert updated.entry_price == Decimal("0.42")
+        assert updated.entry_cost == expected_entry_cost
+        assert updated.exit_reason == "root_exit_bearish"
+        assert closed_nodes
+        assert closed_nodes[0].entry_cost == expected_entry_cost
 
     asyncio.run(scenario())
 

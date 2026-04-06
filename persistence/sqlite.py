@@ -110,7 +110,8 @@ CREATE TABLE IF NOT EXISTS trade_outcomes (
     hold_hours    REAL,
     confidence    REAL,
     opened_at     TEXT NOT NULL,
-    closed_at     TEXT NOT NULL
+    closed_at     TEXT NOT NULL,
+    node_depth    INTEGER NOT NULL DEFAULT 0
 )"""
 
 SCHEMA_STATEMENTS = (
@@ -155,6 +156,10 @@ _ROTATION_NODE_MIGRATIONS = (
     ("exit_reason", "TEXT"),
     ("ta_direction", "TEXT"),
     ("recovery_count", "INTEGER DEFAULT 0"),
+)
+
+_TRADE_OUTCOME_MIGRATIONS = (
+    ("node_depth", "INTEGER DEFAULT 0"),
 )
 
 
@@ -212,6 +217,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         _migrate_columns(conn, "positions", _POSITION_MIGRATIONS)
         _migrate_columns(conn, "orders", _ORDER_MIGRATIONS)
         _migrate_columns(conn, "rotation_nodes", _ROTATION_NODE_MIGRATIONS)
+        _migrate_columns(conn, "trade_outcomes", _TRADE_OUTCOME_MIGRATIONS)
         conn.commit()
         logger.info(
             "SQLite schema verified (positions, orders, ledger, cooldowns, rotation_nodes, pair_metadata, trade_outcomes)"
@@ -551,6 +557,7 @@ class SqliteWriter:
         confidence: float | None,
         opened_at: str,
         closed_at: str,
+        node_depth: int = 0,
     ) -> None:
         """Append a settled trade outcome."""
         try:
@@ -558,8 +565,8 @@ class SqliteWriter:
                 "INSERT INTO trade_outcomes ("
                 "node_id, pair, direction, entry_price, exit_price, entry_cost, "
                 "exit_proceeds, net_pnl, fee_total, exit_reason, hold_hours, "
-                "confidence, opened_at, closed_at"
-                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "confidence, opened_at, closed_at, node_depth"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     node_id,
                     pair,
@@ -575,6 +582,7 @@ class SqliteWriter:
                     confidence,
                     opened_at,
                     closed_at,
+                    node_depth,
                 ),
             )
             self._conn.commit()

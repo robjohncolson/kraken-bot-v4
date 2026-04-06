@@ -72,6 +72,63 @@ def test_ensure_schema_idempotent() -> None:
     ensure_schema(conn)  # should not raise
 
 
+def test_ensure_schema_migrates_trade_outcomes_node_depth_default_zero() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """CREATE TABLE trade_outcomes (
+            id INTEGER PRIMARY KEY,
+            node_id TEXT NOT NULL,
+            pair TEXT NOT NULL,
+            direction TEXT NOT NULL,
+            entry_price TEXT NOT NULL,
+            exit_price TEXT NOT NULL,
+            entry_cost TEXT NOT NULL,
+            exit_proceeds TEXT NOT NULL,
+            net_pnl TEXT NOT NULL,
+            fee_total TEXT,
+            exit_reason TEXT NOT NULL,
+            hold_hours REAL,
+            confidence REAL,
+            opened_at TEXT NOT NULL,
+            closed_at TEXT NOT NULL
+        )"""
+    )
+    conn.execute(
+        "INSERT INTO trade_outcomes ("
+        "node_id, pair, direction, entry_price, exit_price, entry_cost, "
+        "exit_proceeds, net_pnl, fee_total, exit_reason, hold_hours, confidence, "
+        "opened_at, closed_at"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            "root-usd",
+            "USD/USDT",
+            "sell",
+            "1",
+            "1",
+            "21.11",
+            "21.11",
+            "0",
+            None,
+            "root_exit_neutral",
+            1.0,
+            0.5,
+            "2026-04-05T00:00:00+00:00",
+            "2026-04-05T01:00:00+00:00",
+        ),
+    )
+    conn.commit()
+
+    ensure_schema(conn)
+
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(trade_outcomes)")}
+    assert "node_depth" in columns
+
+    row = conn.execute("SELECT node_depth FROM trade_outcomes").fetchone()
+    assert row is not None
+    assert row["node_depth"] == 0
+
+
 # ── open_database tests ─────────────────────────────────────
 
 

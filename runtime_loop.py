@@ -1561,6 +1561,7 @@ class SchedulerRuntime:
                         else now.isoformat()
                     ),
                     closed_at=now.isoformat(),
+                    node_depth=node.depth,
                 )
                 # Return proceeds to parent
                 if node.parent_node_id:
@@ -2041,6 +2042,7 @@ class SchedulerRuntime:
                 confidence=confidence,
                 entry_cost=entry_cost,
                 ta_direction=direction,
+                opened_at=now,
             )
             logger.info(
                 "Root %s deadline set: %s (%.1fh, TA=%s, conf=%.2f)",
@@ -2147,12 +2149,14 @@ class SchedulerRuntime:
         # Set entry_pair, order_side, and current price on the root so
         # _close_rotation_node can place the exit order even without WebSocket price
         last_close = Decimal(str(bars["close"].iloc[-1]))
+        recalculated_entry_cost = node.quantity_total * last_close
         self._rotation_tree = update_node(
             self._rotation_tree,
             node.node_id,
             entry_pair=pair,
             order_side=entry_side,
             entry_price=last_close,
+            entry_cost=recalculated_entry_cost,
             exit_reason="root_exit_" + direction,
             ta_direction=direction,
         )
