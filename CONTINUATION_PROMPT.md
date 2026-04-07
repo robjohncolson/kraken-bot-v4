@@ -11,23 +11,25 @@
 - **Platform**: Windows 11, Python 3.13, WSL for runtime
 - **Repo**: `git@github.com:robjohncolson/kraken-bot-v4.git`, branch `master`
 
-## Current state (as of 2026-04-05)
+## Current state (as of 2026-04-07)
 
-**POST-MORTEM RECOVERY COMPLETE — BOT IS LIVE** (2026-04-05 18:53 ET). All recovery phases shipped. Bot running and cycling on REST fallback (WebSocket blocked by network, falls back gracefully).
+**BOT IS LIVE AND TRADING** — 7 root exits completed, portfolio consolidating. P&L tracking fixed (Phase 5). Win rate improvement spec ready (Phase 6).
 
 | Field | Value |
 |-------|-------|
 | Belief model | `llm_council` (CC+Codex via tmux-bridge) |
-| Portfolio | ~$487 across 12 active roots (3 skipped: XLTC, XXLM, XXMR — unknown Kraken pairs) |
+| Portfolio | Consolidating — 6 roots closed (bearish exits), 5 open (bullish holds), 2 closing |
 | Rotation tree | **LIVE** — `ENABLE_ROTATION_TREE=true`, cycling every 30s |
-| Tests | **624 passing** |
-| Position sizing | `MAX_POSITION_USD=50` (bumped from 10), Kelly sizing prompt ready at `tasks/codex-kelly-sizing-prompt.md` |
+| Tests | **628 passing** |
+| Position sizing | `MAX_POSITION_USD=50`, Kelly sizing spec'd at `tasks/specs/win-rate-improvement.md` (Phase 6C) |
 | Execution layer | **FIXED** — startup + periodic reconciliation, child rehydration, cancel persistence |
 | Risk management | **FIXED** — TP=5%, SL=2.5%, trailing stops (1.5% activation), root SL=10% |
-| Signal quality | **FIXED** — peak window floor 6h, council weighted majority, MIN_CONFIDENCE=0.70 |
-| Observability | **FIXED** — trade_outcomes table, child node unrealized P&L |
-| WebSocket | Falls back to REST polling — `CancelledError` now handled in connect path |
-| Dashboard | Port 58392 — may conflict if previous instance still bound |
+| Signal quality | **FIXED** — peak window floor 6h, council weighted majority, MIN_CONFIDENCE=0.70 (configurable in Phase 6A) |
+| Observability | **FIXED** — trade_outcomes with node_depth, opened_at on roots, accurate entry_cost |
+| P&L accuracy | **FIXED** (Phase 5) — root entry_cost recalculated at exit, opened_at set on deadline, node_depth column |
+| WebSocket | Connected (was falling back to REST, now recovered) |
+| Dashboard | Port 58392 — requires bot restart if port was previously held |
+| Child trades | **ZERO** — blocked by budget/confidence gates, fix spec'd in Phase 6A |
 
 ### Live root evaluations (first cycle, 2026-04-05)
 
@@ -139,27 +141,46 @@ MIN_POSITION_USD=10
 MAX_POSITION_USD=10
 EXIT_LIMIT_OFFSET_PCT=0.1
 ROTATION_MAX_CHILDREN_PER_PARENT=3
+ROTATION_MIN_CONFIDENCE=0.65      # Phase 6A: was hardcoded 0.70
+SCANNER_MIN_24H_VOLUME_USD=50000  # Phase 6B: minimum 24h USD volume
+SCANNER_MAX_SPREAD_PCT=2.0        # Phase 6B: max avg HL spread %
+KELLY_MIN_SAMPLE_SIZE=10          # Phase 6C: flat sizing until N child trades
 ```
 
 ## Goal for next session
 
-### Priority 1: Observe the Fixed Bot in Production
+### Priority 1: Implement Phase 6A — Unblock Child Spawning
 
-All recovery phases are shipped. Monitor:
-- Are trades actually completing now? Check `trade_outcomes` table for rows
-- Are trailing stops ratcheting? Check rotation events for SL updates
-- Are root exit windows consolidating weak positions? Check for `root_exit` events
-- Is the LLM council providing useful signals with weighted majority?
-- Win/loss rates once enough trades accumulate
+Spec at `tasks/specs/win-rate-improvement.md`, Codex prompt at `tasks/codex-win-rate-prompt.md`.
 
-### Priority 2: Enable Variable Position Sizing (Phase 2.4)
+**Why**: Zero child trades have occurred. Two blockers:
+1. Small root budgets ($14-25) divided by `max_children=3` fall below `MIN_POSITION_USD` ($10)
+2. `MIN_CONFIDENCE=0.70` hardcoded — rejects 4/6-signal candidates at 0.67
 
-Once `trade_outcomes` has enough data (10+ trades):
-- Change `.env`: `MAX_POSITION_USD=50` (from 10)
-- Integrate Kelly sizing from `trading/sizing.py:91-142` into `trading/rotation_tree.py` allocation
-- Feed actual win/loss data from `trade_outcomes` into `bounded_kelly()`
+**Fix**:
+- Make `ROTATION_MIN_CONFIDENCE` env-configurable (default 0.65)
+- Dynamic `max_children` capped by budget: `min(configured_max, deployable / min_pos)`
+- Deploy with `ROTATION_MIN_CONFIDENCE=0.65` in `.env`
 
-### Priority 3: Telegram Alerts (Phase 4.4, stretch)
+### Priority 2: Implement Phase 6B — Volume & Spread Filters
+
+**Why**: Scanner evaluates ALL pairs with no liquidity check. Low-volume garbage pairs produce noisy signals.
+
+**Fix**:
+- Add `SCANNER_MIN_24H_VOLUME_USD=50000` and `SCANNER_MAX_SPREAD_PCT=2.0` config
+- Compute from existing OHLCV bars (no extra API calls)
+- Filter before TA analysis
+
+### Priority 3: Implement Phase 6C — Kelly Sizing Integration
+
+**Why**: `bounded_kelly()` exists in `trading/sizing.py` but isn't wired into the planner.
+
+**Fix**:
+- Add `fetch_child_trade_stats()` to SqliteWriter (queries trade_outcomes WHERE node_depth > 0)
+- Wire `kelly_cap` into `compute_child_allocations()` via planner
+- Sample gate: flat sizing until 10+ child trades, then Kelly kicks in automatically
+
+### Priority 4: Telegram Alerts (Phase 4.4, stretch)
 
 - Configure bot token and chat ID in `.env`
 - Alert on: SL hit, TP hit, fill timeout, WS disconnect, drawdown >5%
@@ -172,6 +193,12 @@ Once `trade_outcomes` has enough data (10+ trades):
 - **Portfolio fragmentation**: Rotation tree creates many small positions. Without root exit windows + consolidation, these accumulate and become individually untradeable.
 - **TP/SL math was marginal**: 3% TP + 0.52% fees = 3.52% move needed. 2% SL without fee adj = effective R:R of ~1.3:1. Need 2:1 minimum.
 - **Entry cost was wrong**: Used planned allocation, not actual fill cost. Now uses `fill_qty * fill_price` with unspent capital refunded to parent.
+
+## What shipped 2026-04-07
+
+- **Phase 5 — P&L accuracy**: Root entry_cost recalculated at exit time (not stale snapshot), `opened_at` set when deadline assigned (hold_hours now populated), `node_depth` column in trade_outcomes (0=root, 1+=child) for filtering. `pending.side` AttributeError fix on startup reconciliation
+- **Phase 6 spec**: Win rate improvement spec at `tasks/specs/win-rate-improvement.md`, Codex prompt at `tasks/codex-win-rate-prompt.md`. Three phases: 6A unblocks child spawning (configurable MIN_CONFIDENCE + dynamic max_children), 6B adds volume/spread filters, 6C wires Kelly sizing
+- 4 new tests (628 total)
 
 ## What shipped 2026-04-05
 
@@ -240,7 +267,7 @@ Once `trade_outcomes` has enough data (10+ trades):
 ## Validation
 
 ```bash
-python -m pytest                    # 624 tests
+python -m pytest                    # 628 tests
 python -m ruff check .              # clean
 curl http://127.0.0.1:58392/api/health         # dashboard up
 curl http://127.0.0.1:58392/api/rotation-tree  # rotation tree state
