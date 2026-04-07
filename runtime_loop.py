@@ -809,7 +809,7 @@ class SchedulerRuntime:
             return None
         side = next(
             (trade.side for trade in reversed(matches) if trade.side),
-            pending.side.value,
+            pending.side.value if hasattr(pending.side, "value") else pending.side,
         )
         average_price = notional / total_quantity
         return FillConfirmed(
