@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from core.config import load_settings
+from core.config import load_settings, validate_settings
 from core.errors import MissingEnvironmentVariableError
 
 
@@ -31,11 +31,15 @@ def test_load_settings_uses_spec_defaults() -> None:
     assert settings.scanner_pair_discovery_ttl_sec == 3600
     assert settings.scanner_max_concurrency == 4
     assert settings.scanner_timeout_sec == 15.0
+    assert settings.scanner_min_24h_volume_usd == 50_000.0
+    assert settings.scanner_max_spread_pct == 2.0
     assert settings.enable_conditional_tree is False
     assert settings.rotation_take_profit_pct == 5.0
     assert settings.rotation_stop_loss_pct == 2.5
     assert settings.rotation_trailing_stop_activation_pct == 1.5
+    assert settings.rotation_min_confidence == 0.65
     assert settings.root_stop_loss_pct == 10.0
+    assert settings.kelly_min_sample_size == 10
 
 
 @pytest.mark.parametrize("missing_name", sorted(REQUIRED_ENV))
@@ -72,6 +76,10 @@ def test_scanner_settings_parse_from_environment() -> None:
         "SCANNER_PAIR_DISCOVERY_TTL_SEC": "120",
         "SCANNER_MAX_CONCURRENCY": "2",
         "SCANNER_TIMEOUT_SEC": "4.5",
+        "SCANNER_MIN_24H_VOLUME_USD": "125000",
+        "SCANNER_MAX_SPREAD_PCT": "1.25",
+        "ROTATION_MIN_CONFIDENCE": "0.72",
+        "KELLY_MIN_SAMPLE_SIZE": "25",
     }
 
     settings = load_settings(env)
@@ -79,6 +87,10 @@ def test_scanner_settings_parse_from_environment() -> None:
     assert settings.scanner_pair_discovery_ttl_sec == 120
     assert settings.scanner_max_concurrency == 2
     assert settings.scanner_timeout_sec == 4.5
+    assert settings.scanner_min_24h_volume_usd == 125000.0
+    assert settings.scanner_max_spread_pct == 1.25
+    assert settings.rotation_min_confidence == 0.72
+    assert settings.kelly_min_sample_size == 25
 
 
 def test_enable_conditional_tree_parses_from_environment() -> None:
@@ -98,3 +110,14 @@ def test_rotation_risk_settings_parse_from_environment() -> None:
 
     assert settings.rotation_trailing_stop_activation_pct == 2.25
     assert settings.root_stop_loss_pct == 12.5
+
+
+def test_validate_settings_warns_for_rotation_min_confidence_out_of_range() -> None:
+    settings = load_settings({**REQUIRED_ENV, "ROTATION_MIN_CONFIDENCE": "1.2"})
+
+    warnings = validate_settings(settings)
+
+    assert (
+        "ROTATION_MIN_CONFIDENCE=1.2 must be in [0.0, 1.0]"
+        in warnings
+    )

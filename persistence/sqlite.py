@@ -592,6 +592,32 @@ class SqliteWriter:
                 f"Failed to insert trade outcome for node {node_id!r}: {exc}"
             ) from exc
 
+    def fetch_child_trade_stats(self, lookback_days: int = 90) -> tuple[int, int, Decimal]:
+        """Return (wins, losses, avg_payoff_ratio) for child trades (depth > 0)."""
+        try:
+            cursor = self._conn.execute(
+                "SELECT net_pnl FROM trade_outcomes "
+                "WHERE node_depth > 0 "
+                "AND julianday(closed_at) >= julianday('now', ?)",
+                (f"-{lookback_days} days",),
+            )
+            rows = cursor.fetchall()
+        except sqlite3.Error:
+            return (0, 0, Decimal("1"))
+        wins = losses = 0
+        win_sum = loss_sum = Decimal("0")
+        for row in rows:
+            pnl = Decimal(str(row[0]))
+            if pnl > 0:
+                wins += 1
+                win_sum += pnl
+            else:
+                losses += 1
+                loss_sum += abs(pnl)
+        if losses == 0 or wins == 0:
+            return (wins, losses, Decimal("1"))
+        return (wins, losses, (win_sum / wins) / (loss_sum / losses))
+
     def upsert_position(self, position: Position) -> None:
         """Insert or update a full position record."""
         try:

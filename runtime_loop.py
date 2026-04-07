@@ -298,6 +298,7 @@ class SchedulerRuntime:
                 settings=settings,
                 pair_scanner=scanner,
                 pair_metadata=self._pair_metadata,
+                db_writer=self._writer,
             )
             # Initialize root nodes from current balances
             balances_dict = {

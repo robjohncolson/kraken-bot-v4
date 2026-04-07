@@ -97,6 +97,8 @@ def compute_child_allocations(
     candidates: tuple[RotationCandidate, ...],
     min_position: Decimal = Decimal("10"),
     max_children: int = 3,
+    min_confidence: float = MIN_CONFIDENCE,
+    kelly_cap: Decimal | None = None,
 ) -> list[tuple[RotationCandidate, Decimal]]:
     """Compute confidence-weighted allocations for child rotations.
 
@@ -108,7 +110,7 @@ def compute_child_allocations(
     # Score candidates
     scored: list[tuple[RotationCandidate, float]] = []
     for c in candidates:
-        raw = max(0.0, c.confidence - MIN_CONFIDENCE) ** 2
+        raw = max(0.0, c.confidence - min_confidence) ** 2
         if raw > 0:
             scored.append((c, raw))
 
@@ -121,12 +123,15 @@ def compute_child_allocations(
 
     total_score = sum(s for _, s in scored)
     allocatable = parent.quantity_free * PARENT_DEPLOY_RATIO
+    child_cap = allocatable if len(scored) == 1 else parent.quantity_free * MAX_CHILD_RATIO
 
     result: list[tuple[RotationCandidate, Decimal]] = []
     for candidate, score in scored:
         weight = Decimal(str(score / total_score))
         target = allocatable * weight
-        capped = min(target, parent.quantity_free * MAX_CHILD_RATIO)
+        capped = min(target, child_cap)
+        if kelly_cap is not None and kelly_cap > Decimal("0"):
+            capped = min(capped, parent.quantity_free * kelly_cap)
         if capped >= min_position:
             result.append((candidate, capped.quantize(Decimal("0.01"))))
 

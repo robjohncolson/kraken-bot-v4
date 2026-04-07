@@ -15,6 +15,7 @@ DEFAULT_MAX_SINGLE_PAIR_PCT = 15
 DEFAULT_MAX_DRAWDOWN_SOFT_PCT = 10
 DEFAULT_MAX_DRAWDOWN_HARD_PCT = 15
 DEFAULT_KELLY_CI_LEVEL = 0.95
+DEFAULT_KELLY_MIN_SAMPLE_SIZE = 10
 DEFAULT_MIN_POSITION_USD = 10
 DEFAULT_MAX_POSITION_USD = 100
 DEFAULT_STOP_PCT = 5
@@ -51,10 +52,13 @@ DEFAULT_STARTUP_RECONCILE_ONLY = True
 DEFAULT_SCANNER_PAIR_DISCOVERY_TTL_SEC = 3600
 DEFAULT_SCANNER_MAX_CONCURRENCY = 4
 DEFAULT_SCANNER_TIMEOUT_SEC = 15.0
+DEFAULT_SCANNER_MIN_24H_VOLUME_USD = 50_000.0
+DEFAULT_SCANNER_MAX_SPREAD_PCT = 2.0
 DEFAULT_ENABLE_CONDITIONAL_TREE = False
 DEFAULT_ENABLE_ROTATION_TREE = False
 DEFAULT_EXIT_LIMIT_OFFSET_PCT = 0.1
 DEFAULT_ROTATION_MAX_CHILDREN_PER_PARENT = 3
+DEFAULT_ROTATION_MIN_CONFIDENCE = 0.65
 DEFAULT_PAIR_METADATA_REFRESH_HOURS = 24
 
 ALLOWED_KRAKEN_TIERS = frozenset({"starter", "intermediate", "pro"})
@@ -81,6 +85,7 @@ class Settings:
     max_drawdown_soft_pct: int
     max_drawdown_hard_pct: int
     kelly_ci_level: float
+    kelly_min_sample_size: int
     min_position_usd: int
     max_position_usd: int
     default_stop_pct: int
@@ -118,11 +123,14 @@ class Settings:
     scanner_pair_discovery_ttl_sec: int
     scanner_max_concurrency: int
     scanner_timeout_sec: float
+    scanner_min_24h_volume_usd: float
+    scanner_max_spread_pct: float
     enable_conditional_tree: bool
     enable_rotation_tree: bool
     exit_limit_offset_pct: float
     pair_metadata_refresh_hours: int
     rotation_max_children_per_parent: int
+    rotation_min_confidence: float
     belief_model: str
     active_artifact_id: str | None
     shadow_artifact_id: str | None
@@ -154,6 +162,11 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
             env, "MAX_DRAWDOWN_HARD_PCT", DEFAULT_MAX_DRAWDOWN_HARD_PCT
         ),
         kelly_ci_level=_read_float(env, "KELLY_CI_LEVEL", DEFAULT_KELLY_CI_LEVEL),
+        kelly_min_sample_size=_read_int(
+            env,
+            "KELLY_MIN_SAMPLE_SIZE",
+            DEFAULT_KELLY_MIN_SAMPLE_SIZE,
+        ),
         min_position_usd=_read_int(env, "MIN_POSITION_USD", DEFAULT_MIN_POSITION_USD),
         max_position_usd=_read_int(env, "MAX_POSITION_USD", DEFAULT_MAX_POSITION_USD),
         default_stop_pct=_read_int(env, "DEFAULT_STOP_PCT", DEFAULT_STOP_PCT),
@@ -261,6 +274,16 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
             "SCANNER_TIMEOUT_SEC",
             DEFAULT_SCANNER_TIMEOUT_SEC,
         ),
+        scanner_min_24h_volume_usd=_read_float(
+            env,
+            "SCANNER_MIN_24H_VOLUME_USD",
+            DEFAULT_SCANNER_MIN_24H_VOLUME_USD,
+        ),
+        scanner_max_spread_pct=_read_float(
+            env,
+            "SCANNER_MAX_SPREAD_PCT",
+            DEFAULT_SCANNER_MAX_SPREAD_PCT,
+        ),
         enable_conditional_tree=_read_bool(
             env,
             "ENABLE_CONDITIONAL_TREE",
@@ -285,6 +308,11 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
             env,
             "ROTATION_MAX_CHILDREN_PER_PARENT",
             DEFAULT_ROTATION_MAX_CHILDREN_PER_PARENT,
+        ),
+        rotation_min_confidence=_read_float(
+            env,
+            "ROTATION_MIN_CONFIDENCE",
+            DEFAULT_ROTATION_MIN_CONFIDENCE,
         ),
         belief_model=env.get("BELIEF_MODEL", "technical_ensemble").strip(),
         active_artifact_id=_read_optional(env, "ACTIVE_ARTIFACT_ID"),
@@ -392,6 +420,11 @@ def validate_settings(settings: Settings) -> list[str]:
     if not (0.0 <= settings.min_belief_confidence <= 1.0):
         warnings.append(
             f"MIN_BELIEF_CONFIDENCE={settings.min_belief_confidence} must be in [0.0, 1.0]"
+        )
+    if not (0.0 <= settings.rotation_min_confidence <= 1.0):
+        warnings.append(
+            f"ROTATION_MIN_CONFIDENCE={settings.rotation_min_confidence} "
+            "must be in [0.0, 1.0]"
         )
     if settings.rotation_entry_fill_timeout_min < 5:
         warnings.append(

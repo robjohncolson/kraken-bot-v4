@@ -1,7 +1,6 @@
 """Tests for the generic research model source and handler."""
 
 import json
-import tempfile
 from pathlib import Path
 from unittest.mock import patch
 

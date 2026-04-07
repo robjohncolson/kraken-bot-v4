@@ -19,8 +19,10 @@ from core.types import (
 )
 from exchange.pair_metadata import PairMetadataCache
 from trading.pair_scanner import PairScanner
+from trading.sizing import bounded_kelly
 from trading.rotation_tree import (
     MIN_REMAINING_HOURS,
+    PARENT_DEPLOY_RATIO,
     add_node,
     build_root_nodes,
     compute_child_allocations,
@@ -46,10 +48,12 @@ class RotationTreePlanner:
         settings: Settings,
         pair_scanner: PairScanner,
         pair_metadata: PairMetadataCache | None = None,
+        db_writer=None,
     ) -> None:
         self._settings = settings
         self._pair_scanner = pair_scanner
         self._pair_metadata = pair_metadata
+        self._db_writer = db_writer
 
     def initialize_roots(
         self,
@@ -66,6 +70,17 @@ class RotationTreePlanner:
             nodes=roots,
             root_node_ids=tuple(r.node_id for r in roots),
         )
+
+    def _kelly_fraction(self) -> Decimal | None:
+        if self._db_writer is None:
+            return None
+        try:
+            wins, losses, payoff = self._db_writer.fetch_child_trade_stats()
+        except Exception:
+            return None
+        if wins + losses < self._settings.kelly_min_sample_size:
+            return None
+        return bounded_kelly(wins=wins, losses=losses, payoff_ratio=payoff)
 
     def plan_cycle(
         self,
@@ -87,6 +102,7 @@ class RotationTreePlanner:
 
         updated_tree = tree
         child_seq = len(tree.nodes)
+        kelly_frac = self._kelly_fraction()
 
         for leaf in leaves:
             if leaf.depth >= tree.max_depth:
@@ -95,7 +111,15 @@ class RotationTreePlanner:
                 continue
 
             # Enforce max children per parent to prevent order churn
-            max_children = self._settings.rotation_max_children_per_parent
+            configured_max = self._settings.rotation_max_children_per_parent
+            min_pos = Decimal(str(self._settings.min_position_usd))
+            deployable = leaf.quantity_free * PARENT_DEPLOY_RATIO
+            max_by_budget = (
+                max(1, int(deployable / min_pos))
+                if min_pos > 0
+                else configured_max
+            )
+            max_children = min(configured_max, max_by_budget)
             existing_children = [
                 n for n in live_nodes(updated_tree) if n.parent_node_id == leaf.node_id
             ]
@@ -135,6 +159,8 @@ class RotationTreePlanner:
                 candidates,
                 min_position=Decimal(str(self._settings.min_position_usd)),
                 max_children=remaining_slots,
+                min_confidence=self._settings.rotation_min_confidence,
+                kelly_cap=kelly_frac,
             )
 
             # Filter allocations below Kraken ordermin

@@ -121,7 +121,7 @@ def test_compute_allocations_single_candidate() -> None:
     assert len(allocs) == 1
     _, qty = allocs[0]
     assert qty > 0
-    assert qty <= Decimal("60")  # MAX_CHILD_RATIO
+    assert qty <= Decimal("80")  # Single child can use the full deployable budget
 
 
 def test_compute_allocations_below_min_confidence() -> None:
@@ -129,6 +129,32 @@ def test_compute_allocations_below_min_confidence() -> None:
     candidates = (_candidate(confidence=0.4),)
     allocs = compute_child_allocations(parent, candidates)
     assert len(allocs) == 0
+
+
+def test_compute_allocations_accepts_with_lower_threshold() -> None:
+    parent = _root(qty=Decimal("100"))
+    candidates = (_candidate(confidence=0.67),)
+
+    allocs = compute_child_allocations(
+        parent,
+        candidates,
+        min_confidence=0.65,
+    )
+
+    assert len(allocs) == 1
+
+
+def test_compute_allocations_rejects_below_custom_threshold() -> None:
+    parent = _root(qty=Decimal("100"))
+    candidates = (_candidate(confidence=0.60),)
+
+    allocs = compute_child_allocations(
+        parent,
+        candidates,
+        min_confidence=0.65,
+    )
+
+    assert allocs == []
 
 
 def test_compute_allocations_two_candidates() -> None:
@@ -155,6 +181,31 @@ def test_compute_allocations_accepts_five_of_six_confidence() -> None:
     candidates = (_candidate(confidence=0.83),)
     allocs = compute_child_allocations(parent, candidates)
     assert len(allocs) == 1
+
+
+def test_compute_allocations_with_kelly_cap() -> None:
+    parent = _root(qty=Decimal("200"))
+    candidates = (_candidate(confidence=0.83),)
+
+    allocs = compute_child_allocations(
+        parent,
+        candidates,
+        kelly_cap=Decimal("0.10"),
+    )
+
+    assert len(allocs) == 1
+    _, qty = allocs[0]
+    assert qty <= Decimal("20.00")
+
+
+def test_compute_allocations_kelly_cap_none_is_noop() -> None:
+    parent = _root(qty=Decimal("200"))
+    candidates = (_candidate(confidence=0.83),)
+
+    with_none = compute_child_allocations(parent, candidates, kelly_cap=None)
+    default = compute_child_allocations(parent, candidates)
+
+    assert with_none == default
 
 
 def test_make_child_node_respects_parent_deadline() -> None:

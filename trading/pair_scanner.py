@@ -164,6 +164,38 @@ class PairScanner:
             )
             return None
 
+        close_f = bars["close"].astype(float)
+        vol_f = bars["volume"].astype(float)
+        recent_24 = min(24, len(bars))
+        usd_volume_24h = float((vol_f.iloc[-recent_24:] * close_f.iloc[-recent_24:]).sum())
+        if usd_volume_24h < self._settings.scanner_min_24h_volume_usd:
+            logger.debug(
+                "Skipped %s: 24h vol $%.0f < $%.0f",
+                pair,
+                usd_volume_24h,
+                self._settings.scanner_min_24h_volume_usd,
+            )
+            return None
+
+        high_f = bars["high"].astype(float)
+        low_f = bars["low"].astype(float)
+        recent_6 = min(6, len(bars))
+        spread_pct = float(
+            (
+                (high_f.iloc[-recent_6:] - low_f.iloc[-recent_6:])
+                / close_f.iloc[-recent_6:]
+            ).mean()
+            * 100
+        )
+        if spread_pct > self._settings.scanner_max_spread_pct:
+            logger.debug(
+                "Skipped %s: spread %.2f%% > %.2f%%",
+                pair,
+                spread_pct,
+                self._settings.scanner_max_spread_pct,
+            )
+            return None
+
         try:
             belief = self._technical_source.analyze(pair, bars)
         except Exception as exc:
@@ -317,6 +349,38 @@ class PairScanner:
             return None
 
         if len(bars) < self._technical_source.min_bars:
+            return None
+
+        close_f = bars["close"].astype(float)
+        vol_f = bars["volume"].astype(float)
+        recent_24 = min(24, len(bars))
+        usd_volume_24h = float((vol_f.iloc[-recent_24:] * close_f.iloc[-recent_24:]).sum())
+        if usd_volume_24h < self._settings.scanner_min_24h_volume_usd:
+            logger.debug(
+                "Skipped %s: 24h vol $%.0f < $%.0f",
+                pair,
+                usd_volume_24h,
+                self._settings.scanner_min_24h_volume_usd,
+            )
+            return None
+
+        high_f = bars["high"].astype(float)
+        low_f = bars["low"].astype(float)
+        recent_6 = min(6, len(bars))
+        spread_pct = float(
+            (
+                (high_f.iloc[-recent_6:] - low_f.iloc[-recent_6:])
+                / close_f.iloc[-recent_6:]
+            ).mean()
+            * 100
+        )
+        if spread_pct > self._settings.scanner_max_spread_pct:
+            logger.debug(
+                "Skipped %s: spread %.2f%% > %.2f%%",
+                pair,
+                spread_pct,
+                self._settings.scanner_max_spread_pct,
+            )
             return None
 
         try:

@@ -6,9 +6,14 @@ from decimal import Decimal
 
 import pandas as pd
 
-from beliefs.technical_ensemble_source import TechnicalEnsembleSource
 from core.config import Settings, load_settings
-from core.types import BeliefDirection, BeliefSnapshot, BeliefSource, MarketRegime
+from core.types import (
+    BeliefDirection,
+    BeliefSnapshot,
+    BeliefSource,
+    MarketRegime,
+    OrderSide,
+)
 from exchange.client import KrakenClient
 from trading import pair_scanner as pair_scanner_module
 from trading.pair_scanner import PairScanner
@@ -237,6 +242,87 @@ def test_scan_bull_candidates_reduces_peak_hours_when_rsi_is_overbought() -> Non
     assert candidates[0].estimated_peak_hours == 12
 
 
+def test_scan_rotation_pair_rejects_low_volume() -> None:
+    source = FakeTechnicalSource(
+        {"BTC/USD": _belief("BTC/USD", BeliefDirection.BULLISH, 0.8)},
+    )
+    bars = _bars_from_close(
+        [4.0 + (i * 0.01) for i in range(40)],
+        volume=1.0,
+    )
+    scanner = PairScanner(
+        client=_client(),
+        settings=_settings(),
+        technical_source=source,
+        ohlcv_fetcher=lambda pair, **kwargs: bars,
+    )
+
+    result = scanner._scan_rotation_pair(
+        "BTC/USD",
+        "USD",
+        "BTC",
+        OrderSide.BUY,
+        None,
+    )
+
+    assert result is None
+    assert source.calls == []
+
+
+def test_scan_rotation_pair_rejects_wide_spread() -> None:
+    source = FakeTechnicalSource(
+        {"BTC/USD": _belief("BTC/USD", BeliefDirection.BULLISH, 0.8)},
+    )
+    bars = _bars_from_close(
+        _up_saw_closes(),
+        volume=5000.0,
+        high_mult=1.05,
+        low_mult=0.95,
+    )
+    scanner = PairScanner(
+        client=_client(),
+        settings=_settings(),
+        technical_source=source,
+        ohlcv_fetcher=lambda pair, **kwargs: bars,
+    )
+
+    result = scanner._scan_rotation_pair(
+        "BTC/USD",
+        "USD",
+        "BTC",
+        OrderSide.BUY,
+        None,
+    )
+
+    assert result is None
+    assert source.calls == []
+
+
+def test_scan_rotation_pair_accepts_liquid_pair() -> None:
+    source = FakeTechnicalSource(
+        {"BTC/USD": _belief("BTC/USD", BeliefDirection.BULLISH, 0.8)},
+    )
+    bars = _bars_from_close(_up_saw_closes(), volume=5000.0)
+    scanner = PairScanner(
+        client=_client(),
+        settings=_settings(),
+        technical_source=source,
+        ohlcv_fetcher=lambda pair, **kwargs: bars,
+    )
+
+    result = scanner._scan_rotation_pair(
+        "BTC/USD",
+        "USD",
+        "BTC",
+        OrderSide.BUY,
+        None,
+    )
+
+    assert result is not None
+    assert result.pair == "BTC/USD"
+    assert source.calls == ["BTC/USD"]
+
+
 def _settings(**overrides: str) -> Settings:
     env = {
         **REQUIRED_ENV,
@@ -262,15 +348,21 @@ def _belief(pair: str, direction: BeliefDirection, confidence: float) -> BeliefS
     )
 
 
-def _bars_from_close(closes: list[float]) -> pd.DataFrame:
+def _bars_from_close(
+    closes: list[float],
+    *,
+    volume: float = 1000.0,
+    high_mult: float = 1.005,
+    low_mult: float = 0.995,
+) -> pd.DataFrame:
     return pd.DataFrame(
         [
             {
                 "open": close * 0.99,
-                "high": close * 1.02,
-                "low": close * 0.98,
+                "high": close * high_mult,
+                "low": close * low_mult,
                 "close": close,
-                "volume": 1000.0,
+                "volume": volume,
             }
             for close in closes
         ]
