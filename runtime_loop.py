@@ -2246,6 +2246,19 @@ class SchedulerRuntime:
         base_qty = exit_base_quantity(
             node.order_side, node.quantity_total, current_price
         )
+        # Cap at actual Kraken balance to avoid "Insufficient funds" from
+        # tiny drift between node quantity and exchange balance.
+        if exit_side == OrderSide.SELL:
+            sell_asset = node.entry_pair.split("/")[0] if "/" in node.entry_pair else node.asset
+            avail = _available_balance(
+                self._state.kraken_state.balances, sell_asset,
+            )
+            if ZERO_DECIMAL < avail < base_qty:
+                logger.info(
+                    "Capping exit qty for %s: node=%s > balance=%s",
+                    node.node_id, base_qty, avail,
+                )
+                base_qty = avail
         if base_qty <= ZERO_DECIMAL:
             self._rotation_tree = update_node(
                 self._rotation_tree,

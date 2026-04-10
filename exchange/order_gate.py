@@ -4,7 +4,7 @@ import time
 from collections import deque
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import ROUND_DOWN, Decimal
 from itertools import count
 from types import MappingProxyType
 from typing import Protocol
@@ -236,10 +236,17 @@ class OrderGate:
 
     def build_order_payload(self, order: OrderRequest) -> Mapping[str, object]:
         client_order_id = order.client_order_id or self._next_client_order_id(order.pair)
+        quantity = order.quantity
+        # Quantize volume to pair's lot_decimals so Kraken doesn't reject it
+        if self._pair_metadata is not None:
+            lot_dec = self._pair_metadata.lot_decimals(normalize_pair(order.pair))
+            if lot_dec is not None:
+                quantizer = Decimal(10) ** -lot_dec
+                quantity = quantity.quantize(quantizer, rounding=ROUND_DOWN)
         payload: dict[str, object] = {
             "ordertype": _render_order_type(order.order_type),
             "type": order.side.value,
-            "volume": _render_decimal(order.quantity),
+            "volume": _render_decimal(quantity),
         }
         # cl_ord_id is not supported on Kraken Starter tier
         if self._kraken_tier != "starter":
@@ -261,8 +268,8 @@ class OrderGate:
         # Defensive ordermin check
         if self._pair_metadata is not None:
             ordermin = self._pair_metadata.ordermin(normalize_pair(order.pair))
-            if ordermin is not None and order.quantity < ordermin:
-                raise OrderBelowMinimumError(order.pair, order.quantity, ordermin)
+            if ordermin is not None and quantity < ordermin:
+                raise OrderBelowMinimumError(order.pair, quantity, ordermin)
 
         return MappingProxyType(payload)
 
