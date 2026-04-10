@@ -239,6 +239,10 @@ def _run_main_loop(
         from beliefs.llm_council_handler import make_fallback_council_handler
         belief_handler = make_fallback_council_handler()
         logger.info("Belief model: llm_council with technical_ensemble fallback")
+    elif settings.belief_model == "timesfm":
+        from beliefs.timesfm_handler import make_timesfm_handler
+        belief_handler = make_timesfm_handler()
+        logger.info("Belief model: timesfm (close-price forecaster)")
     else:
         belief_handler = technical_ensemble_belief_handler
         logger.info("Belief model: technical_ensemble")
