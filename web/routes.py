@@ -237,6 +237,7 @@ def create_cc_router(
     import sqlite3
     from functools import partial
 
+    import pandas as pd
     from pydantic import BaseModel, field_validator
 
     from core.errors import ExchangeError, SafeModeBlockedError
@@ -372,6 +373,98 @@ def create_cc_router(
             return {"pair": pair, "interval": interval, "bars": records}
         except OHLCVFetchError as exc:
             raise HTTPException(status_code=404, detail="OHLCV data unavailable") from exc
+
+    @router.get("/kronos/{pair:path}")
+    async def get_kronos_prediction(
+        pair: str,
+        interval: int = 60,
+        count: int = 400,
+        pred_len: int = 24,
+    ) -> dict[str, Any]:
+        """Kronos candle prediction — returns predicted OHLCV for next pred_len bars."""
+
+        def _run_kronos() -> dict[str, Any]:
+            import sys
+
+            kronos_path = "C:/Users/rober/Downloads/Projects/kronos"
+            if kronos_path not in sys.path:
+                sys.path.insert(0, kronos_path)
+
+            bars = fetch_ohlcv(pair, interval=interval, count=count)
+            if len(bars) < 40:
+                return {"error": "Insufficient bars", "count": len(bars)}
+
+            ohlcv_df = bars[["open", "high", "low", "close", "volume"]].astype(float).reset_index(drop=True)
+            x_ts = pd.Series(pd.date_range(
+                end=pd.Timestamp.now(), periods=len(ohlcv_df), freq=f"{interval}min",
+            ))
+            y_ts = pd.Series(pd.date_range(
+                start=x_ts.iloc[-1] + pd.Timedelta(minutes=interval),
+                periods=pred_len, freq=f"{interval}min",
+            ))
+
+            from model import Kronos as KronosModel
+            from model import KronosPredictor, KronosTokenizer
+
+            import torch
+
+            _cache = getattr(_run_kronos, "_cache", None)
+            if _cache is None:
+                tok = KronosTokenizer.from_pretrained("NeoQuasar/Kronos-Tokenizer-base")
+                mdl = KronosModel.from_pretrained("NeoQuasar/Kronos-mini")
+                if torch.xpu.is_available():
+                    tok = tok.to("xpu")
+                    mdl = mdl.to("xpu")
+                pred = KronosPredictor(mdl, tok, max_context=2048)
+                _run_kronos._cache = pred
+                _cache = pred
+
+            pred_df = _cache.predict(
+                df=ohlcv_df, x_timestamp=x_ts, y_timestamp=y_ts,
+                pred_len=pred_len, T=1.0, top_p=0.9, sample_count=1, verbose=False,
+            )
+            last_close = float(ohlcv_df["close"].iloc[-1])
+            pred_close = float(pred_df["close"].iloc[-1])
+            pct_change = (pred_close - last_close) / last_close * 100
+            direction = "bullish" if pct_change > 0.5 else "bearish" if pct_change < -0.5 else "neutral"
+            pred_high = float(pred_df["high"].max())
+            pred_low = float(pred_df["low"].min())
+            volatility_pct = (pred_high - pred_low) / last_close * 100
+
+            candles = [
+                {
+                    "timestamp": str(pred_df.index[i]),
+                    "open": round(float(pred_df["open"].iloc[i]), 4),
+                    "high": round(float(pred_df["high"].iloc[i]), 4),
+                    "low": round(float(pred_df["low"].iloc[i]), 4),
+                    "close": round(float(pred_df["close"].iloc[i]), 4),
+                }
+                for i in range(len(pred_df))
+            ]
+            return {
+                "pair": pair,
+                "interval": interval,
+                "pred_len": pred_len,
+                "current_close": round(last_close, 4),
+                "predicted_close": round(pred_close, 4),
+                "pct_change": round(pct_change, 2),
+                "direction": direction,
+                "predicted_range": {"high": round(pred_high, 4), "low": round(pred_low, 4)},
+                "volatility_pct": round(volatility_pct, 2),
+                "candles": candles,
+            }
+
+        try:
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(None, _run_kronos)
+            if "error" in result:
+                raise HTTPException(status_code=400, detail=result["error"])
+            return result
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _log.warning("Kronos prediction failed for %s: %s", pair, exc)
+            raise HTTPException(status_code=500, detail="Prediction failed") from exc
 
     def get_state_for_cc() -> DashboardState:
         return state_provider()
