@@ -7,6 +7,7 @@ from typing import Any, Protocol
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.encoders import jsonable_encoder
+from pydantic import BaseModel, field_validator
 
 from core.types import (
     BeliefDirection,
@@ -133,6 +134,46 @@ class DashboardStateProvider(Protocol):
     def __call__(self) -> DashboardState: ...
 
 
+class OrderPayload(BaseModel):
+    pair: str
+    side: str
+    order_type: str = "limit"
+    quantity: str
+    limit_price: str | None = None
+    stop_price: str | None = None
+
+    @field_validator("side")
+    @classmethod
+    def validate_side(cls, v: str) -> str:
+        if v.lower() not in ("buy", "sell"):
+            raise ValueError("side must be 'buy' or 'sell'")
+        return v.lower()
+
+    @field_validator("order_type")
+    @classmethod
+    def validate_order_type(cls, v: str) -> str:
+        if v.lower() not in ("market", "limit", "stop_loss"):
+            raise ValueError("order_type must be 'market', 'limit', or 'stop_loss'")
+        return v.lower()
+
+    @field_validator("quantity")
+    @classmethod
+    def validate_quantity(cls, v: str) -> str:
+        d = Decimal(v)
+        if d <= 0 or not d.is_finite():
+            raise ValueError("quantity must be a positive finite number")
+        return v
+
+    @field_validator("limit_price", "stop_price")
+    @classmethod
+    def validate_price(cls, v: str | None) -> str | None:
+        if v is not None:
+            d = Decimal(v)
+            if d <= 0 or not d.is_finite():
+                raise ValueError("price must be a positive finite number")
+        return v
+
+
 def create_router(*, state_provider: DashboardStateProvider) -> APIRouter:
     router = APIRouter(prefix="/api")
 
@@ -238,7 +279,6 @@ def create_cc_router(
     from functools import partial
 
     import pandas as pd
-    from pydantic import BaseModel, field_validator
 
     from core.errors import ExchangeError, SafeModeBlockedError
     from core.types import OrderRequest, OrderSide, OrderType
@@ -257,45 +297,6 @@ def create_cc_router(
             _cc_conn.row_factory = sqlite3.Row
             _cc_reader = SqliteReader(_cc_conn)
     reader = _cc_reader
-
-    class OrderPayload(BaseModel):
-        pair: str
-        side: str
-        order_type: str = "limit"
-        quantity: str
-        limit_price: str | None = None
-        stop_price: str | None = None
-
-        @field_validator("side")
-        @classmethod
-        def validate_side(cls, v: str) -> str:
-            if v.lower() not in ("buy", "sell"):
-                raise ValueError("side must be 'buy' or 'sell'")
-            return v.lower()
-
-        @field_validator("order_type")
-        @classmethod
-        def validate_order_type(cls, v: str) -> str:
-            if v.lower() not in ("market", "limit", "stop_loss"):
-                raise ValueError("order_type must be 'market', 'limit', or 'stop_loss'")
-            return v.lower()
-
-        @field_validator("quantity")
-        @classmethod
-        def validate_quantity(cls, v: str) -> str:
-            d = Decimal(v)
-            if d <= 0 or not d.is_finite():
-                raise ValueError("quantity must be a positive finite number")
-            return v
-
-        @field_validator("limit_price", "stop_price")
-        @classmethod
-        def validate_price(cls, v: str | None) -> str | None:
-            if v is not None:
-                d = Decimal(v)
-                if d <= 0 or not d.is_finite():
-                    raise ValueError("price must be a positive finite number")
-            return v
 
     def _validate_order_params(payload: OrderPayload) -> None:
         if payload.order_type == "limit" and not payload.limit_price:
