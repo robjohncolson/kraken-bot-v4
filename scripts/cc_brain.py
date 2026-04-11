@@ -300,24 +300,32 @@ def compute_ema(data: list[float], span: int) -> float:
 
 
 def analyze_pair(pair: str) -> dict | None:
-    """Full analysis of a single pair: regime + RSI + EMA + Kronos."""
-    # Regime
-    regime_data = fetch(f"/api/regime/{pair.replace('/', '%2F')}?interval=60&count=300")
+    """Full analysis: regime + RSI + EMA + Kronos + TimesFM."""
+    enc = pair.replace("/", "%2F")
+
+    # Regime (HMM)
+    regime_data = fetch(f"/api/regime/{enc}?interval=60&count=300")
     if "error" in regime_data:
         return None
 
     # 1H bars for RSI + EMA
-    ohlcv_1h = fetch(f"/api/ohlcv/{pair.replace('/', '%2F')}?interval=60&count=50")
+    ohlcv_1h = fetch(f"/api/ohlcv/{enc}?interval=60&count=50")
     if "error" in ohlcv_1h or not ohlcv_1h.get("bars"):
         return None
     closes_1h = [float(b["close"]) for b in ohlcv_1h["bars"]]
 
     # 4H bars for trend
-    ohlcv_4h = fetch(f"/api/ohlcv/{pair.replace('/', '%2F')}?interval=240&count=50")
-    closes_4h = [float(b["close"]) for b in ohlcv_4h.get("bars", [])] if "error" not in ohlcv_4h else []
+    ohlcv_4h = fetch(f"/api/ohlcv/{enc}?interval=240&count=50")
+    closes_4h = (
+        [float(b["close"]) for b in ohlcv_4h.get("bars", [])]
+        if "error" not in ohlcv_4h else []
+    )
 
-    # Kronos prediction
-    kronos = fetch(f"/api/kronos/{pair.replace('/', '%2F')}?interval=60&pred_len=24")
+    # Kronos prediction (full OHLCV candle, ~4s)
+    kronos = fetch(f"/api/kronos/{enc}?interval=60&pred_len=24")
+
+    # TimesFM prediction (close-price trajectory, ~6s)
+    timesfm = fetch(f"/api/timesfm/{enc}")
 
     # Compute signals
     rsi_1h = compute_rsi(closes_1h)
@@ -327,7 +335,10 @@ def analyze_pair(pair: str) -> dict | None:
 
     ema7_4h = compute_ema(closes_4h, 7) if len(closes_4h) >= 7 else None
     ema26_4h = compute_ema(closes_4h, 26) if len(closes_4h) >= 26 else None
-    trend_4h = "UP" if (ema7_4h and ema26_4h and ema7_4h > ema26_4h) else "DOWN" if ema7_4h else "UNKNOWN"
+    trend_4h = (
+        "UP" if (ema7_4h and ema26_4h and ema7_4h > ema26_4h)
+        else "DOWN" if ema7_4h else "UNKNOWN"
+    )
 
     return {
         "pair": pair,
@@ -343,6 +354,8 @@ def analyze_pair(pair: str) -> dict | None:
         "kronos_direction": kronos.get("direction", "unknown"),
         "kronos_pct": kronos.get("pct_change", 0),
         "kronos_volatility": kronos.get("volatility_pct", 0),
+        "timesfm_direction": timesfm.get("direction", "unknown"),
+        "timesfm_confidence": timesfm.get("confidence", 0),
     }
 
 
@@ -381,14 +394,24 @@ def score_entry(analysis: dict) -> tuple[float, dict]:
     else:
         breakdown["RSI"] = 0.0
 
-    # Kronos component
+    # Kronos component (full OHLCV candle prediction)
     kdir = analysis["kronos_direction"]
     if kdir == "bullish":
-        breakdown["Kronos"] = 0.30
+        breakdown["Kronos"] = 0.20
     elif kdir == "neutral":
-        breakdown["Kronos"] = 0.10
+        breakdown["Kronos"] = 0.05
     else:
         breakdown["Kronos"] = 0.0
+
+    # TimesFM component (close-price trajectory forecast)
+    tfm_dir = analysis.get("timesfm_direction", "unknown")
+    tfm_conf = float(analysis.get("timesfm_confidence", 0))
+    if tfm_dir == "bullish":
+        breakdown["TimesFM"] = round(0.20 * tfm_conf, 3)
+    elif tfm_dir == "neutral":
+        breakdown["TimesFM"] = 0.0
+    else:
+        breakdown["TimesFM"] = round(-0.10 * tfm_conf, 3)
 
     # Regime component: trending is ideal
     regime = analysis["regime"]
@@ -941,8 +964,13 @@ def run_brain(dry_run: bool = False) -> str:
             analyses.append(analysis)
             regime_sym = {"trending": "T", "ranging": "R", "volatile": "V"}.get(analysis["regime"], "?")
             bd_str = " ".join(f"{k}={v:+.2f}" for k, v in bd.items() if isinstance(v, (int, float)))
-            log(f"  {pair:10s} {regime_sym} gate={analysis['trade_gate']:.2f} RSI={analysis['rsi_1h']:5.1f} "
-                f"4H={analysis['trend_4h']:4s} Kronos={analysis['kronos_direction']:8s} "
+            tfm = analysis.get("timesfm_direction", "?")[:4]
+            log(f"  {pair:10s} {regime_sym} "
+                f"gate={analysis['trade_gate']:.2f} "
+                f"RSI={analysis['rsi_1h']:5.1f} "
+                f"4H={analysis['trend_4h']:4s} "
+                f"K={analysis['kronos_direction'][:4]:4s} "
+                f"TFM={tfm:4s} "
                 f"=> {score:.2f} [{bd_str}]")
 
     # === Step 4: Post-mortem ===

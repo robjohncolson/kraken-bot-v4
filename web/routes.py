@@ -477,6 +477,54 @@ def create_cc_router(
             _log.warning("Kronos prediction failed for %s: %s", pair, exc)
             raise HTTPException(status_code=500, detail="Prediction failed") from exc
 
+    @router.get("/timesfm/{pair:path}")
+    async def get_timesfm_prediction(
+        pair: str,
+    ) -> dict[str, Any]:
+        """TimesFM close-price forecast — direction + confidence."""
+        from beliefs.timesfm_source import TimesFMSource
+
+        _cache: list = getattr(
+            get_timesfm_prediction, "_cache", []
+        )
+        if not _cache:
+            _cache.append(TimesFMSource())
+            get_timesfm_prediction._cache = _cache  # type: ignore[attr-defined]
+        source = _cache[0]
+
+        def _run() -> dict[str, Any]:
+            bars = fetch_ohlcv(pair, interval=60, count=520)
+            if len(bars) < source.min_bars:
+                return {
+                    "error": "Insufficient bars",
+                    "count": len(bars),
+                }
+            snap = source.analyze(pair, bars)
+            return {
+                "pair": pair,
+                "direction": snap.direction.value,
+                "confidence": round(snap.confidence, 3),
+                "regime": snap.regime.value,
+            }
+
+        try:
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(None, _run)
+            if "error" in result:
+                raise HTTPException(
+                    status_code=400, detail=result["error"],
+                )
+            return result
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _log.warning(
+                "TimesFM prediction failed for %s: %s", pair, exc,
+            )
+            raise HTTPException(
+                status_code=500, detail="Prediction failed",
+            ) from exc
+
     @router.get("/regime/{pair:path}")
     async def get_regime(
         pair: str,
