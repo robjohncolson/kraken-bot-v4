@@ -101,6 +101,7 @@ from web.routes import (
     RotationNodeSnapshot,
     RotationTreeSnapshot,
     StrategyStatsSnapshot,
+    create_cc_router,
     create_router,
 )
 from web.sse import publish
@@ -155,9 +156,22 @@ class DashboardStateStore:
             self._state = state
 
 
-def build_runtime_app(*, state_provider: Callable[[], DashboardState]):
+def build_runtime_app(
+    *,
+    state_provider: Callable[[], DashboardState],
+    executor: object = None,
+    db_conn: object = None,
+):
     application = create_app()
     application.include_router(create_router(state_provider=state_provider))
+    if executor is not None or db_conn is not None:
+        application.include_router(
+            create_cc_router(
+                state_provider=state_provider,
+                executor=executor,
+                db_conn=db_conn,
+            )
+        )
     return application
 
 
@@ -245,6 +259,7 @@ class SchedulerRuntime:
     ) -> None:
         self._settings = settings
         self._executor = executor
+        self._conn = conn
         self._reader = SqliteReader(conn)
         self._writer = SqliteWriter(conn)
         self._scheduler_config = scheduler_config or SchedulerConfig(
@@ -422,7 +437,11 @@ class SchedulerRuntime:
         self._ws_backoff_until: datetime | None = None
         factory = websocket_factory or _default_websocket_factory
         self._websocket = factory(self._handle_price_tick, self._handle_fill_confirmed)
-        self.app = build_runtime_app(state_provider=self._dashboard_store.snapshot)
+        self.app = build_runtime_app(
+            state_provider=self._dashboard_store.snapshot,
+            executor=self._executor,
+            db_conn=self._conn,
+        )
 
     @property
     def state(self) -> SchedulerState:

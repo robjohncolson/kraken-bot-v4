@@ -214,6 +214,181 @@ def _encode_payload(payload: object) -> Any:
     return jsonable_encoder(payload)
 
 
+# ---------------------------------------------------------------------------
+# CC Command API — endpoints for Claude Code to read data and place orders
+# ---------------------------------------------------------------------------
+
+
+def create_cc_router(
+    *,
+    state_provider: DashboardStateProvider,
+    executor: object,
+    db_conn: object,
+) -> APIRouter:
+    """Create REST endpoints for CC (Claude Code) to act as the trading brain.
+
+    All blocking calls (executor, SQLite, OHLCV HTTP) run in a thread pool
+    via run_in_executor to avoid blocking the async event loop.
+    CC-placed orders are reconciled by the bot's periodic reconciliation loop
+    which checks Kraken's trade history every reconcile_interval_sec.
+    """
+    import asyncio
+    import logging
+    import sqlite3
+    from functools import partial
+
+    from pydantic import BaseModel, field_validator
+
+    from core.errors import ExchangeError, SafeModeBlockedError
+    from core.types import OrderRequest, OrderSide, OrderType
+    from exchange.ohlcv import OHLCVFetchError, fetch_ohlcv
+    from persistence.sqlite import SqliteReader
+
+    _log = logging.getLogger(__name__)
+    router = APIRouter(prefix="/api")
+    reader = SqliteReader(db_conn) if isinstance(db_conn, sqlite3.Connection) else None
+
+    class OrderPayload(BaseModel):
+        pair: str
+        side: str
+        order_type: str = "limit"
+        quantity: str
+        limit_price: str | None = None
+        stop_price: str | None = None
+
+        @field_validator("side")
+        @classmethod
+        def validate_side(cls, v: str) -> str:
+            if v.lower() not in ("buy", "sell"):
+                raise ValueError("side must be 'buy' or 'sell'")
+            return v.lower()
+
+        @field_validator("order_type")
+        @classmethod
+        def validate_order_type(cls, v: str) -> str:
+            if v.lower() not in ("market", "limit", "stop_loss"):
+                raise ValueError("order_type must be 'market', 'limit', or 'stop_loss'")
+            return v.lower()
+
+        @field_validator("quantity")
+        @classmethod
+        def validate_quantity(cls, v: str) -> str:
+            d = Decimal(v)
+            if d <= 0 or not d.is_finite():
+                raise ValueError("quantity must be a positive finite number")
+            return v
+
+        @field_validator("limit_price", "stop_price")
+        @classmethod
+        def validate_price(cls, v: str | None) -> str | None:
+            if v is not None:
+                d = Decimal(v)
+                if d <= 0 or not d.is_finite():
+                    raise ValueError("price must be a positive finite number")
+            return v
+
+    def _validate_order_params(payload: OrderPayload) -> None:
+        if payload.order_type == "limit" and not payload.limit_price:
+            raise ValueError("limit_price is required for limit orders")
+        if payload.order_type == "stop_loss" and not payload.stop_price:
+            raise ValueError("stop_price is required for stop_loss orders")
+
+    @router.post("/orders")
+    async def place_order(payload: OrderPayload) -> dict[str, Any]:
+        if not hasattr(executor, "execute_order"):
+            raise HTTPException(status_code=503, detail="Executor not available")
+        _validate_order_params(payload)
+        order = OrderRequest(
+            pair=payload.pair,
+            side=OrderSide(payload.side),
+            order_type=OrderType(payload.order_type),
+            quantity=Decimal(payload.quantity),
+            limit_price=Decimal(payload.limit_price) if payload.limit_price else None,
+            stop_price=Decimal(payload.stop_price) if payload.stop_price else None,
+        )
+        try:
+            loop = asyncio.get_event_loop()
+            txid = await loop.run_in_executor(None, executor.execute_order, order)
+            _log.info("CC placed order %s on %s", txid, payload.pair)
+            return {"txid": txid, "status": "placed", "pair": payload.pair}
+        except SafeModeBlockedError as exc:
+            raise HTTPException(status_code=403, detail="Safe mode is enabled") from exc
+        except ExchangeError as exc:
+            raise HTTPException(status_code=502, detail="Exchange error") from exc
+        except Exception as exc:
+            _log.warning("CC order failed: %s", exc)
+            raise HTTPException(status_code=400, detail="Order rejected") from exc
+
+    @router.delete("/orders/{order_id}")
+    async def cancel_order(order_id: str) -> dict[str, Any]:
+        if not hasattr(executor, "execute_cancel"):
+            raise HTTPException(status_code=503, detail="Executor not available")
+        try:
+            loop = asyncio.get_event_loop()
+            count = await loop.run_in_executor(None, executor.execute_cancel, order_id)
+            return {"status": "cancelled", "count": count, "order_id": order_id}
+        except SafeModeBlockedError as exc:
+            raise HTTPException(status_code=403, detail="Safe mode is enabled") from exc
+        except ExchangeError as exc:
+            raise HTTPException(status_code=502, detail="Exchange error") from exc
+        except Exception as exc:
+            _log.warning("CC cancel failed: %s", exc)
+            raise HTTPException(status_code=400, detail="Cancel rejected") from exc
+
+    @router.get("/trade-outcomes")
+    async def get_trade_outcomes(
+        lookback_days: int = 30,
+    ) -> dict[str, Any]:
+        if reader is None:
+            raise HTTPException(status_code=503, detail="Database not available")
+        loop = asyncio.get_event_loop()
+        rows = await loop.run_in_executor(
+            None, partial(reader.fetch_trade_outcomes, lookback_days=lookback_days),
+        )
+        outcomes = [{col: row[i] for i, col in enumerate(row.keys())} for row in rows]
+        return {"outcomes": outcomes, "count": len(outcomes)}
+
+    @router.get("/ohlcv/{pair:path}")
+    async def get_ohlcv(
+        pair: str,
+        interval: int = 60,
+        count: int = 50,
+    ) -> dict[str, Any]:
+        try:
+            loop = asyncio.get_event_loop()
+            bars = await loop.run_in_executor(
+                None, partial(fetch_ohlcv, pair, interval=interval, count=count),
+            )
+            records = [
+                {
+                    "open": str(row["open"]),
+                    "high": str(row["high"]),
+                    "low": str(row["low"]),
+                    "close": str(row["close"]),
+                    "volume": str(row["volume"]),
+                }
+                for _, row in bars.iterrows()
+            ]
+            return {"pair": pair, "interval": interval, "bars": records}
+        except OHLCVFetchError as exc:
+            raise HTTPException(status_code=404, detail="OHLCV data unavailable") from exc
+
+    def get_state_for_cc() -> DashboardState:
+        return state_provider()
+
+    @router.get("/balances")
+    async def get_balances(
+        state: DashboardState = Depends(get_state_for_cc),
+    ) -> dict[str, Any]:
+        portfolio = state.portfolio
+        return {
+            "cash_usd": str(portfolio.cash_usd) if portfolio else "0",
+            "total_value_usd": str(portfolio.total_value_usd) if portfolio else "0",
+        }
+
+    return router
+
+
 __all__ = [
     "BeliefEntry",
     "DashboardState",
@@ -224,5 +399,6 @@ __all__ = [
     "PositionSnapshot",
     "ReconciliationSnapshot",
     "StrategyStatsSnapshot",
+    "create_cc_router",
     "create_router",
 ]
