@@ -507,6 +507,51 @@ def create_cc_router(
             _log.warning("Regime detection failed for %s: %s", pair, exc)
             raise HTTPException(status_code=500, detail="Regime detection failed") from exc
 
+    # === CC Memory endpoints ===
+
+    @router.get("/memory")
+    async def query_memory(
+        category: str | None = None,
+        pair: str | None = None,
+        hours: int = 24,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        """Query CC's temporal memory."""
+        from persistence.cc_memory import CCMemory
+
+        if reader is None:
+            raise HTTPException(status_code=503, detail="Database not available")
+
+        def _query() -> dict[str, Any]:
+            mem = CCMemory(reader._conn)
+            results = mem.query(category=category, pair=pair, hours=hours, limit=limit)
+            return {"memories": results, "count": len(results)}
+
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, _query)
+
+    @router.post("/memory")
+    async def write_memory(payload: dict[str, Any]) -> dict[str, Any]:
+        """Write to CC's temporal memory."""
+        from persistence.cc_memory import CCMemory
+
+        if reader is None:
+            raise HTTPException(status_code=503, detail="Database not available")
+        category = payload.get("category")
+        if not category:
+            raise HTTPException(status_code=400, detail="category is required")
+
+        def _write() -> dict[str, Any]:
+            mem = CCMemory(reader._conn)
+            content = payload.get("content", {})
+            pair = payload.get("pair")
+            importance = payload.get("importance", 0.5)
+            mem_id = mem._write(category, content, pair=pair, importance=importance)
+            return {"id": mem_id, "status": "stored"}
+
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, _write)
+
     def get_state_for_cc() -> DashboardState:
         return state_provider()
 
