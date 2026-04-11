@@ -55,6 +55,21 @@ class DashboardClient:
     async def fetch_rotation_tree(self) -> dict[str, Any]:
         return await self._get("/api/rotation-tree")
 
+    async def fetch_exchange_balances(self) -> dict[str, Any]:
+        """GET /api/exchange-balances — live Kraken balances (ground truth)."""
+        return await self._get("/api/exchange-balances")
+
+    async def fetch_memory(
+        self, category: str = "", hours: int = 48, limit: int = 50,
+    ) -> dict[str, Any]:
+        """GET /api/memory with optional filters."""
+        params = f"category={category}&hours={hours}&limit={limit}"
+        return await self._get(f"/api/memory?{params}")
+
+    async def fetch_trade_outcomes(self, lookback_days: int = 7) -> dict[str, Any]:
+        """GET /api/trade-outcomes?lookback_days={lookback_days}"""
+        return await self._get(f"/api/trade-outcomes?lookback_days={lookback_days}")
+
     # -- composite -----------------------------------------------------------
 
     async def fetch_snapshot(self) -> dict[str, dict[str, Any]]:
@@ -67,9 +82,18 @@ class DashboardClient:
             self.fetch_stats(),
             self.fetch_reconciliation(),
             self.fetch_rotation_tree(),
+            self.fetch_exchange_balances(),
+            self.fetch_memory(category="decision"),
+            self.fetch_memory(category="postmortem"),
+            self.fetch_memory(category="param_change"),
+            self.fetch_trade_outcomes(),
             return_exceptions=True,
         )
-        keys = ("health", "portfolio", "positions", "beliefs", "stats", "reconciliation", "rotation_tree")
+        keys = (
+            "health", "portfolio", "positions", "beliefs", "stats",
+            "reconciliation", "rotation_tree", "exchange_balances",
+            "decisions", "postmortems", "param_changes", "trade_outcomes",
+        )
         snapshot: dict[str, dict[str, Any]] = {}
         for key, result in zip(keys, results):
             snapshot[key] = {} if isinstance(result, BaseException) else result

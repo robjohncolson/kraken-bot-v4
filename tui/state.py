@@ -97,6 +97,37 @@ class RotationNodeRow:
 
 
 @dataclass
+class HoldingRow:
+    asset: str = ""
+    balance: str = "0"
+    available: str = "0"
+    value_usd: str = "0"
+
+
+@dataclass
+class MemoryRow:
+    timestamp: str = ""
+    category: str = ""
+    pair: str = ""
+    content: dict = field(default_factory=dict)
+    importance: float = 0.0
+
+
+@dataclass
+class TradeOutcomeRow:
+    pair: str = ""
+    direction: str = ""
+    entry_price: str = "0"
+    exit_price: str = "0"
+    net_pnl: str = "0"
+    fee_total: str = "0"
+    exit_reason: str = ""
+    hold_hours: float = 0.0
+    confidence: float = 0.0
+    closed_at: str = ""
+
+
+@dataclass
 class RotationEventRow:
     timestamp: str = ""
     node_id: str = ""
@@ -130,6 +161,12 @@ class CockpitState:
     orders: list[OrderRow] = field(default_factory=list)
     reconciliation: ReconciliationState = field(default_factory=ReconciliationState)
     rotation_tree: RotationTreeState = field(default_factory=RotationTreeState)
+    holdings: list[HoldingRow] = field(default_factory=list)
+    decisions: list[MemoryRow] = field(default_factory=list)
+    postmortems: list[MemoryRow] = field(default_factory=list)
+    param_changes: list[MemoryRow] = field(default_factory=list)
+    trade_outcomes: list[TradeOutcomeRow] = field(default_factory=list)
+    portfolio_value_usd: str = "0"
     events: list[str] = field(default_factory=list)
     connected: bool = False
     sse_connected: bool = False
@@ -299,6 +336,82 @@ def parse_rotation_tree(data: dict[str, Any]) -> RotationTreeState:
     )
 
 
+def parse_holdings(data: dict[str, Any]) -> list[HoldingRow]:
+    """Parse exchange_balances dict into HoldingRow list."""
+    rows: list[HoldingRow] = []
+    if isinstance(data, dict):
+        for asset, info in data.items():
+            if isinstance(info, dict):
+                rows.append(HoldingRow(
+                    asset=str(asset),
+                    balance=str(info.get("balance", "0")),
+                    available=str(info.get("available", "0")),
+                    value_usd=str(info.get("value_usd", "0")),
+                ))
+            else:
+                rows.append(HoldingRow(asset=str(asset), balance=str(info)))
+    elif isinstance(data, list):
+        for item in data:
+            rows.append(HoldingRow(
+                asset=str(item.get("asset", "")),
+                balance=str(item.get("balance", "0")),
+                available=str(item.get("available", "0")),
+                value_usd=str(item.get("value_usd", "0")),
+            ))
+    return rows
+
+
+def parse_memories(data: dict[str, Any] | list) -> list[MemoryRow]:
+    """Parse temporal memory rows (decisions, postmortems, param_changes)."""
+    rows: list[MemoryRow] = []
+    if isinstance(data, list):
+        items = data
+    elif isinstance(data, dict):
+        items = data.get("items", [])
+    else:
+        items = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        raw_content = item.get("content")
+        content = raw_content if isinstance(raw_content, dict) else {}
+        rows.append(MemoryRow(
+            timestamp=str(item.get("timestamp", "")),
+            category=str(item.get("category", "")),
+            pair=str(item.get("pair", "")),
+            content=content,
+            importance=float(item.get("importance", 0.0)),
+        ))
+    return rows
+
+
+def parse_trade_outcomes(data: dict[str, Any] | list) -> list[TradeOutcomeRow]:
+    """Parse trade outcome rows from post-mortem engine."""
+    rows: list[TradeOutcomeRow] = []
+    if isinstance(data, list):
+        items = data
+    elif isinstance(data, dict):
+        items = data.get("items", [])
+    else:
+        items = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        rows.append(TradeOutcomeRow(
+            pair=str(item.get("pair", "")),
+            direction=str(item.get("direction", "")),
+            entry_price=str(item.get("entry_price", "0")),
+            exit_price=str(item.get("exit_price", "0")),
+            net_pnl=str(item.get("net_pnl", "0")),
+            fee_total=str(item.get("fee_total", "0")),
+            exit_reason=str(item.get("exit_reason", "")),
+            hold_hours=float(item.get("hold_hours", 0.0)),
+            confidence=float(item.get("confidence", 0.0)),
+            closed_at=str(item.get("closed_at", "")),
+        ))
+    return rows
+
+
 def merge_sse_update(state: CockpitState, data: dict[str, Any]) -> CockpitState:
     """Merge a ``dashboard.update`` SSE payload into the cockpit state."""
     if "health" in data:
@@ -326,4 +439,14 @@ def merge_sse_update(state: CockpitState, data: dict[str, Any]) -> CockpitState:
         ]
     if "pending_orders" in data:
         state.orders = parse_orders({"pending_orders": data["pending_orders"]})
+    if "exchange_balances" in data:
+        state.holdings = parse_holdings(data["exchange_balances"])
+    if "decisions" in data:
+        state.decisions = parse_memories(data["decisions"])
+    if "postmortems" in data:
+        state.postmortems = parse_memories(data["postmortems"])
+    if "param_changes" in data:
+        state.param_changes = parse_memories(data["param_changes"])
+    if "trade_outcomes" in data:
+        state.trade_outcomes = parse_trade_outcomes(data["trade_outcomes"])
     return state

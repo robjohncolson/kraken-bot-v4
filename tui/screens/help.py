@@ -10,12 +10,12 @@ from tui.state import CockpitState
 
 
 _BINDINGS = (
-    ("1", "Overview", "Main operational summary (default)"),
-    ("2", "Positions", "Detailed positions table"),
-    ("3", "Beliefs", "Belief matrix by pair and source"),
-    ("4", "Orders", "Open and pending orders"),
-    ("5", "Reconciliation", "Reconciliation detail"),
-    ("6", "Event Log", "Recent bot events and logs"),
+    ("1", "Dashboard", "Operational summary (default)"),
+    ("2", "Holdings", "Exchange balances and holdings"),
+    ("3", "Market Map", "Belief matrix and market view"),
+    ("4", "Brain Log", "CC brain decisions from temporal memory"),
+    ("5", "Post-Mortem", "Trade outcomes, patterns, param changes"),
+    ("6", "Rotation Tree", "Rotation tree hierarchy and status"),
     ("?", "Help", "This help screen"),
     ("r", "Refresh", "Manual data refresh from API"),
     ("p", "Pause/Resume", "Toggle live rendering (SSE keeps flowing)"),
@@ -57,9 +57,18 @@ class HelpScreen(Screen):
 
         tbl.add_section()
         tbl.add_row("", "Color Legend", "", style="bold")
-        tbl.add_row("", "[green]Green[/green]", "Healthy / Bullish / Profitable / Connected")
-        tbl.add_row("", "[red]Red[/red]", "Unhealthy / Bearish / Loss / Discrepancy")
-        tbl.add_row("", "[yellow]Yellow[/yellow]", "Warning / Stale / Reconnecting / Cooldown")
+        tbl.add_row(
+            "", "[green]Green[/green]",
+            "Healthy / Bullish / Profitable / Connected",
+        )
+        tbl.add_row(
+            "", "[red]Red[/red]",
+            "Unhealthy / Bearish / Loss / Discrepancy",
+        )
+        tbl.add_row(
+            "", "[yellow]Yellow[/yellow]",
+            "Warning / Stale / Reconnecting / Cooldown",
+        )
         tbl.add_row("", "[cyan]Cyan[/cyan]", "Neutral / Informational")
 
         return tbl

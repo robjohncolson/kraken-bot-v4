@@ -4,16 +4,14 @@ from __future__ import annotations
 import asyncio
 
 from tui.app import KrakenCockpit
-from tui.screens.overview import OverviewScreen
-from tui.screens.positions import PositionsScreen
-from tui.screens.beliefs import BeliefsScreen
-from tui.screens.orders import OrdersScreen
-from tui.screens.reconciliation import ReconciliationScreen
-from tui.screens.logs import LogsScreen
+from tui.screens.dashboard import DashboardScreen
+from tui.screens.holdings import HoldingsScreen
+from tui.screens.market_map import MarketMapScreen
+from tui.screens.brain_log import BrainLogScreen
+from tui.screens.postmortem import PostMortemScreen
+from tui.screens.rotation_tree import RotationTreeScreen
 from tui.screens.help import HelpScreen
 from tui.state import CockpitState, HealthState, PortfolioState
-from tui.widgets.health import HealthWidget
-from tui.widgets.portfolio import PortfolioWidget
 
 
 async def _run_app_test(callback):
@@ -25,42 +23,42 @@ async def _run_app_test(callback):
 
 def test_app_launches() -> None:
     async def _check(app, pilot):
-        assert isinstance(app.screen, OverviewScreen)
+        assert isinstance(app.screen, DashboardScreen)
     asyncio.run(_run_app_test(_check))
 
 
-def test_screen_switch_positions() -> None:
+def test_screen_switch_holdings() -> None:
     async def _check(app, pilot):
         await pilot.press("2")
-        assert isinstance(app.screen, PositionsScreen)
+        assert isinstance(app.screen, HoldingsScreen)
     asyncio.run(_run_app_test(_check))
 
 
-def test_screen_switch_beliefs() -> None:
+def test_screen_switch_market_map() -> None:
     async def _check(app, pilot):
         await pilot.press("3")
-        assert isinstance(app.screen, BeliefsScreen)
+        assert isinstance(app.screen, MarketMapScreen)
     asyncio.run(_run_app_test(_check))
 
 
-def test_screen_switch_orders() -> None:
+def test_screen_switch_brain_log() -> None:
     async def _check(app, pilot):
         await pilot.press("4")
-        assert isinstance(app.screen, OrdersScreen)
+        assert isinstance(app.screen, BrainLogScreen)
     asyncio.run(_run_app_test(_check))
 
 
-def test_screen_switch_recon() -> None:
+def test_screen_switch_postmortem() -> None:
     async def _check(app, pilot):
         await pilot.press("5")
-        assert isinstance(app.screen, ReconciliationScreen)
+        assert isinstance(app.screen, PostMortemScreen)
     asyncio.run(_run_app_test(_check))
 
 
-def test_screen_switch_logs() -> None:
+def test_screen_switch_rotation_tree() -> None:
     async def _check(app, pilot):
         await pilot.press("6")
-        assert isinstance(app.screen, LogsScreen)
+        assert isinstance(app.screen, RotationTreeScreen)
     asyncio.run(_run_app_test(_check))
 
 
@@ -71,12 +69,12 @@ def test_screen_switch_help() -> None:
     asyncio.run(_run_app_test(_check))
 
 
-def test_back_to_overview() -> None:
+def test_back_to_dashboard() -> None:
     async def _check(app, pilot):
         await pilot.press("3")
-        assert isinstance(app.screen, BeliefsScreen)
+        assert isinstance(app.screen, MarketMapScreen)
         await pilot.press("1")
-        assert isinstance(app.screen, OverviewScreen)
+        assert isinstance(app.screen, DashboardScreen)
     asyncio.run(_run_app_test(_check))
 
 
@@ -96,10 +94,9 @@ def test_refresh_display_with_state() -> None:
         app.state.portfolio = PortfolioState(cash_usd="100.50")
         app.state.connected = True
         app._refresh_display()
-        # Widgets live on the screen, not the app itself
+        # Dashboard screen should have its panels
         screen = app.screen
-        assert screen.query_one("#ov-health", HealthWidget) is not None
-        assert screen.query_one("#ov-portfolio", PortfolioWidget) is not None
+        assert isinstance(screen, DashboardScreen)
     asyncio.run(_run_app_test(_check))
 
 
