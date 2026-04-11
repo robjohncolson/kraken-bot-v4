@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import sys
 import time
+import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -255,6 +256,14 @@ def fetch(endpoint: str, method: str = "GET", data: dict | None = None) -> dict:
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             return json.loads(resp.read().decode())
+    except urllib.error.HTTPError as exc:
+        # Read the response body for detailed error info
+        try:
+            body = json.loads(exc.read().decode())
+            detail = body.get("detail", str(exc))
+        except Exception:
+            detail = str(exc)
+        return {"error": detail}
     except Exception as exc:
         return {"error": str(exc)}
 
@@ -671,7 +680,7 @@ def run_brain(dry_run: bool = False) -> str:
             pos_for_rot = next((p for p in open_positions if p["asset"] == best_rot["from_asset"]), None)
             rot_value = min(max_position_value, float(pos_for_rot["quantity_total"]) * price) if pos_for_rot else max_position_value
             qty = round(rot_value / price, 6)
-            limit_price = round(price * (1.002 if best_rot["side"] == "buy" else 0.998), 6)
+            limit_price = round(price * (1.002 if best_rot["side"] == "buy" else 0.998), 5)
             orders_to_place.append({
                 "pair": best_rot["pair"], "side": best_rot["side"], "order_type": "limit",
                 "quantity": str(qty), "limit_price": str(limit_price),
@@ -688,7 +697,7 @@ def run_brain(dry_run: bool = False) -> str:
             bd_str = " ".join(f"{k}={v:+.2f}" for k, v in bd.items() if isinstance(v, (int, float)))
             log(f"ENTRY from USD: {best['pair']} score={score:.2f} [{bd_str}]")
             qty = round(max_position_value / best["price"], 6)
-            limit_price = round(best["price"] * 1.002, 6)  # slight premium for fill
+            limit_price = round(best["price"] * 1.002, 5)  # slight premium for fill
             orders_to_place.append({
                 "pair": best["pair"], "side": "buy", "order_type": "limit",
                 "quantity": str(qty), "limit_price": str(limit_price),
