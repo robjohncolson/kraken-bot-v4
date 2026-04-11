@@ -26,15 +26,19 @@ import sys
 import time
 import urllib.request
 from datetime import datetime, timezone
-from decimal import Decimal
 from pathlib import Path
 
 BOT_URL = "http://127.0.0.1:58392"
+KRAKEN_API = "https://api.kraken.com/0/public"
 REVIEWS_DIR = Path(__file__).parent.parent / "state" / "cc-reviews"
 
 # Strategy parameters
-MAX_POSITION_USD = 10
-MIN_REGIME_GATE = 0.40       # Don't enter if trade_gate below this
+MAX_POSITION_PCT = 0.04      # 4% of portfolio per position
+DUST_THRESHOLD_PCT = 0.01    # 1% of portfolio — below this is dust
+MIN_REGIME_GATE = 0.15       # Absolute floor — below this, don't even score
+SOFT_REGIME_GATE = 0.40      # Below this, score is capped (visible but won't trigger entry)
+SOFT_REGIME_CAP = 0.5        # Max score when trade_gate is in [MIN, SOFT) range
+ENTRY_THRESHOLD = 0.6        # Must exceed this to place an order
 MIN_RSI_OVERSOLD = 35        # RSI below this = oversold (potential buy)
 MAX_RSI_OVERBOUGHT = 70      # RSI above this = overbought (potential sell)
 TARGET_MONTHLY_PCT = 1.0     # 1% monthly target
@@ -43,6 +47,200 @@ TOP_PAIRS = [
     "AAVE/USD", "DOT/USD", "ATOM/USD", "ADA/USD", "MATIC/USD",
     "CRV/USD", "UNI/USD", "DOGE/USD", "NEAR/USD", "FTM/USD",
 ]
+
+
+# Symbol aliases: Kraken wsname → standard
+_ALIASES = {"XBT": "BTC", "XDG": "DOGE"}
+# Assets to exclude from trading (stablecoins, fiat)
+_SKIP_BASES = frozenset(("USDT", "USDC", "DAI", "PYUSD", "EUR", "GBP", "AUD", "CAD", "CHF", "JPY"))
+
+# Pair discovery cache
+_discovered_cache: dict = {}
+_discovered_at: float = 0.0
+_DISCOVERY_TTL = 3600  # 1 hour cache
+
+
+def compute_stability(volume_usd_24h: float, volatility_pct: float) -> float:
+    """Asset stability: 0.0 = volatile micro-cap, 1.0 = stable blue-chip.
+
+    Uses 24h USD volume as market-cap proxy and predicted volatility as risk.
+    """
+    import math
+    vol_score = min(1.0, max(0.0, (math.log10(max(1, volume_usd_24h)) - 4.7) / 4.3))
+    vol_penalty = min(1.0, volatility_pct / 10.0)  # 10%+ daily vol = full penalty
+    return round(vol_score * (1.0 - 0.5 * vol_penalty), 4)
+
+
+def _fetch_kraken_pairs() -> dict[str, dict]:
+    """Fetch AssetPairs from Kraken. Returns {normalized -> {key, base, quote}}. Cached 1h."""
+    global _discovered_cache, _discovered_at
+    if "pairs" in _discovered_cache and (time.time() - _discovered_at) < _DISCOVERY_TTL:
+        return _discovered_cache["pairs"]
+
+    req = urllib.request.Request(f"{KRAKEN_API}/AssetPairs")
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        body = json.loads(resp.read().decode())
+    pairs_data = body.get("result", {})
+
+    all_pairs: dict[str, dict] = {}
+    for key, meta in pairs_data.items():
+        if ".d" in key:
+            continue
+        wsname = meta.get("wsname", "")
+        if not wsname or "/" not in wsname:
+            continue
+        base, quote = wsname.split("/", 1)
+        base = _ALIASES.get(base, base)
+        quote = _ALIASES.get(quote, quote)
+        if base in _SKIP_BASES and quote in _SKIP_BASES:
+            continue
+        all_pairs[f"{base}/{quote}"] = {"key": key, "base": base, "quote": quote}
+
+    _discovered_cache["pairs"] = all_pairs
+    _discovered_at = time.time()
+    return all_pairs
+
+
+def _fetch_tickers(pairs: dict[str, dict]) -> dict[str, dict]:
+    """Fetch Ticker data for a set of pairs. Returns {normalized -> ticker_data}."""
+    if not pairs:
+        return {}
+    pair_keys = ",".join(p["key"] for p in pairs.values())
+    req = urllib.request.Request(f"{KRAKEN_API}/Ticker?pair={pair_keys}")
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        ticker_body = json.loads(resp.read().decode())
+    raw_tickers = ticker_body.get("result", {})
+    key_to_norm = {v["key"]: k for k, v in pairs.items()}
+    return {key_to_norm[k]: v for k, v in raw_tickers.items() if k in key_to_norm}
+
+
+def discover_all_pairs(
+    min_volume_usd: float = 50_000, limit: int = 40,
+) -> list[dict]:
+    """Discover all liquid Kraken spot pairs ranked by 24h USD volume.
+
+    Returns [{pair, base, quote, volume_usd}, ...].
+    """
+    try:
+        all_pairs = _fetch_kraken_pairs()
+        # Only fetch tickers for USD-quoted pairs (liquid, priceable)
+        usd_pairs = {n: p for n, p in all_pairs.items()
+                     if p["quote"] == "USD" and p["base"] not in _SKIP_BASES}
+        tickers = _fetch_tickers(usd_pairs)
+    except Exception:
+        return [{"pair": p, "base": p.split("/")[0], "quote": "USD", "volume_usd": 0}
+                for p in TOP_PAIRS]
+
+    ranked: list[dict] = []
+    for norm, ticker in tickers.items():
+        info = usd_pairs.get(norm)
+        if not info:
+            continue
+        vol_24h = float(ticker["v"][1])
+        last_price = float(ticker["c"][0])
+        volume_usd = vol_24h * last_price
+        if volume_usd >= min_volume_usd:
+            ranked.append({
+                "pair": norm, "base": info["base"], "quote": info["quote"],
+                "volume_usd": volume_usd,
+            })
+
+    ranked.sort(key=lambda x: -x["volume_usd"])
+    return ranked[:limit]
+
+
+def get_asset_volumes() -> dict[str, float]:
+    """Get 24h USD volume per asset (sum across all USD pairs)."""
+    try:
+        all_pairs = _fetch_kraken_pairs()
+        usd_pairs = {n: p for n, p in all_pairs.items() if p["quote"] == "USD"}
+        tickers = _fetch_tickers(usd_pairs)
+    except Exception:
+        return {}
+
+    volumes: dict[str, float] = {}
+    for norm, ticker in tickers.items():
+        info = usd_pairs.get(norm)
+        if not info:
+            continue
+        vol_usd = float(ticker["v"][1]) * float(ticker["c"][0])
+        volumes[info["base"]] = volumes.get(info["base"], 0) + vol_usd
+    return volumes
+
+
+def compute_portfolio_value() -> tuple[float, list[dict]]:
+    """Compute true portfolio value from exchange balances + ticker prices.
+
+    Returns (total_usd, [{asset, qty, price_usd, value_usd}, ...]).
+    """
+    # Get live balances from Kraken via bot
+    bal_resp = fetch("/api/exchange-balances")
+    if "error" in bal_resp or "balances" not in bal_resp:
+        return 0.0, []
+
+    # Build USD price map — fetch only pairs involving held assets
+    usd_prices: dict[str, float] = {"USD": 1.0, "USDT": 1.0, "USDC": 1.0}
+    held_assets = {_ALIASES.get(b["asset"], b["asset"]) for b in bal_resp["balances"]
+                   if (float(b["available"]) + float(b["held"])) > 0}
+    try:
+        all_pairs = _fetch_kraken_pairs()
+        # Find pairs that can price held assets: {asset}/USD, USD/{asset}, BTC/{asset}
+        pricing_pairs = {n: p for n, p in all_pairs.items()
+                         if (p["base"] in held_assets or p["quote"] in held_assets)
+                         and (p["quote"] == "USD" or p["base"] == "USD" or p["base"] == "BTC")}
+        tickers = _fetch_tickers(pricing_pairs)
+
+        for norm, tdata in tickers.items():
+            info = pricing_pairs.get(norm)
+            if not info:
+                continue
+            price = float(tdata["c"][0])
+            if info["quote"] == "USD":
+                usd_prices[info["base"]] = price
+            elif info["base"] == "USD" and price > 0:
+                usd_prices[info["quote"]] = 1.0 / price
+
+        # Cross-rates via BTC for remaining unpriced assets
+        btc_usd = usd_prices.get("BTC", 0)
+        if btc_usd > 0:
+            for norm, tdata in tickers.items():
+                info = pricing_pairs.get(norm)
+                if not info or info["base"] != "BTC":
+                    continue
+                if info["quote"] not in usd_prices:
+                    btc_in_quote = float(tdata["c"][0])
+                    if btc_in_quote > 0:
+                        usd_prices[info["quote"]] = btc_usd / btc_in_quote
+    except Exception:
+        pass
+
+    # Price each held asset
+    holdings: list[dict] = []
+    total = 0.0
+    for b in bal_resp["balances"]:
+        asset = b["asset"]
+        qty = float(b["available"]) + float(b["held"])
+        if qty <= 0:
+            continue
+        # Normalize raw Kraken symbol for price lookup
+        norm_asset = _ALIASES.get(asset, asset)
+        price = usd_prices.get(norm_asset, 0)
+        # If no price from ticker or cross-rate, try bot's OHLCV
+        if price == 0:
+            ohlcv = fetch(f"/api/ohlcv/{norm_asset}%2FUSD?interval=60&count=1")
+            bars = ohlcv.get("bars", [])
+            if bars:
+                price = float(bars[-1]["close"])
+                usd_prices[norm_asset] = price
+        value = qty * price
+        total += value
+        holdings.append({
+            "asset": norm_asset, "raw_asset": asset,
+            "qty": qty, "price_usd": price, "value_usd": round(value, 2),
+        })
+
+    holdings.sort(key=lambda h: -h["value_usd"])
+    return round(total, 2), holdings
 
 
 def fetch(endpoint: str, method: str = "GET", data: dict | None = None) -> dict:
@@ -128,38 +326,220 @@ def analyze_pair(pair: str) -> dict | None:
     }
 
 
-def score_entry(analysis: dict) -> float:
-    """Score a pair for entry: 0 = don't trade, 1 = strong signal."""
-    score = 0.0
+def score_entry(analysis: dict) -> tuple[float, dict]:
+    """Score a pair for entry. Returns (score, breakdown) where breakdown shows each component."""
+    breakdown: dict[str, float] = {}
 
-    # Gate: regime must be tradeable
+    # Hard floor: truly untradeable regime
     if analysis["trade_gate"] < MIN_REGIME_GATE:
-        return 0.0
+        return 0.0, {"gate": "regime below floor"}
 
-    # Gate: 4H trend must be UP for buys
-    if analysis["trend_4h"] != "UP":
-        return 0.0
+    # Soft regime gate: score is capped if trade_gate < SOFT_REGIME_GATE
+    soft_capped = analysis["trade_gate"] < SOFT_REGIME_GATE
+
+    # 4H trend component (was a hard gate — now weighted)
+    trend_4h = analysis["trend_4h"]
+    if trend_4h == "UP":
+        breakdown["4H_trend"] = 0.20
+    elif trend_4h == "DOWN":
+        breakdown["4H_trend"] = -0.15
+    else:
+        breakdown["4H_trend"] = 0.0
+
+    # 1H trend component (previously unused)
+    if analysis["trend_1h"] == "UP":
+        breakdown["1H_trend"] = 0.10
+    else:
+        breakdown["1H_trend"] = 0.0
 
     # RSI component: oversold in uptrend = dip-buy opportunity
     rsi = analysis["rsi_1h"]
     if rsi < MIN_RSI_OVERSOLD:
-        score += 0.4  # Strong oversold signal
+        breakdown["RSI"] = 0.40
     elif rsi < 50:
-        score += 0.2  # Moderate
+        breakdown["RSI"] = 0.20
+    else:
+        breakdown["RSI"] = 0.0
 
     # Kronos component
-    if analysis["kronos_direction"] == "bullish":
-        score += 0.3
-    elif analysis["kronos_direction"] == "neutral":
-        score += 0.1
+    kdir = analysis["kronos_direction"]
+    if kdir == "bullish":
+        breakdown["Kronos"] = 0.30
+    elif kdir == "neutral":
+        breakdown["Kronos"] = 0.10
+    else:
+        breakdown["Kronos"] = 0.0
 
     # Regime component: trending is ideal
-    if analysis["regime"] == "trending":
-        score += 0.3
-    elif analysis["regime"] == "volatile":
-        score += 0.1
+    regime = analysis["regime"]
+    if regime == "trending":
+        breakdown["regime"] = 0.30
+    elif regime == "volatile":
+        breakdown["regime"] = 0.10
+    else:
+        breakdown["regime"] = 0.0
 
-    return min(1.0, score)
+    raw = sum(breakdown.values())
+    score = min(1.0, max(0.0, raw))
+
+    # Apply soft cap if regime is weak but not dead
+    if soft_capped:
+        score = min(score, SOFT_REGIME_CAP)
+        breakdown["cap"] = SOFT_REGIME_CAP
+
+    return score, breakdown
+
+
+def score_hold(analysis: dict, stability: float) -> float:
+    """Score for continuing to hold an asset. Stability provides a holding bonus."""
+    entry_score, _ = score_entry(analysis)
+    hold_bonus = stability * 0.3  # BTC gets +0.29, micro-cap gets +0.03
+    return min(1.0, entry_score + hold_bonus)
+
+
+def rotation_threshold(source_stability: float) -> float:
+    """Minimum score improvement needed to rotate away from source asset.
+
+    Stable assets (BTC, ETH) need a bigger improvement to justify rotation.
+    """
+    return 0.10 + 0.20 * source_stability  # 0.10 for volatile micro, 0.30 for BTC
+
+
+def evaluate_portfolio(
+    positions: list[dict],
+    analyses: list[dict],
+    stabilities: dict[str, float],
+    all_pairs: list[dict],
+) -> list[dict]:
+    """For each position, find the best rotation target.
+
+    Returns sorted list of proposals: [{from_asset, to_asset, pair, side,
+    improvement, target_score, source_hold_score}, ...]
+    """
+    # Index analyses by base asset for quick lookup
+    analysis_by_base: dict[str, dict] = {}
+    for a in analyses:
+        base = a["pair"].split("/")[0]
+        # Keep the highest-scoring analysis per base asset
+        if base not in analysis_by_base or a["_score"] > analysis_by_base[base]["_score"]:
+            analysis_by_base[base] = a
+
+    # Index available pairs for routing
+    pair_lookup: dict[tuple[str, str], dict] = {}
+    for p in all_pairs:
+        pair_lookup[(p["base"], p["quote"])] = p
+
+    proposals: list[dict] = []
+    for pos in positions:
+        from_asset = pos["asset"]
+        if from_asset in QUOTE_CURRENCIES:
+            continue  # USD/USDT/USDC evaluated separately as "cash to deploy"
+        from_stab = stabilities.get(from_asset, 0)
+        from_analysis = analysis_by_base.get(from_asset)
+        if not from_analysis:
+            continue
+        hold_score = score_hold(from_analysis, from_stab)
+        threshold = rotation_threshold(from_stab)
+
+        for to_asset, to_analysis in analysis_by_base.items():
+            if to_asset == from_asset:
+                continue
+            to_score = to_analysis["_score"]
+            improvement = to_score - hold_score
+            if improvement < threshold:
+                continue
+
+            # Find a direct pair for this rotation
+            pair_info = pair_lookup.get((from_asset, to_asset)) or pair_lookup.get((to_asset, from_asset))
+            if not pair_info:
+                continue  # no direct pair — skip (multi-hop is future work)
+
+            pair = pair_info["pair"]
+            side = "sell" if pair_info["base"] == from_asset else "buy"
+            proposals.append({
+                "from_asset": from_asset,
+                "to_asset": to_asset,
+                "pair": pair,
+                "side": side,
+                "improvement": round(improvement, 3),
+                "target_score": round(to_score, 3),
+                "source_hold_score": round(hold_score, 3),
+                "threshold": round(threshold, 3),
+            })
+
+    proposals.sort(key=lambda p: -p["improvement"])
+    return proposals
+
+
+QUOTE_CURRENCIES = frozenset(("USD", "USDT", "USDC"))  # can't sell these as dust
+
+
+def find_dust_positions(
+    open_positions: list[dict], tracked_assets: set[str], threshold_usd: float,
+) -> list[dict]:
+    """Identify dust roots: USD value below threshold, not actively tracked."""
+    dust = []
+    for pos in open_positions:
+        asset = pos["asset"]
+        if asset in ("USD", "USDT", "USDC"):  # can't sell a quote currency as dust
+            continue
+        qty = float(pos.get("quantity_total", 0))
+        if qty <= 0:
+            continue
+        # Get actual price — don't guess
+        usd_val = float(pos.get("usd_value", 0))
+        if usd_val == 0:
+            pair = f"{asset}/USD"
+            ohlcv = fetch(f"/api/ohlcv/{pair.replace('/', '%2F')}?interval=60&count=1")
+            bars = ohlcv.get("bars", [])
+            if bars:
+                usd_val = qty * float(bars[-1]["close"])
+            else:
+                continue  # can't price it — skip, don't guess
+        if usd_val < threshold_usd and asset not in tracked_assets:
+            dust.append({"asset": asset, "qty": qty, "usd_value": usd_val,
+                         "node_id": pos.get("node_id", "?")})
+    return dust
+
+
+def sweep_dust(dust_positions: list[dict], dry_run: bool, log_fn) -> list[dict]:
+    """Attempt to sell dust positions via limit orders. Returns list of results."""
+    results = []
+    for d in dust_positions:
+        pair = f"{d['asset']}/USD"
+        # Get current price for limit order
+        ohlcv = fetch(f"/api/ohlcv/{pair.replace('/', '%2F')}?interval=60&count=1")
+        bars = ohlcv.get("bars", [])
+        if not bars:
+            log_fn(f"  DUST SKIP: {d['asset']} — no price data for {pair}")
+            results.append({"asset": d["asset"], "action": "skipped"})
+            continue
+        price = float(bars[-1]["close"])
+        # Limit sell slightly below market to ensure fill while paying maker fees
+        limit_price = round(price * 0.998, 6)
+        if dry_run:
+            log_fn(f"  WOULD SELL dust: {d['asset']} qty={d['qty']:.6f} (~${d['usd_value']:.2f}) via {pair} @ {limit_price}")
+            results.append({"asset": d["asset"], "action": "dry_run"})
+            continue
+        order = {
+            "pair": pair, "side": "sell", "order_type": "limit",
+            "quantity": str(d["qty"]), "limit_price": str(limit_price),
+        }
+        result = fetch("/api/orders", method="POST", data=order)
+        if "error" in result:
+            log_fn(f"  DUST FAIL: {d['asset']} — {result['error']}")
+            # Write memory so we know this dust is stuck
+            fetch("/api/memory", method="POST", data={
+                "category": "observation",
+                "content": {"type": "stuck_dust", "asset": d["asset"],
+                            "qty": d["qty"], "reason": result["error"]},
+                "importance": 0.3,
+            })
+            results.append({"asset": d["asset"], "action": "failed", "error": result["error"]})
+        else:
+            log_fn(f"  DUST SOLD: {d['asset']} txid={result.get('txid', '?')}")
+            results.append({"asset": d["asset"], "action": "sold", "txid": result.get("txid")})
+    return results
 
 
 def run_brain(dry_run: bool = False) -> str:
@@ -187,26 +567,80 @@ def run_brain(dry_run: bool = False) -> str:
 
     # === Step 2: Observe ===
     log("\n--- Step 2: Observe ---")
-    balances = fetch("/api/balances")
-    cash_usd = float(balances.get("cash_usd", 0))
-    log(f"Cash: ${cash_usd:.2f}")
+
+    # Ground truth: compute portfolio value from exchange balances + live prices
+    portfolio_value, holdings = compute_portfolio_value()
+    cash_usd = next((h["value_usd"] for h in holdings if h["asset"] == "USD"), 0.0)
+    if portfolio_value == 0:
+        # Fallback to bot's cached view
+        balances = fetch("/api/balances")
+        cash_usd = float(balances.get("cash_usd", 0))
+        portfolio_value = cash_usd
+
+    max_position_value = portfolio_value * MAX_POSITION_PCT
+    dust_threshold = portfolio_value * DUST_THRESHOLD_PCT
+    log(f"Portfolio: ${portfolio_value:.2f}  |  USD: ${cash_usd:.2f}  |  Max trade: ${max_position_value:.2f}")
+
+    # Show all holdings
+    for h in holdings:
+        if h["value_usd"] >= 1.0:
+            log(f"  {h['asset']:8s} ${h['value_usd']:>8.2f}  (qty={h['qty']:.4f} @ ${h['price_usd']:.4f})")
 
     tree = fetch("/api/rotation-tree")
     open_positions = [n for n in tree.get("nodes", []) if n.get("depth", 0) == 0 and n["status"] == "open"]
-    log(f"Open positions: {len(open_positions)}")
-    for pos in open_positions:
-        log(f"  {pos['asset']:8s} qty={pos['quantity_total'][:8]:>8s} pnl={pos.get('realized_pnl', 'n/a')}")
+    log(f"Rotation tree: {len(open_positions)} roots (tree value: ${tree.get('total_portfolio_value_usd', '?')})")
 
-    # === Step 3: Analyze ===
+    # Compute stability per held asset using real holdings
+    asset_volumes = get_asset_volumes()
+    stabilities: dict[str, float] = {}
+    for h in holdings:
+        asset = h["asset"]
+        if h["value_usd"] < 1.0:
+            continue
+        vol = asset_volumes.get(asset, 0)
+        # Quick volatility estimate from regime endpoint
+        pair_for_vol = f"{asset}/USD"
+        regime_resp = fetch(f"/api/regime/{pair_for_vol.replace('/', '%2F')}?interval=60&count=300")
+        vol_pct = 5.0  # default moderate volatility
+        if "error" not in regime_resp and regime_resp.get("regime") == "volatile":
+            vol_pct = 8.0
+        elif "error" not in regime_resp and regime_resp.get("regime") == "trending":
+            vol_pct = 3.0
+        stabilities[asset] = compute_stability(vol, vol_pct)
+
+    # === Step 3: Analyze (two-pass) ===
     log("\n--- Step 3: Analyze ---")
+    all_discovered = discover_all_pairs(limit=40)
+    # For now, prioritize USD-quoted pairs (most liquid) but include cross-pairs
+    pairs_to_scan = [p["pair"] for p in all_discovered]
+    log(f"  Discovered {len(pairs_to_scan)} liquid pairs")
+
+    # Pass 1: quick regime check — filter out dead pairs
+    viable: list[tuple[str, float]] = []
+    for pair in pairs_to_scan:
+        enc = pair.replace("/", "%2F")
+        regime_data = fetch(f"/api/regime/{enc}?interval=60&count=300")
+        if "error" in regime_data:
+            continue
+        gate = regime_data.get("trade_gate", 0)
+        if gate >= MIN_REGIME_GATE:
+            viable.append((pair, gate))
+    log(f"  Pass 1: {len(viable)}/{len(pairs_to_scan)} pairs above regime floor ({MIN_REGIME_GATE})")
+
+    # Pass 2: full analysis on viable pairs (cap at 15 to limit Kronos GPU time)
     analyses: list[dict] = []
-    for pair in TOP_PAIRS[:10]:  # Limit to top 10 to keep cycle fast
+    for pair, _ in viable[:15]:
         analysis = analyze_pair(pair)
         if analysis:
+            score, bd = score_entry(analysis)
+            analysis["_score"] = score
+            analysis["_breakdown"] = bd
             analyses.append(analysis)
             regime_sym = {"trending": "T", "ranging": "R", "volatile": "V"}.get(analysis["regime"], "?")
+            bd_str = " ".join(f"{k}={v:+.2f}" for k, v in bd.items() if isinstance(v, (int, float)))
             log(f"  {pair:10s} {regime_sym} gate={analysis['trade_gate']:.2f} RSI={analysis['rsi_1h']:5.1f} "
-                f"4H={analysis['trend_4h']:4s} Kronos={analysis['kronos_direction']:8s} ({analysis['kronos_pct']:+.1f}%)")
+                f"4H={analysis['trend_4h']:4s} Kronos={analysis['kronos_direction']:8s} "
+                f"=> {score:.2f} [{bd_str}]")
 
     # === Step 4: Post-mortem ===
     log("\n--- Step 4: Post-mortem ---")
@@ -224,62 +658,76 @@ def run_brain(dry_run: bool = False) -> str:
     log("\n--- Step 5: Decide ---")
     orders_to_place: list[dict] = []
 
-    # Score all pairs for entry
-    scored = [(a, score_entry(a)) for a in analyses]
-    scored.sort(key=lambda x: -x[1])
-
-    # Best entry candidate
-    if scored and scored[0][1] > 0.5 and cash_usd >= MAX_POSITION_USD:
-        best = scored[0][0]
-        score = scored[0][1]
-        log(f"ENTRY SIGNAL: {best['pair']} score={score:.2f} (RSI={best['rsi_1h']}, 4H={best['trend_4h']}, "
-            f"Kronos={best['kronos_direction']}, regime={best['regime']})")
-
-        qty = round(MAX_POSITION_USD / best["price"], 6)
-        orders_to_place.append({
-            "pair": best["pair"], "side": "buy", "order_type": "limit",
-            "quantity": str(qty), "limit_price": str(round(best["price"], 4)),
-        })
+    # 5a: Evaluate rotations — should any held position rotate to something better?
+    proposals = evaluate_portfolio(open_positions, analyses, stabilities, all_discovered)
+    if proposals:
+        best_rot = proposals[0]
+        log(f"ROTATION: {best_rot['from_asset']} -> {best_rot['to_asset']} via {best_rot['pair']} "
+            f"(improvement={best_rot['improvement']:+.3f}, hold={best_rot['source_hold_score']:.2f}, "
+            f"target={best_rot['target_score']:.2f}, threshold={best_rot['threshold']:.2f})")
+        # Build the rotation order
+        price = next((a["price"] for a in analyses if a["pair"] == best_rot["pair"]), None)
+        if price:
+            pos_for_rot = next((p for p in open_positions if p["asset"] == best_rot["from_asset"]), None)
+            rot_value = min(max_position_value, float(pos_for_rot["quantity_total"]) * price) if pos_for_rot else max_position_value
+            qty = round(rot_value / price, 6)
+            limit_price = round(price * (1.002 if best_rot["side"] == "buy" else 0.998), 6)
+            orders_to_place.append({
+                "pair": best_rot["pair"], "side": best_rot["side"], "order_type": "limit",
+                "quantity": str(qty), "limit_price": str(limit_price),
+            })
     else:
-        top_reason = "no cash" if cash_usd < MAX_POSITION_USD else (
-            f"best score={scored[0][1]:.2f}" if scored else "no data")
-        log(f"NO ENTRY: {top_reason}. Sitting out this cycle.")
+        log("  No rotation opportunities above threshold.")
 
-    # Check open positions for exit signals
-    for pos in open_positions:
-        asset = pos["asset"]
-        pair = pos.get("entry_pair")
-        if not pair or asset in ("USD", "USDT", "USDC", "GBP", "EUR"):
-            continue
-        # Find analysis for this pair
-        pos_analysis = next((a for a in analyses if a["pair"] == pair), None)
-        if not pos_analysis:
-            pos_analysis = analyze_pair(pair)
-        if pos_analysis and pos_analysis["trend_4h"] == "DOWN" and pos_analysis["rsi_1h"] > MAX_RSI_OVERBOUGHT:
-            log(f"EXIT SIGNAL: {pair} — 4H down + RSI={pos_analysis['rsi_1h']} (overbought in downtrend)")
-            # Note: exits are handled by bot's TP/SL monitoring, but CC can force-sell
-            # For now, just log the recommendation
+    # 5b: Deploy idle USD into best entry (if no rotation was found)
+    if not orders_to_place:
+        scored = [(a, a["_score"], a["_breakdown"]) for a in analyses]
+        scored.sort(key=lambda x: -x[1])
+        if scored and scored[0][1] > ENTRY_THRESHOLD and cash_usd >= max_position_value:
+            best, score, bd = scored[0]
+            bd_str = " ".join(f"{k}={v:+.2f}" for k, v in bd.items() if isinstance(v, (int, float)))
+            log(f"ENTRY from USD: {best['pair']} score={score:.2f} [{bd_str}]")
+            qty = round(max_position_value / best["price"], 6)
+            limit_price = round(best["price"] * 1.002, 6)  # slight premium for fill
+            orders_to_place.append({
+                "pair": best["pair"], "side": "buy", "order_type": "limit",
+                "quantity": str(qty), "limit_price": str(limit_price),
+            })
+        else:
+            top_reason = "no USD" if cash_usd < max_position_value else (
+                f"best score={scored[0][1]:.2f}" if scored else "no data")
+            log(f"  No entry: {top_reason}. Sitting out.")
 
     # === Step 6: Act ===
     log("\n--- Step 6: Act ---")
     if dry_run:
         log("DRY RUN — no orders placed")
         for order in orders_to_place:
-            log(f"  WOULD: {order['side']} {order['quantity']} {order['pair']} @ {order['limit_price']}")
+            log(f"  WOULD: {order['side']} {order['quantity']} {order['pair']} @ {order.get('limit_price', 'market')}")
     else:
         for order in orders_to_place:
             result = fetch("/api/orders", method="POST", data=order)
             if "error" in result:
-                log(f"  FAILED: {order['pair']} ��� {result['error']}")
+                log(f"  FAILED: {order['pair']} — {result['error']}")
             else:
                 log(f"  PLACED: {order['pair']} txid={result.get('txid', '?')}")
+
+    # Dust sweep — sell positions below 1% of portfolio
+    tracked_assets = {p.split("/")[0] for p in TOP_PAIRS} | {p.split("/")[0] for p in pairs_to_scan}
+    dust = find_dust_positions(open_positions, tracked_assets, dust_threshold)
+    if dust:
+        log(f"\n  Dust sweep: {len(dust)} position(s)")
+        sweep_dust(dust, dry_run, log)
+    else:
+        log("  No dust to sweep.")
 
     # === Step 7: Remember ===
     log("\n--- Step 7: Remember ---")
     # Portfolio snapshot
     fetch("/api/memory", method="POST", data={
         "category": "portfolio_snapshot",
-        "content": {"cash_usd": cash_usd, "open_positions": len(open_positions),
+        "content": {"portfolio_value_usd": portfolio_value, "cash_usd": cash_usd,
+                     "holdings_count": len([h for h in holdings if h["value_usd"] >= 1]),
                      "total_trades_7d": len(recent_trades)},
         "importance": 0.3,
     })

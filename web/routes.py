@@ -325,10 +325,11 @@ def create_cc_router(
         except SafeModeBlockedError as exc:
             raise HTTPException(status_code=403, detail="Safe mode is enabled") from exc
         except ExchangeError as exc:
-            raise HTTPException(status_code=502, detail="Exchange error") from exc
+            _log.warning("CC order exchange error on %s: %s", payload.pair, exc)
+            raise HTTPException(status_code=502, detail=f"Exchange error: {exc}") from exc
         except Exception as exc:
-            _log.warning("CC order failed: %s", exc)
-            raise HTTPException(status_code=400, detail="Order rejected") from exc
+            _log.warning("CC order failed on %s: %s", payload.pair, exc)
+            raise HTTPException(status_code=400, detail=f"Order rejected: {exc}") from exc
 
     @router.delete("/orders/{order_id}")
     async def cancel_order(order_id: str) -> dict[str, Any]:
@@ -564,6 +565,25 @@ def create_cc_router(
             "cash_usd": str(portfolio.cash_usd) if portfolio else "0",
             "total_value_usd": str(portfolio.total_value_usd) if portfolio else "0",
         }
+
+    @router.get("/exchange-balances")
+    async def get_exchange_balances() -> dict[str, Any]:
+        """Fetch live balances directly from Kraken — ground truth."""
+        if not hasattr(executor, "fetch_balances"):
+            raise HTTPException(status_code=503, detail="Executor not available")
+        try:
+            loop = asyncio.get_event_loop()
+            balances = await loop.run_in_executor(None, executor.fetch_balances)
+            return {
+                "balances": [
+                    {"asset": b.asset, "available": str(b.available), "held": str(b.held)}
+                    for b in balances if (b.available + b.held) > 0
+                ],
+                "count": sum(1 for b in balances if (b.available + b.held) > 0),
+            }
+        except Exception as exc:
+            _log.warning("exchange-balances failed: %s", exc)
+            raise HTTPException(status_code=502, detail=f"Exchange error: {exc}") from exc
 
     return router
 

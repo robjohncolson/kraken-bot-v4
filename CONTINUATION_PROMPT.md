@@ -40,10 +40,10 @@ Bot (always-on, deterministic body)
 | CC Brain Mode | `CC_BRAIN_MODE=true` — bot's planner + root evaluator disabled |
 | Belief model | `timesfm` (still wired but CC uses its own signals) |
 | CC Signals | RSI(14) + EMA(7/26) + Kronos + HMM regime |
-| Portfolio | ~$152 cash, 6 open roots (ASTER/AZTEC/BANANAS31 = dust, CRV/GBP/USD = real) |
+| Portfolio | ~$482 total value (down from $593.90 peak, ~19% drawdown) |
 | First CC trade | AVAX/USD limit buy @ $9.22 (txid OHJ2OJ-4LIFS-UBFFUD) |
 | CC Memory | 17+ events (decisions, observations, regimes, post-mortems, param changes) |
-| Tests | **676+ passing** |
+| Tests | **679 passing** |
 | MTF gates | `MTF_4H_GATE_ENABLED=true`, `MTF_15M_CONFIRM_ENABLED=true` |
 | HMM regime | 3-state (trending/ranging/volatile), most pairs currently ranging |
 
@@ -70,6 +70,31 @@ Bot (always-on, deterministic body)
 | `python scripts/cc_brain.py --dry-run` | Analysis only, no orders |
 | `python scripts/cc_postmortem.py` | Standalone post-mortem analysis |
 
+### CC Brain scoring (tuned 2026-04-11)
+
+| Parameter | Value | Notes |
+|-----------|-------|-------|
+| `MAX_POSITION_USD` | $20 | ~4% of portfolio, halves fee ratio vs $10 |
+| `MIN_REGIME_GATE` | 0.15 | Hard floor — below this, score = 0 |
+| `SOFT_REGIME_GATE` | 0.40 | Below this, score capped at 0.5 (visible but no entry) |
+| `ENTRY_THRESHOLD` | 0.6 | Must exceed to place an order |
+| `MIN_RSI_OVERSOLD` | 35 | RSI < 35 = strong oversold (+0.4 score) |
+
+**Score components**: 4H trend (+0.20 UP / -0.15 DOWN), 1H trend (+0.10), RSI (0.20-0.40), Kronos (0.10-0.30), regime (0.10-0.30). Reports show full breakdown per pair.
+
+### Dynamic pair discovery (added 2026-04-11)
+
+- `discover_pairs()` calls Kraken AssetPairs + Ticker APIs, ranks by 24h USD volume
+- Two-pass analysis: regime filter first (fast), full analysis on survivors (max 15)
+- Cached 1 hour, `TOP_PAIRS` fallback if API fails
+- Minimum volume: $50k/24h
+
+### Dust sweep (added 2026-04-11)
+
+- `find_dust_positions()` identifies orphan roots < $5 not in tracked pairs
+- `sweep_dust()` attempts market sell, logs failures, writes "stuck_dust" memory
+- Runs as part of Step 6 (Act) in every brain cycle
+
 ### Post-mortem findings (2026-04-11)
 
 - **Win rate**: 43% (6W / 8L over 14 trades)
@@ -82,7 +107,7 @@ Bot (always-on, deterministic body)
 
 ### Known issues (2026-04-11)
 
-- Dust positions (ASTER, AZTEC, BANANAS31) from failed bot orders now show as roots — will expire and consolidate
+- Dust positions (ASTER, AZTEC, BANANAS31) — brain will attempt to sell; if below ordermin, logged as stuck
 - `runtime_dlls/` directory cleanup safe (no longer needed)
 - cp1252 encoding warnings in bot log (benign)
 - AKT was force-closed by Phase 7 fix on restart
@@ -165,29 +190,32 @@ SCANNER_MAX_SPREAD_PCT=2.0
 
 ## Goal for next session
 
-### Priority 1: Monitor and tune CC brain
+### Priority 1: Run CC brain cycles and observe
 
-- Run `scripts/cc_brain.py` a few cycles, observe decisions
-- Tune scoring thresholds based on real market conditions
-- Watch the AVAX/USD trade outcome (first CC-placed trade)
+- Run `scripts/cc_brain.py --dry-run` to verify scoring produces non-zero scores
+- Watch the score breakdown output — tune component weights if needed
+- Monitor AVAX/USD trade outcome (first CC-placed trade)
 
 ### Priority 2: Simplify TA ensemble
 
 - Strip from 6 signals (EMA, RSI, MACD, Bollinger, momentum x2) to 2 (RSI + EMA)
 - The bot's TA ensemble is less relevant now (CC does its own analysis) but still used by TimesFM belief handler
 
-### Priority 3: Consolidate dust positions
+### Priority 3: Live brain run with dust sweep
 
-- ASTER, AZTEC, BANANAS31 are small dust from failed bot orders
-- Should be sold and consolidated to USD
-- CC can do this via POST /api/orders
+- Run `scripts/cc_brain.py` (live mode) to attempt dust sell (ASTER/AZTEC/BANANAS31)
+- If dust is below ordermin, it'll be logged as stuck — consider manual cleanup or just ignore
 
-### Priority 4: Expand pair coverage
+## What shipped 2026-04-11 (session 2)
 
-- Current TOP_PAIRS in cc_brain.py is 15 pairs — expand or auto-discover from Kraken
-- Add volume-weighted pair selection
+- **Scoring overhaul**: Hard gates → weighted components. 4H trend and regime are now score components, not binary gates. Soft regime cap at 0.5 for weak-but-not-dead regimes. Entry threshold raised to 0.6.
+- **Score breakdown**: Every pair now shows component-by-component scoring in brain reports (`=> 0.45 [4H_trend=+0.20 RSI=+0.20 ...]`)
+- **Position size**: $10 → $20 per trade to halve fee-to-win ratio
+- **Dynamic pair discovery**: `discover_pairs()` fetches all Kraken USD spot pairs, ranks by 24h volume, returns top 25. Two-pass analysis: regime filter first, full analysis on survivors.
+- **Dust sweep**: Auto-detects orphan roots < $5, attempts market sell, logs stuck dust to CC memory
+- **679 tests** (was 676)
 
-## What shipped 2026-04-11 (11 commits)
+## What shipped 2026-04-11 (session 1, 11 commits)
 
 - **Phase 7**: EXPIRED auto-liquidation (AKT unstuck), stablecoin root P&L fix
 - **Phase 8**: 4H trend gate + 15M entry confirmation (MTF analysis)
@@ -203,7 +231,7 @@ SCANNER_MAX_SPREAD_PCT=2.0
 ## Validation
 
 ```bash
-python -m pytest tests/ -x           # 676+ tests
+python -m pytest tests/ -x           # 679 tests
 python -m ruff check .               # clean (pre-existing failures in beliefs/, research/, scripts/)
 curl http://127.0.0.1:58392/api/health
 curl http://127.0.0.1:58392/api/balances

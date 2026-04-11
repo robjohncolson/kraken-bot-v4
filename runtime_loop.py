@@ -3122,10 +3122,17 @@ def _collect_root_prices(
     # Fetch missing prices via REST OHLCV
     from exchange.ohlcv import OHLCVFetchError, fetch_ohlcv
 
+    from exchange.symbols import normalize_asset_symbol
+
     for asset in balances:
         if asset in prices:
             continue
-        pair = f"{asset}/USD"
+        # Normalize raw Kraken symbol (XLTC→LTC, XXLM→XLM, XXMR→XMR, etc.)
+        norm_asset = normalize_asset_symbol(asset)
+        if norm_asset in prices:
+            prices[asset] = prices[norm_asset]
+            continue
+        pair = f"{norm_asset}/USD"
         try:
             bars = fetch_ohlcv(pair, interval=60, count=1, timeout=10.0)
             if not bars.empty:
@@ -3134,7 +3141,7 @@ def _collect_root_prices(
                 close_val = pd.to_numeric(bars["close"], errors="coerce").iloc[-1]
                 if close_val and close_val > 0:
                     prices[asset] = Decimal(str(close_val))
-                    logger.info("Fetched REST price for %s: %s", asset, prices[asset])
+                    logger.info("Fetched REST price for %s: %s", norm_asset, prices[asset])
         except (OHLCVFetchError, Exception) as exc:
             logger.warning(
                 "Could not fetch price for %s, skipping root: %s", asset, exc
