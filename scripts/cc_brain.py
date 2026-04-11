@@ -33,6 +33,17 @@ BOT_URL = "http://127.0.0.1:58392"
 KRAKEN_API = "https://api.kraken.com/0/public"
 REVIEWS_DIR = Path(__file__).parent.parent / "state" / "cc-reviews"
 
+def _price_decimals(price: float) -> int:
+    """Determine appropriate decimal places for a limit price on Kraken."""
+    if price >= 10:
+        return 2      # SOL ($85), LTC ($55), XMR ($338)
+    if price >= 1:
+        return 4      # XRP ($1.35), ADA ($0.25)
+    if price >= 0.01:
+        return 5      # DOGE ($0.09)
+    return 6          # PEPE ($0.0000036)
+
+
 # Strategy parameters
 MAX_POSITION_PCT = 0.04      # 4% of portfolio per position
 DUST_THRESHOLD_PCT = 0.01    # 1% of portfolio — below this is dust
@@ -805,7 +816,7 @@ def sweep_dust(dust_positions: list[dict], dry_run: bool, log_fn) -> list[dict]:
             continue
         price = float(bars[-1]["close"])
         # Limit sell slightly below market to ensure fill while paying maker fees
-        limit_price = round(price * 0.998, 6)
+        limit_price = round(price * 0.998, _price_decimals(price))
         if dry_run:
             log_fn(f"  WOULD SELL dust: {d['asset']} qty={d['qty']:.6f} (~${d['usd_value']:.2f}) via {pair} @ {limit_price}")
             results.append({"asset": d["asset"], "action": "dry_run"})
@@ -974,7 +985,7 @@ def run_brain(dry_run: bool = False) -> str:
             pos_for_rot = next((p for p in open_positions if p["asset"] == best_rot["from_asset"]), None)
             rot_value = min(max_position_value, float(pos_for_rot["quantity_total"]) * price) if pos_for_rot else max_position_value
             qty = round(rot_value / price, 6)
-            limit_price = round(price * (1.002 if best_rot["side"] == "buy" else 0.998), 5)
+            limit_price = round(price * (1.002 if best_rot["side"] == "buy" else 0.998), _price_decimals(price))
             orders_to_place.append({
                 "pair": best_rot["pair"], "side": best_rot["side"], "order_type": "limit",
                 "quantity": str(qty), "limit_price": str(limit_price),
@@ -991,7 +1002,7 @@ def run_brain(dry_run: bool = False) -> str:
             bd_str = " ".join(f"{k}={v:+.2f}" for k, v in bd.items() if isinstance(v, (int, float)))
             log(f"ENTRY from USD: {best['pair']} score={score:.2f} [{bd_str}]")
             qty = round(max_position_value / best["price"], 6)
-            limit_price = round(best["price"] * 1.002, 5)  # slight premium for fill
+            limit_price = round(best["price"] * 1.002, _price_decimals(best["price"]))
             orders_to_place.append({
                 "pair": best["pair"], "side": "buy", "order_type": "limit",
                 "quantity": str(qty), "limit_price": str(limit_price),
@@ -1008,7 +1019,7 @@ def run_brain(dry_run: bool = False) -> str:
             ex = exit_orders[0]
             log(f"EXIT: {ex['asset']} via {ex['pair']} — hold_score={ex['hold_score']:.2f} "
                 f"(${ex['value_usd']:.2f}, reason={ex['reason']})")
-            limit_price = round(ex["price"] * 0.998, 5)
+            limit_price = round(ex["price"] * 0.998, _price_decimals(ex["price"]))
             orders_to_place.append({
                 "pair": ex["pair"], "side": "sell", "order_type": "limit",
                 "quantity": str(round(ex["qty"], 6)), "limit_price": str(limit_price),
