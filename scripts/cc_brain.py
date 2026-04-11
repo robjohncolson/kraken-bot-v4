@@ -907,11 +907,6 @@ def run_brain(dry_run: bool = False) -> str:
     dust_threshold = portfolio_value * DUST_THRESHOLD_PCT
     log(f"Portfolio: ${portfolio_value:.2f}  |  USD: ${cash_usd:.2f}  |  Max trade: ${max_position_value:.2f}")
 
-    # Show all holdings
-    for h in holdings:
-        if h["value_usd"] >= 1.0:
-            log(f"  {h['asset']:8s} ${h['value_usd']:>8.2f}  (qty={h['qty']:.4f} @ ${h['price_usd']:.4f})")
-
     tree = fetch("/api/rotation-tree")
     open_positions = [n for n in tree.get("nodes", []) if n.get("depth", 0) == 0 and n["status"] == "open"]
     log(f"Rotation tree: {len(open_positions)} roots (tree value: ${tree.get('total_portfolio_value_usd', '?')})")
@@ -924,15 +919,24 @@ def run_brain(dry_run: bool = False) -> str:
         if h["value_usd"] < 1.0:
             continue
         vol = asset_volumes.get(asset, 0)
-        # Quick volatility estimate from regime endpoint
         pair_for_vol = f"{asset}/USD"
         regime_resp = fetch(f"/api/regime/{pair_for_vol.replace('/', '%2F')}?interval=60&count=300")
-        vol_pct = 5.0  # default moderate volatility
+        vol_pct = 5.0
         if "error" not in regime_resp and regime_resp.get("regime") == "volatile":
             vol_pct = 8.0
         elif "error" not in regime_resp and regime_resp.get("regime") == "trending":
             vol_pct = 3.0
         stabilities[asset] = compute_stability(vol, vol_pct)
+
+    # Show all holdings with stability
+    for h in holdings:
+        if h["value_usd"] >= 1.0:
+            asset = h["asset"]
+            stab = stabilities.get(asset)
+            stab_str = f"S={stab:.2f}" if stab is not None else ""
+            log(f"  {asset:8s} ${h['value_usd']:>8.2f}  "
+                f"(qty={h['qty']:.4f} @ ${h['price_usd']:.4f}) "
+                f"{stab_str}")
 
     # === Step 3: Analyze (two-pass) ===
     log("\n--- Step 3: Analyze ---")

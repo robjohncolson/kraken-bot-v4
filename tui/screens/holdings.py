@@ -1,8 +1,8 @@
 """Holdings screen — full table of all Kraken holdings."""
 from __future__ import annotations
 
-import glob
 import re
+from pathlib import Path
 
 from textual.app import ComposeResult
 from textual.screen import Screen
@@ -12,17 +12,15 @@ from tui.state import CockpitState
 from tui.widgets.holdings import HoldingsTable
 from tui.widgets.status_bar import StatusBar
 
+_PROJECT_ROOT = Path(__file__).parent.parent.parent
+
 
 def _find_latest_brain_report() -> str | None:
     """Find the latest brain_*.md report file."""
-    patterns = [
-        "state/cc-reviews/brain_*.md",
-        "../state/cc-reviews/brain_*.md",
-    ]
-    for pattern in patterns:
-        matches = sorted(glob.glob(pattern))
-        if matches:
-            return matches[-1]
+    reviews_dir = _PROJECT_ROOT / "state" / "cc-reviews"
+    matches = sorted(reviews_dir.glob("brain_*.md"))
+    if matches:
+        return str(matches[-1])
     return None
 
 
@@ -30,7 +28,7 @@ def _parse_holdings_from_report(path: str) -> list[dict]:
     """Parse holdings from the Observe section of a brain report.
 
     Lines like:
-      USD      $  265.89  (qty=265.8893 @ $1.0000)
+      USD      $  265.89  (qty=265.8893 @ $1.0000) S=0.72
       LTC      $   40.56  (qty=0.7286 @ $55.6700)
     """
     holdings: list[dict] = []
@@ -49,16 +47,21 @@ def _parse_holdings_from_report(path: str) -> list[dict]:
 
     observe_block = observe_match.group(1)
     holding_re = re.compile(
-        r"^\s+(\S+)\s+\$\s*([\d.,]+)\s+\(qty=([\d.,]+)\s+@\s+\$([\d.,]+)\)",
+        r"^\s+(\S+)\s+\$\s*([\d.,]+)"
+        r"\s+\(qty=([\d.,]+)\s+@\s+\$([\d.,]+)\)"
+        r"(?:\s+S=([\d.]+))?",
         re.MULTILINE,
     )
     for m in holding_re.finditer(observe_block):
-        holdings.append({
+        h: dict = {
             "asset": m.group(1),
             "usd_value": m.group(2).replace(",", ""),
             "quantity": m.group(3).replace(",", ""),
             "price": m.group(4).replace(",", ""),
-        })
+        }
+        if m.group(5):
+            h["stability"] = m.group(5)
+        holdings.append(h)
 
     return holdings
 
