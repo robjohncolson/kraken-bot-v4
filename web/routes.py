@@ -247,7 +247,16 @@ def create_cc_router(
 
     _log = logging.getLogger(__name__)
     router = APIRouter(prefix="/api")
-    reader = SqliteReader(db_conn) if isinstance(db_conn, sqlite3.Connection) else None
+    # Create a separate SQLite connection for the CC router thread pool
+    # (the runtime's connection has check_same_thread=True by default)
+    _cc_reader = None
+    if isinstance(db_conn, sqlite3.Connection):
+        db_path = db_conn.execute("PRAGMA database_list").fetchone()[2]
+        if db_path:
+            _cc_conn = sqlite3.connect(db_path, check_same_thread=False)
+            _cc_conn.row_factory = sqlite3.Row
+            _cc_reader = SqliteReader(_cc_conn)
+    reader = _cc_reader
 
     class OrderPayload(BaseModel):
         pair: str
