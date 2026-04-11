@@ -1,7 +1,7 @@
 """Market map screen — brain pair analysis overview."""
 from __future__ import annotations
 
-import glob
+from pathlib import Path
 
 from textual.app import ComposeResult
 from textual.screen import Screen
@@ -11,17 +11,15 @@ from tui.state import CockpitState
 from tui.widgets.market_map import MarketMapTable
 from tui.widgets.status_bar import StatusBar
 
+_PROJECT_ROOT = Path(__file__).parent.parent.parent
+
 
 def _find_latest_brain_report() -> str | None:
     """Find the latest brain_*.md report file."""
-    patterns = [
-        "state/cc-reviews/brain_*.md",
-        "../state/cc-reviews/brain_*.md",
-    ]
-    for pattern in patterns:
-        matches = sorted(glob.glob(pattern))
-        if matches:
-            return matches[-1]
+    reviews_dir = _PROJECT_ROOT / "state" / "cc-reviews"
+    matches = sorted(reviews_dir.glob("brain_*.md"))
+    if matches:
+        return str(matches[-1])
     return None
 
 

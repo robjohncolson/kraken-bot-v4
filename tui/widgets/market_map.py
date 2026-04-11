@@ -8,12 +8,13 @@ from textual.widgets import DataTable
 
 from tui.theme import HEALTHY, MUTED, NEUTRAL, UNHEALTHY, WARNING
 
-_COLUMNS = ("Pair", "Regime", "Gate", "RSI", "4H", "Kronos", "Score", "Bar")
+_COLUMNS = ("Pair", "Regime", "Gate", "RSI", "4H", "Kronos", "TFM", "Score", "Bar")
 
-# Regex to parse analysis lines from brain reports:
-#   SOL/USD    V gate=1.00 RSI= 78.7 4H=UP   Kronos=bullish  => 0.70 [...]
+# Regex to parse analysis lines from brain reports (new format):
+#   SOL/USD    V gate=1.00 RSI= 62.6 4H=UP   K=neut TFM=neut => 0.35 [...]
 _ANALYSIS_RE = re.compile(
-    r"^\s+(\S+)\s+([TVR?])\s+gate=(\S+)\s+RSI=\s*(\S+)\s+4H=(\S+)\s+Kronos=(\S+)\s+=>\s+(\S+)",
+    r"^\s+(\S+)\s+([TVR?])\s+gate=(\S+)\s+RSI=\s*(\S+)"
+    r"\s+4H=(\S+)\s+K=(\S+)\s+TFM=(\S+)\s+=>\s+(\S+)",
     re.MULTILINE,
 )
 
@@ -95,7 +96,7 @@ class MarketMapTable(DataTable):
         self.clear()
 
         if not report_path:
-            self.add_row("\u2014", "", "", "", "", "", "", "")
+            self.add_row("\u2014", "", "", "", "", "", "", "", "")
             self.border_subtitle = "No brain report found"
             return
 
@@ -104,14 +105,14 @@ class MarketMapTable(DataTable):
             with open(report_path, encoding="utf-8") as f:
                 content = f.read()
         except (OSError, IOError):
-            self.add_row("\u2014", "", "", "", "", "", "", "")
+            self.add_row("\u2014", "", "", "", "", "", "", "", "")
             self.border_subtitle = "Error reading report"
             return
 
         entries = []
         for m in _ANALYSIS_RE.finditer(content):
             try:
-                score = float(m.group(7))
+                score = float(m.group(8))
             except (ValueError, TypeError):
                 score = 0.0
             entries.append({
@@ -121,11 +122,12 @@ class MarketMapTable(DataTable):
                 "rsi": m.group(4),
                 "trend_4h": m.group(5),
                 "kronos": m.group(6),
+                "timesfm": m.group(7),
                 "score": score,
             })
 
         if not entries:
-            self.add_row("\u2014", "", "", "", "", "", "", "")
+            self.add_row("\u2014", "", "", "", "", "", "", "", "")
             self.border_subtitle = "No analysis data in report"
             return
 
@@ -140,6 +142,7 @@ class MarketMapTable(DataTable):
                 e["rsi"],
                 _trend_text(e["trend_4h"]),
                 _kronos_text(e["kronos"]),
+                _kronos_text(e["timesfm"]),
                 Text(
                     f"{e['score']:.2f}",
                     style=(
