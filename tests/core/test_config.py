@@ -34,6 +34,7 @@ def test_load_settings_uses_spec_defaults() -> None:
     assert settings.scanner_min_24h_volume_usd == 50_000.0
     assert settings.scanner_max_spread_pct == 2.0
     assert settings.enable_conditional_tree is False
+    assert settings.cc_brain_mode is False
     assert settings.rotation_take_profit_pct == 5.0
     assert settings.rotation_stop_loss_pct == 2.5
     assert settings.rotation_trailing_stop_activation_pct == 1.5
@@ -97,6 +98,12 @@ def test_enable_conditional_tree_parses_from_environment() -> None:
     settings = load_settings({**REQUIRED_ENV, "ENABLE_CONDITIONAL_TREE": "true"})
 
     assert settings.enable_conditional_tree is True
+
+
+def test_cc_brain_mode_parses_from_environment() -> None:
+    settings = load_settings({**REQUIRED_ENV, "CC_BRAIN_MODE": "true"})
+
+    assert settings.cc_brain_mode is True
 
 
 def test_rotation_risk_settings_parse_from_environment() -> None:

@@ -56,6 +56,7 @@ DEFAULT_SCANNER_MIN_24H_VOLUME_USD = 50_000.0
 DEFAULT_SCANNER_MAX_SPREAD_PCT = 2.0
 DEFAULT_ENABLE_CONDITIONAL_TREE = False
 DEFAULT_ENABLE_ROTATION_TREE = False
+DEFAULT_CC_BRAIN_MODE = False
 DEFAULT_EXIT_LIMIT_OFFSET_PCT = 0.1
 DEFAULT_ROTATION_MAX_CHILDREN_PER_PARENT = 3
 DEFAULT_ROTATION_MIN_CONFIDENCE = 0.65
@@ -132,6 +133,7 @@ class Settings:
     scanner_max_spread_pct: float
     enable_conditional_tree: bool
     enable_rotation_tree: bool
+    cc_brain_mode: bool
     exit_limit_offset_pct: float
     pair_metadata_refresh_hours: int
     rotation_max_children_per_parent: int
@@ -303,6 +305,11 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
             env,
             "ENABLE_ROTATION_TREE",
             DEFAULT_ENABLE_ROTATION_TREE,
+        ),
+        cc_brain_mode=_read_bool(
+            env,
+            "CC_BRAIN_MODE",
+            DEFAULT_CC_BRAIN_MODE,
         ),
         exit_limit_offset_pct=_read_float(
             env,

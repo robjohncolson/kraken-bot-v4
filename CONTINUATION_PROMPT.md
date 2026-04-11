@@ -11,13 +11,13 @@
 - **Platform**: Windows 11, Python 3.13, WSL for runtime
 - **Repo**: `git@github.com:robjohncolson/kraken-bot-v4.git`, branch `master`
 
-## Current state (as of 2026-04-07)
+## Current state (as of 2026-04-10)
 
-**BOT IS LIVE AND TRADING** — 7 root exits completed, portfolio consolidating. P&L tracking fixed (Phase 5). Win rate improvement spec ready (Phase 6).
+**BOT IS LIVE AND TRADING** — TimesFM belief model activated, Intel Arc GPU operational.
 
 | Field | Value |
 |-------|-------|
-| Belief model | `llm_council` (CC+Codex via tmux-bridge) |
+| Belief model | `timesfm` (Google TimesFM 2.5, Intel Arc GPU) |
 | Portfolio | Consolidating — 6 roots closed (bearish exits), 5 open (bullish holds), 2 closing |
 | Rotation tree | **LIVE** — `ENABLE_ROTATION_TREE=true`, cycling every 30s |
 | Tests | **628 passing** |
@@ -52,6 +52,7 @@
 | `technical_ensemble` | Default | 6-signal TA (EMA, RSI, MACD, Bollinger, momentum) |
 | `research_model` | Requires `ACTIVE_ARTIFACT_ID` | V1 LogReg (+5,531 bps on 180d backtest, all rollout gates pass) |
 | `llm_council` | Requires broker sidecar | CC+Codex analyze structured market context via file-based messaging |
+| `timesfm` | **ACTIVE** | Google TimesFM 2.5 (200M params), close-price forecaster, quantile-based confidence, Intel Arc GPU |
 
 ### LLM Council (with fallback chain)
 
@@ -128,7 +129,7 @@ python3 scripts/llm_council_broker.py
 ```
 KRAKEN_API_KEY=...
 KRAKEN_API_SECRET=...
-BELIEF_MODEL=llm_council
+BELIEF_MODEL=timesfm
 BELIEF_STALE_HOURS=2
 ALLOWED_PAIRS=                    # empty = all pairs (required for rotation tree)
 ENABLE_ROTATION_TREE=true
@@ -146,6 +147,20 @@ SCANNER_MIN_24H_VOLUME_USD=50000  # Phase 6B: minimum 24h USD volume
 SCANNER_MAX_SPREAD_PCT=2.0        # Phase 6B: max avg HL spread %
 KELLY_MIN_SAMPLE_SIZE=10          # Phase 6C: flat sizing until N child trades
 ```
+
+## What shipped 2026-04-10
+
+- **TimesFM belief source activated**: torch 2.8.0+xpu from PyTorch XPU index, IPEX 2.8.10+xpu, Intel Arc GPU confirmed (`torch.xpu.is_available()=True`)
+- **DLL preload in main.py**: System `C:\Python313\Library\bin` has stale Intel 2025.0.4 DLLs; user Library/bin has correct 2025.1.x. Preload block loads correct DLLs before any torch import. Missing `umf.dll` copied to user Library/bin
+- **TimesFM proxies fix**: Added `**kwargs` to `TimesFM_2p5_200M_torch.__init__()` in local timesfm source (`C:\Users\rober\Downloads\Projects\timesfm\...`) to absorb newer huggingface_hub kwargs
+- **TimesFM kickstart verified**: SOL/USD -> neutral, trending, 5.9s inference, model weights cached (~882 MB)
+- **tmux-bridge MCP**: `.mcp.json` added to project root (WSL Ubuntu, node server)
+
+### Known issues (2026-04-10)
+- AKT root stuck in EXPIRED (exhausted 3 recovery attempts)
+- cp1252 encoding warnings in bot log (benign, Unicode chars)
+- CAD, XLTC, XXLM, XXMR: Kraken X-prefixed pair lookup failures (dust positions)
+- `runtime_dlls/` directory contains extracted Intel wheel DLLs (cleanup safe, no longer needed)
 
 ## Goal for next session
 

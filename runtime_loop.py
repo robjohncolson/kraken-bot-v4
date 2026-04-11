@@ -1179,6 +1179,9 @@ class SchedulerRuntime:
 
     async def _maybe_run_rotation_planner(self, now: datetime) -> None:
         """Run the rotation tree planner cycle if enabled."""
+        if self._settings.cc_brain_mode:
+            return  # CC handles all entry decisions
+
         if self._rotation_planner is None or self._rotation_tree is None:
             return
 
@@ -2005,6 +2008,9 @@ class SchedulerRuntime:
 
     async def _evaluate_root_deadlines(self, now: datetime) -> None:
         """Set or refresh deadlines on root nodes that need evaluation."""
+        if self._settings.cc_brain_mode:
+            return  # CC handles root evaluation
+
         if self._rotation_tree is None or self._pair_scanner is None:
             return
 

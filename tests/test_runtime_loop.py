@@ -991,6 +991,50 @@ def test_root_rotation_exit_fill_persists_trade_outcome_depth_zero() -> None:
     asyncio.run(scenario())
 
 
+def test_cc_brain_mode_skips_planner() -> None:
+    async def scenario() -> None:
+        runtime = _runtime(settings=_settings(CC_BRAIN_MODE="true"))
+        runtime._rotation_planner = object()
+        runtime._rotation_tree = RotationTreeState(nodes=(), root_node_ids=())
+
+        async def fail_handle_rotation_expiry(_now: datetime) -> None:
+            raise AssertionError("planner preflight should be skipped in CC brain mode")
+
+        runtime._handle_rotation_expiry = fail_handle_rotation_expiry  # type: ignore[method-assign]
+
+        await runtime._maybe_run_rotation_planner(NOW)
+
+    asyncio.run(scenario())
+
+
+def test_cc_brain_mode_skips_root_eval() -> None:
+    async def scenario() -> None:
+        runtime = _runtime(settings=_settings(CC_BRAIN_MODE="true"))
+        root = RotationNode(
+            node_id="root-ada",
+            parent_node_id=None,
+            depth=0,
+            asset="ADA",
+            quantity_total=Decimal("100"),
+            quantity_free=Decimal("100"),
+            status=RotationNodeStatus.OPEN,
+        )
+        runtime._rotation_tree = RotationTreeState(
+            nodes=(root,),
+            root_node_ids=(root.node_id,),
+        )
+        runtime._pair_scanner = object()
+
+        def fail_find_root_exit_pair(_asset: str) -> tuple[str, OrderSide] | None:
+            raise AssertionError("root evaluation should be skipped in CC brain mode")
+
+        runtime._find_root_exit_pair = fail_find_root_exit_pair  # type: ignore[method-assign]
+
+        await runtime._evaluate_root_deadlines(NOW)
+
+    asyncio.run(scenario())
+
+
 def test_evaluate_root_deadlines_sets_opened_at_once() -> None:
     async def scenario() -> None:
         runtime = _runtime()
