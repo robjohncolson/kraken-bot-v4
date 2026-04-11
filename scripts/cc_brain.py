@@ -481,6 +481,137 @@ def evaluate_portfolio(
 
 
 QUOTE_CURRENCIES = frozenset(("USD", "USDT", "USDC"))  # can't sell these as dust
+STALE_ORDER_HOURS = 2  # cancel unfilled orders after this
+
+# Self-tuning bounds
+_ENTRY_THRESHOLD_MIN = 0.50
+_ENTRY_THRESHOLD_MAX = 0.85
+_POSITION_PCT_MIN = 0.02
+_POSITION_PCT_MAX = 0.08
+_REGIME_GATE_MIN = 0.10
+_REGIME_GATE_MAX = 0.30
+
+
+def self_tune(outcomes: list[dict], analyses: list[dict], log_fn) -> None:
+    """Adjust strategy parameters based on post-mortem patterns. Max 1 change per cycle."""
+    global ENTRY_THRESHOLD, MAX_POSITION_PCT, MIN_REGIME_GATE
+
+    if not outcomes or len(outcomes) < 5:
+        # Not enough data to tune — but check if brain is idle
+        if analyses and all(a.get("_score", 0) < ENTRY_THRESHOLD for a in analyses):
+            if MIN_REGIME_GATE > _REGIME_GATE_MIN:
+                old = MIN_REGIME_GATE
+                MIN_REGIME_GATE = round(MIN_REGIME_GATE - 0.05, 2)
+                log_fn(f"  TUNE: MIN_REGIME_GATE {old} -> {MIN_REGIME_GATE} (brain idle, widening filter)")
+                _record_param_change("MIN_REGIME_GATE", old, MIN_REGIME_GATE, "brain idle — no pairs above threshold")
+        return
+
+    wins = sum(1 for t in outcomes if float(t.get("net_pnl", 0)) > 0)
+    total_pnl = sum(float(t.get("net_pnl", 0)) for t in outcomes)
+    gross_wins = sum(float(t["net_pnl"]) for t in outcomes if float(t.get("net_pnl", 0)) > 0)
+    total_fees = sum(abs(float(t.get("fee_total", 0))) for t in outcomes)
+    sl_exits = sum(1 for t in outcomes if t.get("exit_reason") == "stop_loss")
+    wr = wins / len(outcomes)
+
+    # Rule 1: Win rate too low — tighten entry
+    if wr < 0.30 and ENTRY_THRESHOLD < _ENTRY_THRESHOLD_MAX:
+        old = ENTRY_THRESHOLD
+        ENTRY_THRESHOLD = round(ENTRY_THRESHOLD + 0.05, 2)
+        log_fn(f"  TUNE: ENTRY_THRESHOLD {old} -> {ENTRY_THRESHOLD} (WR={wr:.0%} < 30%)")
+        _record_param_change("ENTRY_THRESHOLD", old, ENTRY_THRESHOLD, f"win rate {wr:.0%} below 30%")
+        return
+
+    # Rule 2: Win rate high — relax entry
+    if wr > 0.60 and ENTRY_THRESHOLD > _ENTRY_THRESHOLD_MIN:
+        old = ENTRY_THRESHOLD
+        ENTRY_THRESHOLD = round(ENTRY_THRESHOLD - 0.05, 2)
+        log_fn(f"  TUNE: ENTRY_THRESHOLD {old} -> {ENTRY_THRESHOLD} (WR={wr:.0%} > 60%)")
+        _record_param_change("ENTRY_THRESHOLD", old, ENTRY_THRESHOLD, f"win rate {wr:.0%} above 60%")
+        return
+
+    # Rule 3: Fee burden too high — increase position size
+    if gross_wins > 0 and total_fees / gross_wins > 0.60 and MAX_POSITION_PCT < _POSITION_PCT_MAX:
+        old = MAX_POSITION_PCT
+        MAX_POSITION_PCT = round(MAX_POSITION_PCT + 0.01, 2)
+        fee_pct = total_fees / gross_wins
+        log_fn(f"  TUNE: MAX_POSITION_PCT {old} -> {MAX_POSITION_PCT} (fees={fee_pct:.0%} of wins)")
+        _record_param_change("MAX_POSITION_PCT", old, MAX_POSITION_PCT, f"fee burden {fee_pct:.0%}")
+        return
+
+    # Rule 4: Too many stop-loss exits — tighten regime gate
+    sl_rate = sl_exits / len(outcomes)
+    if sl_rate > 0.60 and MIN_REGIME_GATE < _REGIME_GATE_MAX:
+        old = MIN_REGIME_GATE
+        MIN_REGIME_GATE = round(MIN_REGIME_GATE + 0.05, 2)
+        log_fn(f"  TUNE: MIN_REGIME_GATE {old} -> {MIN_REGIME_GATE} (SL exits={sl_rate:.0%})")
+        _record_param_change("MIN_REGIME_GATE", old, MIN_REGIME_GATE, f"stop-loss exit rate {sl_rate:.0%}")
+        return
+
+    log_fn(f"  No tuning needed (WR={wr:.0%}, P&L=${total_pnl:.2f}, {len(outcomes)} trades)")
+
+
+def _record_param_change(param: str, old, new, reason: str) -> None:
+    fetch("/api/memory", method="POST", data={
+        "category": "param_change",
+        "content": {"param": param, "old": str(old), "new": str(new), "reason": reason},
+        "importance": 0.9,
+    })
+
+
+def check_pending_orders(log_fn, dry_run: bool) -> None:
+    """Cancel brain-placed orders that haven't filled within STALE_ORDER_HOURS."""
+    pending = fetch("/api/memory?category=pending_order&hours=24")
+    if "error" in pending:
+        return
+    now_ts = time.time()
+    for mem in pending.get("memories", []):
+        content = mem.get("content", {})
+        txid = content.get("txid")
+        placed_ts = content.get("placed_ts", 0)
+        if not txid or not placed_ts:
+            continue
+        age_hours = (now_ts - placed_ts) / 3600
+        if age_hours < STALE_ORDER_HOURS:
+            continue
+        if dry_run:
+            log_fn(f"  WOULD cancel stale order {txid} ({content.get('pair', '?')}, {age_hours:.1f}h old)")
+        else:
+            result = fetch(f"/api/orders/{txid}", method="DELETE")
+            if "error" in result:
+                log_fn(f"  Stale order {txid}: already filled or cancelled")
+            else:
+                log_fn(f"  Cancelled stale order {txid} ({age_hours:.1f}h old)")
+
+
+def check_exits(
+    holdings: list[dict], analyses: list[dict], stabilities: dict[str, float],
+) -> list[dict]:
+    """Check held positions for exit signals. Returns at most 1 exit order (worst first)."""
+    exits: list[dict] = []
+    for h in holdings:
+        asset = h["asset"]
+        if asset in QUOTE_CURRENCIES or h["value_usd"] < 5.0:
+            continue
+        pair = f"{asset}/USD"
+        analysis = next((a for a in analyses if a["pair"] == pair), None)
+        if not analysis:
+            analysis = analyze_pair(pair)
+        if not analysis:
+            continue
+        stab = stabilities.get(asset, 0)
+        hold = score_hold(analysis, stab)
+        if hold < 0.20:
+            exits.append({
+                "pair": pair, "side": "sell", "asset": asset,
+                "hold_score": round(hold, 3),
+                "reason": "quality_collapse",
+                "price": analysis["price"],
+                "qty": h["qty"],
+                "value_usd": h["value_usd"],
+            })
+    # Only exit worst position per cycle — avoid panic-selling
+    exits.sort(key=lambda e: e["hold_score"])
+    return exits[:1]
 
 
 def find_dust_positions(
@@ -574,6 +705,9 @@ def run_brain(dry_run: bool = False) -> str:
     else:
         log(f"Memory unavailable: {memory.get('error', 'unknown')}")
 
+    # Step 1b: Check pending orders from previous cycles
+    check_pending_orders(log, dry_run)
+
     # === Step 2: Observe ===
     log("\n--- Step 2: Observe ---")
 
@@ -663,6 +797,9 @@ def run_brain(dry_run: bool = False) -> str:
         log("Trade outcomes unavailable")
         recent_trades = []
 
+    # Step 4b: Self-tune parameters based on post-mortem patterns
+    self_tune(recent_trades, analyses, log)
+
     # === Step 5: Decide ===
     log("\n--- Step 5: Decide ---")
     orders_to_place: list[dict] = []
@@ -707,8 +844,22 @@ def run_brain(dry_run: bool = False) -> str:
                 f"best score={scored[0][1]:.2f}" if scored else "no data")
             log(f"  No entry: {top_reason}. Sitting out.")
 
+    # 5c: Check exits — should any held position be sold?
+    if not orders_to_place:
+        exit_orders = check_exits(holdings, analyses, stabilities)
+        if exit_orders:
+            ex = exit_orders[0]
+            log(f"EXIT: {ex['asset']} via {ex['pair']} — hold_score={ex['hold_score']:.2f} "
+                f"(${ex['value_usd']:.2f}, reason={ex['reason']})")
+            limit_price = round(ex["price"] * 0.998, 5)
+            orders_to_place.append({
+                "pair": ex["pair"], "side": "sell", "order_type": "limit",
+                "quantity": str(round(ex["qty"], 6)), "limit_price": str(limit_price),
+            })
+
     # === Step 6: Act ===
     log("\n--- Step 6: Act ---")
+    placed_txids: list[dict] = []
     if dry_run:
         log("DRY RUN — no orders placed")
         for order in orders_to_place:
@@ -719,7 +870,17 @@ def run_brain(dry_run: bool = False) -> str:
             if "error" in result:
                 log(f"  FAILED: {order['pair']} — {result['error']}")
             else:
-                log(f"  PLACED: {order['pair']} txid={result.get('txid', '?')}")
+                txid = result.get("txid", "?")
+                log(f"  PLACED: {order['pair']} txid={txid}")
+                placed_txids.append({"txid": txid, "pair": order["pair"],
+                                      "side": order["side"], "placed_ts": time.time()})
+
+    # Track placed orders in memory for fill monitoring
+    for pt in placed_txids:
+        fetch("/api/memory", method="POST", data={
+            "category": "pending_order", "pair": pt["pair"],
+            "content": pt, "importance": 0.6,
+        })
 
     # Dust sweep — sell positions below 1% of portfolio
     tracked_assets = {p.split("/")[0] for p in TOP_PAIRS} | {p.split("/")[0] for p in pairs_to_scan}
@@ -784,9 +945,44 @@ def run_brain(dry_run: bool = False) -> str:
     return report
 
 
+LOOP_INTERVAL_SEC = 3600  # 1 hour between cycles
+
+
 def main() -> None:
     dry_run = "--dry-run" in sys.argv
-    run_brain(dry_run=dry_run)
+    loop = "--loop" in sys.argv
+
+    if not loop:
+        run_brain(dry_run=dry_run)
+        return
+
+    print(f"CC Brain loop started — cycle every {LOOP_INTERVAL_SEC // 60} min, "
+          f"{'DRY RUN' if dry_run else 'LIVE'}")
+    while True:
+        try:
+            run_brain(dry_run=dry_run)
+        except KeyboardInterrupt:
+            print("\nBrain loop stopped by user.")
+            break
+        except Exception as exc:
+            print(f"\n[ERROR] Brain cycle failed: {exc}")
+            # Write error to memory so next cycle can see it
+            try:
+                fetch("/api/memory", method="POST", data={
+                    "category": "observation",
+                    "content": {"type": "brain_error", "error": str(exc)[:200]},
+                    "importance": 0.9,
+                })
+            except Exception:
+                pass
+        # Sleep in 60s chunks so KeyboardInterrupt is responsive
+        print(f"\nNext cycle in {LOOP_INTERVAL_SEC // 60} minutes...")
+        try:
+            for _ in range(LOOP_INTERVAL_SEC // 60):
+                time.sleep(60)
+        except KeyboardInterrupt:
+            print("\nBrain loop stopped by user.")
+            break
 
 
 if __name__ == "__main__":
