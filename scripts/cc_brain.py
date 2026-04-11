@@ -558,6 +558,155 @@ def _record_param_change(param: str, old, new, reason: str) -> None:
     })
 
 
+DEEP_POSTMORTEM_INTERVAL_HOURS = 72  # full review every 3 days
+
+
+def immediate_postmortem(outcomes: list[dict], log_fn) -> list[dict]:
+    """Analyze trades that didn't go as predicted. Returns list of findings."""
+    # Check which outcomes are new since last cycle (closed in last 2h)
+    findings: list[dict] = []
+    for t in outcomes:
+        pnl = float(t.get("net_pnl", 0))
+        if pnl >= 0:
+            continue  # trade went fine — skip
+        pair = t.get("pair", "?")
+        exit_reason = t.get("exit_reason", "?")
+        hold_hours = float(t.get("hold_hours") or 0)
+        entry_price = float(t.get("entry_price") or 0)
+        exit_price = float(t.get("exit_price") or 0)
+        confidence = float(t.get("confidence") or 0)
+
+        # Diagnose: what went wrong?
+        diagnosis: list[str] = []
+        if exit_reason == "stop_loss" and hold_hours < 1:
+            diagnosis.append("quick_sl_hit")
+        if exit_reason == "stop_loss" and confidence >= 0.8:
+            diagnosis.append("high_confidence_loss")
+        if exit_reason == "timer":
+            diagnosis.append("timed_out_no_movement")
+        if entry_price > 0 and exit_price > 0:
+            loss_pct = abs(exit_price - entry_price) / entry_price * 100
+            if loss_pct > 3:
+                diagnosis.append(f"large_loss_{loss_pct:.1f}pct")
+
+        # Get current regime for context
+        regime_data = fetch(f"/api/regime/{pair.replace('/', '%2F')}?interval=60&count=300")
+        current_regime = regime_data.get("regime", "?") if "error" not in regime_data else "?"
+
+        finding = {
+            "pair": pair, "pnl": round(pnl, 4), "exit_reason": exit_reason,
+            "hold_hours": round(hold_hours, 2), "confidence": confidence,
+            "diagnosis": diagnosis, "current_regime": current_regime,
+        }
+        findings.append(finding)
+
+        # Write to memory
+        fetch("/api/memory", method="POST", data={
+            "category": "postmortem", "pair": pair,
+            "content": finding, "importance": 0.7,
+        })
+        log_fn(f"  PM: {pair} lost ${abs(pnl):.4f} ({exit_reason}, {hold_hours:.1f}h) "
+               f"— {', '.join(diagnosis) or 'no_pattern'}")
+
+    return findings
+
+
+def deep_postmortem(log_fn) -> None:
+    """Periodic deep review — aggregate patterns from recent postmortems. Runs every 72h."""
+    # Check when last deep PM ran
+    last_deep = fetch("/api/memory?category=deep_postmortem&hours=168&limit=1")
+    if "error" not in last_deep:
+        mems = last_deep.get("memories", [])
+        if mems:
+            # Parse timestamp to check age
+            last_ts = mems[0].get("timestamp", "")
+            if last_ts:
+                try:
+                    last_dt = datetime.fromisoformat(last_ts)
+                    age_hours = (datetime.now(timezone.utc) - last_dt).total_seconds() / 3600
+                    if age_hours < DEEP_POSTMORTEM_INTERVAL_HOURS:
+                        return  # too recent, skip
+                except (ValueError, TypeError):
+                    pass
+
+    # Gather all postmortem memories from last 72h
+    pms = fetch(f"/api/memory?category=postmortem&hours={DEEP_POSTMORTEM_INTERVAL_HOURS}")
+    if "error" in pms:
+        return
+    pm_list = pms.get("memories", [])
+    if len(pm_list) < 3:
+        return  # not enough data for deep analysis
+
+    log_fn(f"\n  === Deep Post-Mortem ({len(pm_list)} trades reviewed) ===")
+
+    # Aggregate patterns
+    pair_losses: dict[str, list[float]] = {}
+    diagnosis_counts: dict[str, int] = {}
+    exit_reason_counts: dict[str, int] = {}
+    for pm in pm_list:
+        c = pm.get("content", {})
+        pair = c.get("pair", "?")
+        pnl = c.get("pnl", 0)
+        pair_losses.setdefault(pair, []).append(pnl)
+        for d in c.get("diagnosis", []):
+            diagnosis_counts[d] = diagnosis_counts.get(d, 0) + 1
+        er = c.get("exit_reason", "?")
+        exit_reason_counts[er] = exit_reason_counts.get(er, 0) + 1
+
+    # Report: repeat losers
+    repeat_losers = [(p, losses) for p, losses in pair_losses.items() if len(losses) >= 2]
+    if repeat_losers:
+        log_fn("  Repeat losers:")
+        for pair, losses in sorted(repeat_losers, key=lambda x: sum(x[1])):
+            log_fn(f"    {pair}: {len(losses)} losses, total ${sum(losses):.4f}")
+
+    # Report: common diagnoses
+    if diagnosis_counts:
+        log_fn("  Common patterns:")
+        for diag, count in sorted(diagnosis_counts.items(), key=lambda x: -x[1]):
+            log_fn(f"    {diag}: {count} occurrences")
+
+    # Report: exit reasons
+    log_fn("  Exit reasons:")
+    for er, count in sorted(exit_reason_counts.items(), key=lambda x: -x[1]):
+        log_fn(f"    {er}: {count}")
+
+    # Build summary for report file
+    summary = {
+        "period_hours": DEEP_POSTMORTEM_INTERVAL_HOURS,
+        "trades_reviewed": len(pm_list),
+        "repeat_losers": {p: len(losses) for p, losses in repeat_losers},
+        "diagnosis_counts": diagnosis_counts,
+        "exit_reason_counts": exit_reason_counts,
+        "total_loss": round(sum(pnl for losses in pair_losses.values() for pnl in losses), 4),
+    }
+
+    # Save report file
+    now = datetime.now(timezone.utc)
+    report_path = REVIEWS_DIR / f"deep_pm_{now.strftime('%Y-%m-%d_%H%M')}.md"
+    report_lines = [
+        f"# Deep Post-Mortem — {now.strftime('%Y-%m-%d %H:%M UTC')}",
+        f"\nTrades reviewed: {len(pm_list)}",
+        f"Total loss: ${summary['total_loss']:.4f}",
+    ]
+    if repeat_losers:
+        report_lines.append("\n## Repeat Losers")
+        for pair, losses in sorted(repeat_losers, key=lambda x: sum(x[1])):
+            report_lines.append(f"- {pair}: {len(losses)} losses, ${sum(losses):.4f}")
+    if diagnosis_counts:
+        report_lines.append("\n## Patterns")
+        for diag, count in sorted(diagnosis_counts.items(), key=lambda x: -x[1]):
+            report_lines.append(f"- {diag}: {count}x")
+    report_path.write_text("\n".join(report_lines), encoding="utf-8")
+    log_fn(f"  Deep PM report: {report_path}")
+
+    # Write to memory
+    fetch("/api/memory", method="POST", data={
+        "category": "deep_postmortem",
+        "content": summary, "importance": 0.9,
+    })
+
+
 def check_pending_orders(log_fn, dry_run: bool) -> None:
     """Cancel brain-placed orders that haven't filled within STALE_ORDER_HOURS."""
     pending = fetch("/api/memory?category=pending_order&hours=24")
@@ -797,7 +946,15 @@ def run_brain(dry_run: bool = False) -> str:
         log("Trade outcomes unavailable")
         recent_trades = []
 
-    # Step 4b: Self-tune parameters based on post-mortem patterns
+    # 4a: Immediate post-mortem on losing trades
+    losers = [t for t in recent_trades if float(t.get("net_pnl", 0)) < 0]
+    if losers:
+        immediate_postmortem(losers, log)
+
+    # 4b: Deep post-mortem (every 72h) — aggregate patterns, write report
+    deep_postmortem(log)
+
+    # 4c: Self-tune parameters based on post-mortem patterns
     self_tune(recent_trades, analyses, log)
 
     # === Step 5: Decide ===
