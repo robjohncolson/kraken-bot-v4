@@ -476,6 +476,37 @@ def create_cc_router(
             _log.warning("Kronos prediction failed for %s: %s", pair, exc)
             raise HTTPException(status_code=500, detail="Prediction failed") from exc
 
+    @router.get("/regime/{pair:path}")
+    async def get_regime(
+        pair: str,
+        interval: int = 60,
+        count: int = 300,
+    ) -> dict[str, Any]:
+        """HMM regime detection — returns P(trending), P(ranging), P(volatile)."""
+        from trading.regime_detector import detect_regime
+
+        def _run_regime() -> dict[str, Any]:
+            bars = fetch_ohlcv(pair, interval=interval, count=count)
+            result = detect_regime(bars)
+            return {
+                "pair": pair,
+                "interval": interval,
+                "bars_used": len(bars),
+                "regime": result.regime,
+                "confidence": result.confidence,
+                "probabilities": result.probabilities,
+                "trade_gate": result.trade_gate,
+            }
+
+        try:
+            loop = asyncio.get_event_loop()
+            return await loop.run_in_executor(None, _run_regime)
+        except OHLCVFetchError as exc:
+            raise HTTPException(status_code=404, detail="OHLCV data unavailable") from exc
+        except Exception as exc:
+            _log.warning("Regime detection failed for %s: %s", pair, exc)
+            raise HTTPException(status_code=500, detail="Regime detection failed") from exc
+
     def get_state_for_cc() -> DashboardState:
         return state_provider()
 
