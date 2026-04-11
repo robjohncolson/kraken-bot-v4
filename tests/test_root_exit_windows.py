@@ -466,6 +466,125 @@ class TestUnrealizedPnL:
         assert child_snap.realized_pnl is not None
         assert Decimal(child_snap.realized_pnl) == Decimal("20")
 
+    def test_quote_root_pnl_aggregates_children(self):
+        from guardian import PriceSnapshot as PS
+        from runtime_loop import _build_rotation_tree_snapshot
+
+        root = _make_root("USD", qty=Decimal("228"))
+        root = replace(root, entry_cost=Decimal("228"))
+        child_win = RotationNode(
+            node_id="root-usd-eth-0",
+            parent_node_id=root.node_id,
+            depth=1,
+            asset="ETH",
+            quantity_total=Decimal("1"),
+            quantity_free=Decimal("1"),
+            status=RotationNodeStatus.OPEN,
+            entry_pair="ETH/USD",
+            from_asset="USD",
+            order_side=OrderSide.BUY,
+            entry_price=Decimal("20"),
+            fill_price=Decimal("20"),
+            entry_cost=Decimal("20"),
+        )
+        child_loss = RotationNode(
+            node_id="root-usd-sol-0",
+            parent_node_id=root.node_id,
+            depth=1,
+            asset="SOL",
+            quantity_total=Decimal("1"),
+            quantity_free=Decimal("1"),
+            status=RotationNodeStatus.OPEN,
+            entry_pair="SOL/USD",
+            from_asset="USD",
+            order_side=OrderSide.BUY,
+            entry_price=Decimal("20"),
+            fill_price=Decimal("20"),
+            entry_cost=Decimal("20"),
+        )
+        tree = _make_tree(root, child_win, child_loss)
+        prices = {
+            "ETH/USD": PS(price=Decimal("30")),
+            "SOL/USD": PS(price=Decimal("15")),
+        }
+
+        snap = _build_rotation_tree_snapshot(tree, current_prices=prices)
+        root_snap = next(node for node in snap.nodes if node.node_id == root.node_id)
+
+        assert root_snap.realized_pnl == "5"
+
+    def test_quote_root_mixed_closed_open(self):
+        from guardian import PriceSnapshot as PS
+        from runtime_loop import _build_rotation_tree_snapshot
+
+        root = _make_root("USD", qty=Decimal("200"))
+        root = replace(root, entry_cost=Decimal("200"))
+        closed_child = RotationNode(
+            node_id="root-usd-eth-0",
+            parent_node_id=root.node_id,
+            depth=1,
+            asset="ETH",
+            quantity_total=Decimal("1"),
+            quantity_free=Decimal("0"),
+            status=RotationNodeStatus.CLOSED,
+            entry_pair="ETH/USD",
+            from_asset="USD",
+            order_side=OrderSide.BUY,
+            entry_price=Decimal("100"),
+            fill_price=Decimal("100"),
+            entry_cost=Decimal("100"),
+            exit_price=Decimal("110"),
+            exit_proceeds=Decimal("110"),
+        )
+        open_child = RotationNode(
+            node_id="root-usd-sol-0",
+            parent_node_id=root.node_id,
+            depth=1,
+            asset="SOL",
+            quantity_total=Decimal("1"),
+            quantity_free=Decimal("1"),
+            status=RotationNodeStatus.OPEN,
+            entry_pair="SOL/USD",
+            from_asset="USD",
+            order_side=OrderSide.BUY,
+            entry_price=Decimal("20"),
+            fill_price=Decimal("20"),
+            entry_cost=Decimal("20"),
+        )
+        tree = _make_tree(root, closed_child, open_child)
+        prices = {"SOL/USD": PS(price=Decimal("17"))}
+
+        snap = _build_rotation_tree_snapshot(tree, current_prices=prices)
+        root_snap = next(node for node in snap.nodes if node.node_id == root.node_id)
+
+        assert root_snap.realized_pnl == "7"
+
+    def test_non_quote_root_pnl_unchanged(self):
+        from guardian import PriceSnapshot as PS
+        from runtime_loop import _build_rotation_tree_snapshot
+
+        root = _make_root("BTC", qty=Decimal("2"))
+        root = replace(root, entry_cost=Decimal("180"))
+        tree = _make_tree(root)
+        prices = {"BTC/USD": PS(price=Decimal("100"))}
+
+        snap = _build_rotation_tree_snapshot(tree, current_prices=prices)
+        root_snap = next(node for node in snap.nodes if node.node_id == root.node_id)
+
+        assert root_snap.realized_pnl == "20"
+
+    def test_quote_root_no_children_zero(self):
+        from runtime_loop import _build_rotation_tree_snapshot
+
+        root = _make_root("USD", qty=Decimal("25"))
+        root = replace(root, entry_cost=Decimal("100"))
+        tree = _make_tree(root)
+
+        snap = _build_rotation_tree_snapshot(tree)
+        root_snap = next(node for node in snap.nodes if node.node_id == root.node_id)
+
+        assert root_snap.realized_pnl == "0"
+
 
 # ---------------------------------------------------------------------------
 # Persistence round-trip: entry_cost survives restart

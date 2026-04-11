@@ -399,6 +399,7 @@ class RotationExitReason(StrEnum):
     TARGET = "target"
     PARENT_EXPIRED = "parent_expired"
     RECONCILIATION = "reconciliation"
+    RECOVERY_EXHAUSTED = "recovery_exhausted"
 
 
 @dataclass(frozen=True, slots=True)

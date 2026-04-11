@@ -23,6 +23,7 @@ from core.types import (
     Portfolio,
     Position,
     PositionSide,
+    RotationExitReason,
     RotationNode,
     RotationNodeStatus,
     RotationTreeState,
@@ -1031,6 +1032,161 @@ def test_evaluate_root_deadlines_sets_opened_at_once() -> None:
         )
         assert updated_again.opened_at == first_opened_at
         assert updated_again.deadline_at == first_deadline
+
+    asyncio.run(scenario())
+
+
+def test_recovery_exhausted_calls_close() -> None:
+    async def scenario() -> None:
+        runtime = _runtime()
+        root = RotationNode(
+            node_id="root-akt",
+            parent_node_id=None,
+            depth=0,
+            asset="AKT",
+            quantity_total=Decimal("10"),
+            quantity_free=Decimal("10"),
+            entry_pair="AKT/USD",
+            order_side=OrderSide.BUY,
+            status=RotationNodeStatus.EXPIRED,
+            recovery_count=3,
+        )
+        runtime._rotation_tree = RotationTreeState(
+            nodes=(root,),
+            root_node_ids=(root.node_id,),
+        )
+        runtime._pair_scanner = FakeRootPairScanner(
+            _bars_with_closes([1.0] * 50),
+            pairs=(("AKT/USD", "AKT", "USD"),),
+        )
+        runtime._root_usd_prices_at = 10**12
+
+        close_calls: list[dict[str, object]] = []
+
+        async def fake_close(
+            node, *, reason: str = "", now: datetime | None = None, order_type=None
+        ) -> None:
+            close_calls.append(
+                {"node_id": node.node_id, "reason": reason, "now": now}
+            )
+
+        runtime._close_rotation_node = fake_close  # type: ignore[method-assign]
+
+        await runtime._evaluate_root_deadlines(NOW)
+
+        assert close_calls == [
+            {
+                "node_id": root.node_id,
+                "reason": RotationExitReason.RECOVERY_EXHAUSTED.value,
+                "now": NOW,
+            }
+        ]
+        updated = next(
+            n for n in runtime._rotation_tree.nodes if n.node_id == root.node_id
+        )
+        assert updated.exit_reason == RotationExitReason.RECOVERY_EXHAUSTED.value
+
+    asyncio.run(scenario())
+
+
+def test_recovery_under_limit_resets_to_open() -> None:
+    async def scenario() -> None:
+        runtime = _runtime()
+        root = RotationNode(
+            node_id="root-akt",
+            parent_node_id=None,
+            depth=0,
+            asset="AKT",
+            quantity_total=Decimal("10"),
+            quantity_free=Decimal("10"),
+            status=RotationNodeStatus.EXPIRED,
+            deadline_at=NOW - timedelta(hours=1),
+            recovery_count=2,
+        )
+        runtime._rotation_tree = RotationTreeState(
+            nodes=(root,),
+            root_node_ids=(root.node_id,),
+        )
+        runtime._pair_scanner = FakeRootPairScanner(
+            _bars_with_closes([1.0] * 50),
+            pairs=(("AKT/USD", "AKT", "USD"),),
+        )
+        runtime._root_usd_prices_at = 10**12
+
+        close_calls: list[str] = []
+
+        async def fake_close(
+            node, *, reason: str = "", now: datetime | None = None, order_type=None
+        ) -> None:
+            del node, reason, now, order_type
+            close_calls.append("called")
+
+        runtime._close_rotation_node = fake_close  # type: ignore[method-assign]
+
+        await runtime._evaluate_root_deadlines(NOW)
+
+        updated = next(
+            n for n in runtime._rotation_tree.nodes if n.node_id == root.node_id
+        )
+        assert updated.status == RotationNodeStatus.OPEN
+        assert updated.deadline_at is None
+        assert updated.recovery_count == 3
+        assert close_calls == []
+
+    asyncio.run(scenario())
+
+
+def test_recovery_exhausted_no_entry_pair() -> None:
+    async def scenario() -> None:
+        runtime = _runtime()
+        root = RotationNode(
+            node_id="root-akt",
+            parent_node_id=None,
+            depth=0,
+            asset="AKT",
+            quantity_total=Decimal("10"),
+            quantity_free=Decimal("10"),
+            order_side=OrderSide.BUY,
+            status=RotationNodeStatus.EXPIRED,
+            recovery_count=3,
+        )
+        runtime._rotation_tree = RotationTreeState(
+            nodes=(root,),
+            root_node_ids=(root.node_id,),
+        )
+        runtime._pair_scanner = FakeRootPairScanner(
+            _bars_with_closes([1.0] * 50),
+            pairs=(("AKT/USD", "AKT", "USD"),),
+        )
+        runtime._root_usd_prices_at = 10**12
+
+        close_calls: list[dict[str, object]] = []
+        real_close = runtime._close_rotation_node
+
+        async def spy_close(
+            node, *, reason: str = "", now: datetime | None = None, order_type=None
+        ) -> None:
+            close_calls.append(
+                {"node_id": node.node_id, "reason": reason, "now": now}
+            )
+            await real_close(node, reason=reason, now=now, order_type=order_type)
+
+        runtime._close_rotation_node = spy_close  # type: ignore[method-assign]
+
+        await runtime._evaluate_root_deadlines(NOW)
+
+        assert close_calls == [
+            {
+                "node_id": root.node_id,
+                "reason": RotationExitReason.RECOVERY_EXHAUSTED.value,
+                "now": NOW,
+            }
+        ]
+        updated = next(
+            n for n in runtime._rotation_tree.nodes if n.node_id == root.node_id
+        )
+        assert updated.status == RotationNodeStatus.EXPIRED
+        assert updated.exit_reason == RotationExitReason.RECOVERY_EXHAUSTED.value
 
     asyncio.run(scenario())
 

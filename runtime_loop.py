@@ -39,6 +39,7 @@ from core.types import (
     Position,
     PositionSide,
     RotationEvent,
+    RotationExitReason,
     RotationNode,
     RotationNodeStatus,
     RotationTreeState,
@@ -1964,11 +1965,19 @@ class SchedulerRuntime:
             # Recover EXPIRED roots — reset to OPEN so they get re-evaluated (max 3 attempts)
             if node.status == RotationNodeStatus.EXPIRED:
                 if node.recovery_count >= 3:
-                    logger.info(
-                        "Root %s (%s) exhausted %d recovery attempts — staying EXPIRED",
+                    logger.warning(
+                        "Root %s (%s) exhausted %d recovery attempts — force-closing",
                         node.node_id,
                         node.asset,
                         node.recovery_count,
+                    )
+                    self._rotation_tree = update_node(
+                        self._rotation_tree,
+                        node.node_id,
+                        exit_reason=RotationExitReason.RECOVERY_EXHAUSTED.value,
+                    )
+                    await self._close_rotation_node(
+                        node, reason="recovery_exhausted", now=now
                     )
                     continue
                 self._rotation_tree = update_node(
@@ -2782,6 +2791,10 @@ def _compute_rotation_tree_value(
     return str(round(total, 2))
 
 
+# USD-pegged roots: P&L shows children aggregate (deployed capital is not a loss)
+_STABLECOIN_ROOTS: frozenset[str] = frozenset({"USD", "USDT", "USDC"})
+
+
 def _build_rotation_tree_snapshot(
     tree: RotationTreeState | None,
     *,
@@ -2824,6 +2837,37 @@ def _build_rotation_tree_snapshot(
     closed_count = 0
 
     node_snaps_list: list[RotationNodeSnapshot] = []
+    children_pnl: dict[str, Decimal] = {}
+    for cn in tree.nodes:
+        if cn.depth == 0 or cn.parent_node_id is None:
+            continue
+        cpnl = ZERO_DECIMAL
+        if (
+            cn.status == RotationNodeStatus.CLOSED
+            and cn.exit_proceeds is not None
+            and cn.entry_cost is not None
+        ):
+            cpnl = cn.exit_proceeds - cn.entry_cost
+        elif cn.status in (RotationNodeStatus.OPEN, RotationNodeStatus.CLOSING):
+            if (
+                cn.entry_pair
+                and cn.fill_price is not None
+                and cn.entry_cost is not None
+                and current_prices
+            ):
+                snap = current_prices.get(cn.entry_pair)
+                if snap is not None:
+                    cp = snap.price if hasattr(snap, "price") else snap
+                    if cp is not None:
+                        if cn.order_side == OrderSide.BUY:
+                            cpnl = (cp - cn.fill_price) * cn.quantity_total
+                        else:
+                            cpnl = (cn.fill_price - cp) * cn.quantity_total
+        if cpnl != ZERO_DECIMAL:
+            children_pnl[cn.parent_node_id] = (
+                children_pnl.get(cn.parent_node_id, ZERO_DECIMAL) + cpnl
+            )
+
     for n in tree.nodes:
         # Compute realized P&L for closed nodes (proceeds vs entry cost in parent denomination)
         realized_pnl = None
@@ -2847,11 +2891,15 @@ def _build_rotation_tree_snapshot(
             )
             and n.entry_cost is not None
         ):
-            usd_price = root_usd_prices.get(n.asset)
-            if usd_price and usd_price > ZERO_DECIMAL:
-                current_value = n.quantity_total * usd_price
-                pnl = current_value - n.entry_cost
-                realized_pnl = str(pnl)
+            if n.asset in _STABLECOIN_ROOTS:
+                agg = children_pnl.get(n.node_id, ZERO_DECIMAL)
+                realized_pnl = str(agg)
+            else:
+                usd_price = root_usd_prices.get(n.asset)
+                if usd_price and usd_price > ZERO_DECIMAL:
+                    current_value = n.quantity_total * usd_price
+                    pnl = current_value - n.entry_cost
+                    realized_pnl = str(pnl)
         elif n.depth > 0 and n.status in (
             RotationNodeStatus.OPEN,
             RotationNodeStatus.CLOSING,
