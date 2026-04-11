@@ -337,27 +337,23 @@ def parse_rotation_tree(data: dict[str, Any]) -> RotationTreeState:
 
 
 def parse_holdings(data: dict[str, Any]) -> list[HoldingRow]:
-    """Parse exchange_balances dict into HoldingRow list."""
+    """Parse /api/exchange-balances response into HoldingRow list."""
     rows: list[HoldingRow] = []
-    if isinstance(data, dict):
-        for asset, info in data.items():
-            if isinstance(info, dict):
-                rows.append(HoldingRow(
-                    asset=str(asset),
-                    balance=str(info.get("balance", "0")),
-                    available=str(info.get("available", "0")),
-                    value_usd=str(info.get("value_usd", "0")),
-                ))
-            else:
-                rows.append(HoldingRow(asset=str(asset), balance=str(info)))
-    elif isinstance(data, list):
-        for item in data:
-            rows.append(HoldingRow(
-                asset=str(item.get("asset", "")),
-                balance=str(item.get("balance", "0")),
-                available=str(item.get("available", "0")),
-                value_usd=str(item.get("value_usd", "0")),
-            ))
+    items = data.get("balances", []) if isinstance(data, dict) else data
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        avail = float(item.get("available", 0))
+        held = float(item.get("held", 0))
+        total = avail + held
+        if total <= 0:
+            continue
+        rows.append(HoldingRow(
+            asset=str(item.get("asset", "")),
+            balance=f"{total:.6f}",
+            available=f"{avail:.6f}",
+            value_usd="0",
+        ))
     return rows
 
 
@@ -367,7 +363,7 @@ def parse_memories(data: dict[str, Any] | list) -> list[MemoryRow]:
     if isinstance(data, list):
         items = data
     elif isinstance(data, dict):
-        items = data.get("items", [])
+        items = data.get("memories", data.get("items", []))
     else:
         items = []
     for item in items:
@@ -391,7 +387,7 @@ def parse_trade_outcomes(data: dict[str, Any] | list) -> list[TradeOutcomeRow]:
     if isinstance(data, list):
         items = data
     elif isinstance(data, dict):
-        items = data.get("items", [])
+        items = data.get("outcomes", data.get("items", []))
     else:
         items = []
     for item in items:
@@ -405,8 +401,8 @@ def parse_trade_outcomes(data: dict[str, Any] | list) -> list[TradeOutcomeRow]:
             net_pnl=str(item.get("net_pnl", "0")),
             fee_total=str(item.get("fee_total", "0")),
             exit_reason=str(item.get("exit_reason", "")),
-            hold_hours=float(item.get("hold_hours", 0.0)),
-            confidence=float(item.get("confidence", 0.0)),
+            hold_hours=float(item.get("hold_hours") or 0),
+            confidence=float(item.get("confidence") or 0),
             closed_at=str(item.get("closed_at", "")),
         ))
     return rows
