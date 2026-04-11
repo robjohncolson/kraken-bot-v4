@@ -60,6 +60,11 @@ DEFAULT_EXIT_LIMIT_OFFSET_PCT = 0.1
 DEFAULT_ROTATION_MAX_CHILDREN_PER_PARENT = 3
 DEFAULT_ROTATION_MIN_CONFIDENCE = 0.65
 DEFAULT_PAIR_METADATA_REFRESH_HOURS = 24
+DEFAULT_MTF_4H_GATE_ENABLED = False
+DEFAULT_MTF_ALIGNED_BOOST = 1.15
+DEFAULT_MTF_COUNTER_PENALTY = 0.3
+DEFAULT_MTF_15M_CONFIRM_ENABLED = False
+DEFAULT_MTF_15M_MAX_DEFERRALS = 6
 
 ALLOWED_KRAKEN_TIERS = frozenset({"starter", "intermediate", "pro"})
 TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
@@ -131,6 +136,11 @@ class Settings:
     pair_metadata_refresh_hours: int
     rotation_max_children_per_parent: int
     rotation_min_confidence: float
+    mtf_4h_gate_enabled: bool
+    mtf_aligned_boost: float
+    mtf_counter_penalty: float
+    mtf_15m_confirm_enabled: bool
+    mtf_15m_max_deferrals: int
     belief_model: str
     active_artifact_id: str | None
     shadow_artifact_id: str | None
@@ -313,6 +323,21 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
             env,
             "ROTATION_MIN_CONFIDENCE",
             DEFAULT_ROTATION_MIN_CONFIDENCE,
+        ),
+        mtf_4h_gate_enabled=_read_bool(
+            env, "MTF_4H_GATE_ENABLED", DEFAULT_MTF_4H_GATE_ENABLED,
+        ),
+        mtf_aligned_boost=_read_float(
+            env, "MTF_ALIGNED_BOOST", DEFAULT_MTF_ALIGNED_BOOST,
+        ),
+        mtf_counter_penalty=_read_float(
+            env, "MTF_COUNTER_PENALTY", DEFAULT_MTF_COUNTER_PENALTY,
+        ),
+        mtf_15m_confirm_enabled=_read_bool(
+            env, "MTF_15M_CONFIRM_ENABLED", DEFAULT_MTF_15M_CONFIRM_ENABLED,
+        ),
+        mtf_15m_max_deferrals=_read_int(
+            env, "MTF_15M_MAX_DEFERRALS", DEFAULT_MTF_15M_MAX_DEFERRALS,
         ),
         belief_model=env.get("BELIEF_MODEL", "technical_ensemble").strip(),
         active_artifact_id=_read_optional(env, "ACTIVE_ARTIFACT_ID"),

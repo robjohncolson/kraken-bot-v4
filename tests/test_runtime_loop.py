@@ -1343,5 +1343,164 @@ def test_monitor_rotation_prices_triggers_root_stop_loss_and_skips_quote_roots()
     asyncio.run(scenario())
 
 
+# ---------------------------------------------------------------------------
+# Phase 8B: 15M momentum confirmation gate tests
+# ---------------------------------------------------------------------------
+
+
+class FakeTechnicalSource15M:
+    """Fake technical source that returns a fixed belief for any pair/bars."""
+
+    def __init__(self, direction: BeliefDirection, confidence: float = 0.67) -> None:
+        self.direction = direction
+        self.confidence = confidence
+        self.min_bars = 10  # Low threshold so test bars pass
+
+    def analyze(self, pair: str, bars) -> BeliefSnapshot:
+        return BeliefSnapshot(
+            pair=pair,
+            direction=self.direction,
+            confidence=self.confidence,
+            regime=MarketRegime.TRENDING,
+            sources=(),
+        )
+
+
+class FakePairScannerWith15M:
+    """Minimal pair scanner with _technical_source for 15M gate."""
+
+    def __init__(self, direction: BeliefDirection) -> None:
+        self._technical_source = FakeTechnicalSource15M(direction)
+
+    def discover_asset_pairs(self, _asset):
+        return ()
+
+    def _ohlcv_fetcher(self, _pair, **_kw):
+        return _bars_with_closes([1.0] * 50)
+
+
+def _planned_child(node_id: str = "child-0", parent_id: str = "root-usd") -> RotationNode:
+    return RotationNode(
+        node_id=node_id,
+        parent_node_id=parent_id,
+        depth=1,
+        asset="ETH",
+        quantity_total=Decimal("1"),
+        quantity_free=Decimal("1"),
+        status=RotationNodeStatus.PLANNED,
+        entry_pair="ETH/USD",
+        from_asset="USD",
+        order_side=OrderSide.BUY,
+        entry_price=Decimal("20"),
+        confidence=0.8,
+    )
+
+
+def test_15m_opposing_defers_planned() -> None:
+    """15M bearish on BUY node → node stays PLANNED (deferred)."""
+
+    async def scenario() -> None:
+        runtime = _runtime(settings=_settings(MTF_15M_CONFIRM_ENABLED="true"))
+        child = _planned_child()
+        root = RotationNode(
+            node_id="root-usd", parent_node_id=None, depth=0, asset="USD",
+            quantity_total=Decimal("100"), quantity_free=Decimal("100"),
+            status=RotationNodeStatus.OPEN,
+        )
+        runtime._rotation_tree = RotationTreeState(
+            nodes=(root, child), root_node_ids=("root-usd",),
+        )
+        runtime._pair_scanner = FakePairScannerWith15M(BeliefDirection.BEARISH)
+
+        with patch("exchange.ohlcv.fetch_ohlcv", return_value=_bars_with_closes([1.0] * 50)):
+            await runtime._execute_rotation_entries(NOW)
+
+        node = next(n for n in runtime._rotation_tree.nodes if n.node_id == child.node_id)
+        assert node.status == RotationNodeStatus.PLANNED
+        assert runtime._mtf_15m_deferral_counts.get(child.node_id) == 1
+
+    asyncio.run(scenario())
+
+
+def test_15m_aligned_proceeds() -> None:
+    """15M bullish on BUY node → deferral count reset, execution proceeds."""
+
+    async def scenario() -> None:
+        runtime = _runtime(settings=_settings(MTF_15M_CONFIRM_ENABLED="true"))
+        child = _planned_child()
+        root = RotationNode(
+            node_id="root-usd", parent_node_id=None, depth=0, asset="USD",
+            quantity_total=Decimal("100"), quantity_free=Decimal("100"),
+            status=RotationNodeStatus.OPEN,
+        )
+        runtime._rotation_tree = RotationTreeState(
+            nodes=(root, child), root_node_ids=("root-usd",),
+        )
+        runtime._pair_scanner = FakePairScannerWith15M(BeliefDirection.BULLISH)
+        runtime._mtf_15m_deferral_counts["child-0"] = 3  # pre-set
+
+        with patch("exchange.ohlcv.fetch_ohlcv", return_value=_bars_with_closes([1.0] * 50)):
+            await runtime._execute_rotation_entries(NOW)
+
+        # Deferral count should be cleared on passthrough
+        assert "child-0" not in runtime._mtf_15m_deferral_counts
+
+    asyncio.run(scenario())
+
+
+def test_15m_max_deferrals_cancels() -> None:
+    """6 consecutive 15M rejections → node cancelled."""
+
+    async def scenario() -> None:
+        runtime = _runtime(settings=_settings(
+            MTF_15M_CONFIRM_ENABLED="true", MTF_15M_MAX_DEFERRALS="6",
+        ))
+        child = _planned_child()
+        root = RotationNode(
+            node_id="root-usd", parent_node_id=None, depth=0, asset="USD",
+            quantity_total=Decimal("100"), quantity_free=Decimal("100"),
+            status=RotationNodeStatus.OPEN,
+        )
+        runtime._rotation_tree = RotationTreeState(
+            nodes=(root, child), root_node_ids=("root-usd",),
+        )
+        runtime._pair_scanner = FakePairScannerWith15M(BeliefDirection.BEARISH)
+        runtime._mtf_15m_deferral_counts[child.node_id] = 5  # one more → cancel
+
+        with patch("exchange.ohlcv.fetch_ohlcv", return_value=_bars_with_closes([1.0] * 50)):
+            await runtime._execute_rotation_entries(NOW)
+
+        node = next(n for n in runtime._rotation_tree.nodes if n.node_id == child.node_id)
+        assert node.status == RotationNodeStatus.CANCELLED
+        assert child.node_id not in runtime._mtf_15m_deferral_counts
+
+    asyncio.run(scenario())
+
+
+def test_15m_gate_disabled() -> None:
+    """MTF_15M_CONFIRM_ENABLED=False → no 15M check, proceeds directly."""
+
+    async def scenario() -> None:
+        runtime = _runtime(settings=_settings(MTF_15M_CONFIRM_ENABLED="false"))
+        child = _planned_child()
+        root = RotationNode(
+            node_id="root-usd", parent_node_id=None, depth=0, asset="USD",
+            quantity_total=Decimal("100"), quantity_free=Decimal("100"),
+            status=RotationNodeStatus.OPEN,
+        )
+        runtime._rotation_tree = RotationTreeState(
+            nodes=(root, child), root_node_ids=("root-usd",),
+        )
+        # Pair scanner with BEARISH 15M — would block if enabled
+        runtime._pair_scanner = FakePairScannerWith15M(BeliefDirection.BEARISH)
+
+        # Should NOT defer — gate is disabled
+        await runtime._execute_rotation_entries(NOW)
+
+        assert child.node_id not in runtime._mtf_15m_deferral_counts
+
+    asyncio.run(scenario())
+
+
 async def _noop_publish(*, event: str, data, event_id: str | None = None) -> None:
     del event, data, event_id

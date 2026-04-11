@@ -30,6 +30,7 @@ from core.types import (
     CancelOrder,
     ClosePosition,
     FillConfirmed as CoreFillConfirmed,
+    BeliefDirection,
     LogEvent,
     OrderRequest,
     OrderSide,
@@ -277,6 +278,7 @@ class SchedulerRuntime:
         self._rotation_entry_retry_counts: dict[str, int] = {}
         self._rotation_pair_cooldowns: dict[str, float] = {}  # pair → monotonic expiry
         self._root_usd_prices: dict[str, Decimal] = {"USD": Decimal("1")}
+        self._mtf_15m_deferral_counts: dict[str, int] = {}
         self._root_usd_prices_at: float = 0.0  # monotonic timestamp
         # Load persisted cooldowns
         try:
@@ -1240,6 +1242,48 @@ class SchedulerRuntime:
                     self._rotation_tree, node.node_id
                 )
                 continue
+
+            # 15M momentum confirmation gate
+            if (
+                self._settings.mtf_15m_confirm_enabled
+                and node.entry_pair
+                and self._pair_scanner is not None
+            ):
+                try:
+                    from exchange.ohlcv import fetch_ohlcv as _fetch_ohlcv_15m
+
+                    _ta = self._pair_scanner._technical_source
+                    bars_15m = _fetch_ohlcv_15m(node.entry_pair, interval=15, count=50)
+                    if len(bars_15m) >= _ta.min_bars:
+                        belief_15m = _ta.analyze(
+                            node.entry_pair, bars_15m,
+                        )
+                        opposing = (
+                            (node.order_side == OrderSide.BUY and belief_15m.direction is BeliefDirection.BEARISH)
+                            or (node.order_side == OrderSide.SELL and belief_15m.direction is BeliefDirection.BULLISH)
+                        )
+                        if opposing:
+                            dc = self._mtf_15m_deferral_counts.get(node.node_id, 0) + 1
+                            self._mtf_15m_deferral_counts[node.node_id] = dc
+                            if dc >= self._settings.mtf_15m_max_deferrals:
+                                logger.info(
+                                    "15M opposed %s for %s %d times — cancelling",
+                                    node.order_side.value, node.entry_pair, dc,
+                                )
+                                self._rotation_tree = cancel_planned_node(
+                                    self._rotation_tree, node.node_id,
+                                )
+                                self._mtf_15m_deferral_counts.pop(node.node_id, None)
+                            else:
+                                logger.info(
+                                    "15M opposes %s entry for %s (%d/%d) — deferring",
+                                    node.order_side.value, node.entry_pair,
+                                    dc, self._settings.mtf_15m_max_deferrals,
+                                )
+                            continue
+                except Exception:
+                    pass  # Graceful degradation — proceed without 15M check
+                self._mtf_15m_deferral_counts.pop(node.node_id, None)
 
             # Compute base-asset quantity for the order
             base_qty = entry_base_quantity(

@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable, Mapping
+from dataclasses import replace
 from concurrent.futures import (
     Future,
     ThreadPoolExecutor,
@@ -387,6 +388,30 @@ class PairScanner:
             belief = self._technical_source.analyze(pair, bars)
         except Exception:
             return None
+
+        # 4H trend gate — adjust confidence by alignment with higher timeframe
+        if self._settings.mtf_4h_gate_enabled:
+            try:
+                bars_4h = self._ohlcv_fetcher(
+                    pair,
+                    interval=240,
+                    count=max(SCAN_BAR_COUNT, self._technical_source.min_bars),
+                    timeout=self._settings.scanner_timeout_sec,
+                )
+                if len(bars_4h) >= self._technical_source.min_bars:
+                    belief_4h = self._technical_source.analyze(pair, bars_4h)
+                    if belief_4h.direction == belief.direction:
+                        mtf_factor = self._settings.mtf_aligned_boost
+                    elif belief_4h.direction is BeliefDirection.NEUTRAL:
+                        mtf_factor = 1.0
+                    else:
+                        mtf_factor = self._settings.mtf_counter_penalty
+                    belief = replace(
+                        belief,
+                        confidence=min(1.0, belief.confidence * mtf_factor),
+                    )
+            except Exception:
+                pass  # Graceful degradation — use 1H confidence as-is
 
         # For a BUY rotation (buying dest), we want dest to be bullish
         # For a SELL rotation (selling source for quote), we want source to be bearish

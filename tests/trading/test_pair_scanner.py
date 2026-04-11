@@ -384,3 +384,135 @@ def _sleepy_ohlcv_fetcher(pair: str, **kwargs) -> pd.DataFrame:
     del pair, kwargs
     time.sleep(0.05)
     return _bars_from_close(_up_saw_closes())
+
+
+# ---------------------------------------------------------------------------
+# Phase 8A: 4H trend gate tests
+# ---------------------------------------------------------------------------
+
+
+class SequentialFakeSource:
+    """Returns beliefs in order of calls (1st call = beliefs[0], 2nd = beliefs[1], ...)."""
+
+    def __init__(self, beliefs: list[BeliefSnapshot], *, min_bars: int = 40) -> None:
+        self._beliefs = beliefs
+        self._idx = 0
+        self.min_bars = min_bars
+
+    def analyze(self, pair: str, bars: pd.DataFrame) -> BeliefSnapshot:
+        result = self._beliefs[self._idx % len(self._beliefs)]
+        self._idx += 1
+        return result
+
+
+def test_scan_4h_aligned_boosts_confidence() -> None:
+    """1H bullish (0.67) + 4H bullish → confidence boosted by 1.15x."""
+    source = SequentialFakeSource([
+        _belief("BTC/USD", BeliefDirection.BULLISH, 0.67),  # 1H
+        _belief("BTC/USD", BeliefDirection.BULLISH, 0.83),  # 4H (same direction)
+    ])
+    bars = _bars_from_close(_up_saw_closes(), volume=5000.0)
+    scanner = PairScanner(
+        client=_client(),
+        settings=_settings(MTF_4H_GATE_ENABLED="true"),
+        technical_source=source,
+        ohlcv_fetcher=lambda pair, **kwargs: bars,
+    )
+
+    result = scanner._scan_rotation_pair("BTC/USD", "USD", "BTC", OrderSide.BUY, None)
+
+    assert result is not None
+    assert abs(result.confidence - 0.67 * 1.15) < 1e-9
+
+
+def test_scan_4h_counter_penalizes_confidence() -> None:
+    """1H bullish (0.67) + 4H bearish → confidence * 0.3 = 0.20, likely below threshold."""
+    source = SequentialFakeSource([
+        _belief("BTC/USD", BeliefDirection.BULLISH, 0.67),  # 1H
+        _belief("BTC/USD", BeliefDirection.BEARISH, 0.83),  # 4H (opposing)
+    ])
+    bars = _bars_from_close(_up_saw_closes(), volume=5000.0)
+    scanner = PairScanner(
+        client=_client(),
+        settings=_settings(MTF_4H_GATE_ENABLED="true"),
+        technical_source=source,
+        ohlcv_fetcher=lambda pair, **kwargs: bars,
+    )
+
+    result = scanner._scan_rotation_pair("BTC/USD", "USD", "BTC", OrderSide.BUY, None)
+
+    assert result is not None
+    assert abs(result.confidence - 0.67 * 0.3) < 1e-9
+
+
+def test_scan_4h_neutral_passthrough() -> None:
+    """4H neutral → confidence unchanged (factor 1.0)."""
+    source = SequentialFakeSource([
+        _belief("BTC/USD", BeliefDirection.BULLISH, 0.67),  # 1H
+        _belief("BTC/USD", BeliefDirection.NEUTRAL, 0.33),  # 4H neutral
+    ])
+    bars = _bars_from_close(_up_saw_closes(), volume=5000.0)
+    scanner = PairScanner(
+        client=_client(),
+        settings=_settings(MTF_4H_GATE_ENABLED="true"),
+        technical_source=source,
+        ohlcv_fetcher=lambda pair, **kwargs: bars,
+    )
+
+    result = scanner._scan_rotation_pair("BTC/USD", "USD", "BTC", OrderSide.BUY, None)
+
+    assert result is not None
+    assert result.confidence == 0.67
+
+
+def test_scan_4h_fetch_failure_graceful() -> None:
+    """OHLCVFetchError on 4H → candidate produced with original confidence."""
+    from exchange.ohlcv import OHLCVFetchError
+
+    call_count = {"n": 0}
+
+    def fetcher(pair: str, **kwargs) -> pd.DataFrame:
+        call_count["n"] += 1
+        if kwargs.get("interval") == 240:
+            raise OHLCVFetchError("4H unavailable")
+        return _bars_from_close(_up_saw_closes(), volume=5000.0)
+
+    source = FakeTechnicalSource(
+        {"BTC/USD": _belief("BTC/USD", BeliefDirection.BULLISH, 0.67)},
+    )
+    scanner = PairScanner(
+        client=_client(),
+        settings=_settings(MTF_4H_GATE_ENABLED="true"),
+        technical_source=source,
+        ohlcv_fetcher=fetcher,
+    )
+
+    result = scanner._scan_rotation_pair("BTC/USD", "USD", "BTC", OrderSide.BUY, None)
+
+    assert result is not None
+    assert result.confidence == 0.67
+
+
+def test_scan_4h_gate_disabled() -> None:
+    """MTF_4H_GATE_ENABLED=False → no 4H fetch, original confidence."""
+    call_intervals: list[int] = []
+
+    def fetcher(pair: str, **kwargs) -> pd.DataFrame:
+        call_intervals.append(kwargs.get("interval", 60))
+        return _bars_from_close(_up_saw_closes(), volume=5000.0)
+
+    source = FakeTechnicalSource(
+        {"BTC/USD": _belief("BTC/USD", BeliefDirection.BULLISH, 0.67)},
+    )
+    scanner = PairScanner(
+        client=_client(),
+        settings=_settings(MTF_4H_GATE_ENABLED="false"),
+        technical_source=source,
+        ohlcv_fetcher=fetcher,
+    )
+
+    result = scanner._scan_rotation_pair("BTC/USD", "USD", "BTC", OrderSide.BUY, None)
+
+    assert result is not None
+    assert result.confidence == 0.67
+    assert 240 not in call_intervals
