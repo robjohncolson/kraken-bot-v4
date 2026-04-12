@@ -7,10 +7,12 @@
 #   pwsh -File scripts/dev_loop.ps1                # normal run
 #   pwsh -File scripts/dev_loop.ps1 -DryRun        # observe + diagnose only, no writes
 #   pwsh -File scripts/dev_loop.ps1 -Force         # bypass gates (manual fire only)
+#   pwsh -File scripts/dev_loop.ps1 -SkipChallenge # skip Codex challenge on no_action
 
 param(
     [switch]$DryRun,
-    [switch]$Force
+    [switch]$Force,
+    [switch]$SkipChallenge
 )
 
 $ErrorActionPreference = "Stop"
@@ -464,8 +466,125 @@ if ($yamlMatch.Success) {
     Write-RunLog "WARN: no YAML summary block found in claude output"
 }
 
+$orchDocEntryOverride = $null
+$challengeEscalated = $false
+
+# CHALLENGE no_action verdicts
+if ($parsedStatus -eq "no_action" -and -not $SkipChallenge -and -not $DryRun) {
+    $challengeKeywordPattern = '(?i)(benign|deferred|below threshold|cosmetic|no action needed|matches held)'
+    $challengeFinding = $null
+
+    $matchingLines = @(
+        $claudeResponseText -split "\r?\n" |
+        ForEach-Object { $_.Trim() } |
+        Where-Object { $_ -and $_ -match $challengeKeywordPattern }
+    )
+    if ($matchingLines.Count -gt 0) {
+        $challengeFinding = $matchingLines[0]
+    } else {
+        $sentenceMatches = [regex]::Matches($claudeResponseText, '(?ms)[^.!?\r\n]+(?:[.!?]|$)')
+        foreach ($sentenceMatch in $sentenceMatches) {
+            $candidate = $sentenceMatch.Value.Trim()
+            if ($candidate -and $candidate -match $challengeKeywordPattern) {
+                $challengeFinding = $candidate
+                break
+            }
+        }
+    }
+
+    if (-not $challengeFinding) {
+        Write-RunLog "no challenge target found"
+    } else {
+        $challengeOwnedPath = "state/dev-loop/challenge-$Ts.md"
+        $challengeFile = Join-Path $RepoRoot $challengeOwnedPath
+        $challengePrompt = @"
+You are challenging the CC orchestrator's no_action verdict. The orchestrator observed kraken-bot-v4 state and concluded no action is warranted.
+
+ORCHESTRATOR VERDICT (verbatim):
+$claudeResponseText
+
+SPECIFIC FINDING TO VERIFY:
+$challengeFinding
+
+YOUR TASK:
+Read the relevant code (runtime_loop.py, web/routes.py, scripts/cc_brain.py, persistence/sqlite.py) and query data/bot.db directly to verify or refute the verdict. Do not trust the orchestrator's narrative. Look at the actual data.
+
+Write your conclusion to $challengeOwnedPath with this structure:
+---
+verdict: agree | disagree
+evidence:
+- <specific facts you observed>
+recommended_action: <only if disagree - what spec should be dispatched>
+---
+
+Be terse. Do not write a long essay. The point is fast independent verification.
+"@
+
+        $challengeFailureReason = $null
+        try {
+            $challengeOutput = & "C:/Python313/python.exe" "/c/Users/rober/Downloads/Projects/Agent/runner/cross-agent.py" `
+                "--direction" "cc-to-codex" `
+                "--task-type" "investigate" `
+                "--working-dir" $RepoRoot `
+                "--owned-paths" $challengeOwnedPath `
+                "--timeout" "600" `
+                "--prompt" $challengePrompt 2>&1
+            $challengeExitCode = $LASTEXITCODE
+        } catch {
+            $challengeExitCode = 1
+            $challengeOutput = @($_.Exception.Message)
+        }
+
+        if ($challengeExitCode -ne 0) {
+            $challengeOutputText = (($challengeOutput | ForEach-Object { "$_" }) -join " ").Trim()
+            if ($challengeOutputText.Length -gt 240) {
+                $challengeOutputText = $challengeOutputText.Substring(0, 240) + "..."
+            }
+            $challengeFailureReason = "exit=$challengeExitCode"
+            if ($challengeOutputText) {
+                $challengeFailureReason += " $challengeOutputText"
+            }
+        } elseif (-not (Test-Path $challengeFile)) {
+            $challengeFailureReason = "result file missing at $challengeOwnedPath"
+        } else {
+            $challengeResultText = Get-Content -Path $challengeFile -Raw
+            $verdictMatch = [regex]::Match($challengeResultText, '(?im)^\s*verdict:\s*(agree|disagree)\s*$')
+            if (-not $verdictMatch.Success) {
+                $challengeFailureReason = "verdict not found in $challengeOwnedPath"
+            } else {
+                $challengeVerdict = $verdictMatch.Groups[1].Value.ToLowerInvariant()
+                Write-RunLog "challenge verdict: $challengeVerdict"
+                if ($challengeVerdict -eq "disagree") {
+                    $escalateLines = @(
+                        "# Codex Challenge Escalation"
+                        ""
+                        "original orchestrator verdict:"
+                        $claudeResponseText
+                        ""
+                        "codex challenge result file: $challengeOwnedPath"
+                        ""
+                        "next steps:"
+                        "- Read $challengeOwnedPath"
+                        "- Compare Codex evidence against the orchestrator verdict above"
+                        "- Decide which follow-up spec should be dispatched"
+                    )
+                    Set-Content -Path $EscalFile -Value ($escalateLines -join "`n")
+                    $challengeEscalated = $true
+                    $orchDocEntryOverride = "- $Ts UTC -- **challenged** (codex disagrees)"
+                } elseif ($challengeVerdict -eq "agree") {
+                    $orchDocEntryOverride = "- $Ts UTC -- **no_action** (codex agreed)"
+                }
+            }
+        }
+
+        if ($challengeFailureReason) {
+            Write-RunLog "challenge dispatch failed: $challengeFailureReason"
+        }
+    }
+}
+
 # Check for escalation
-if ((Test-Path $EscalFile) -or $parsedStatus -eq "escalated") {
+if ((Test-Path $EscalFile) -or $parsedStatus -eq "escalated" -or $challengeEscalated) {
     Write-RunLog "ESCALATED -- incrementing consecutive_failures"
     $state.consecutive_failures += 1
 } else {
@@ -502,7 +621,11 @@ if ($parsedCommit) {
     $entryParts += "commit=$shortHash"
 }
 if ($parsedRestart -ne "none" -and $parsedRestart -ne "unknown") { $entryParts += "restarted=$parsedRestart" }
-Update-Orch-Doc ($entryParts -join " ")
+if ($orchDocEntryOverride) {
+    Update-Orch-Doc $orchDocEntryOverride
+} else {
+    Update-Orch-Doc ($entryParts -join " ")
+}
 
 # Write the per-run summary
 $summaryLines = @(
