@@ -1,0 +1,64 @@
+{
+  "version": 1,
+  "batch_name": "kraken-bot-hardening",
+  "target_branch": "master",
+  "base_ref": "master",
+  "codex_approval_mode": "suggest",
+  "verify_commands": [
+    "python -c \"import ast; ast.parse(open('scripts/cc_brain.py').read()); print('OK')\""
+  ],
+  "agents": [
+    {
+      "name": "01-floor-round",
+      "description": "Floor-round sell quantities to avoid insufficient-funds rejections on CRV/COMP",
+      "prompt_file": "C:/Users/rober/Downloads/Projects/Agent/dispatch/prompts/kraken-bot-hardening/01-floor-round.md",
+      "owned_paths": [
+        "scripts/cc_brain.py"
+      ]
+    },
+    {
+      "name": "02-open-orders",
+      "description": "Add /api/open-orders endpoint and authoritative ghost-order cancellation for AUD/USD ghost",
+      "prompt_file": "C:/Users/rober/Downloads/Projects/Agent/dispatch/prompts/kraken-bot-hardening/02-open-orders.md",
+      "owned_paths": [
+        "web/routes.py",
+        "scripts/cc_brain.py",
+        "main.py"
+      ]
+    },
+    {
+      "name": "03-fiat-filter",
+      "description": "Exclude non-USD fiat (EUR/GBP/AUD/CAD/CHF/JPY) from check_exits and evaluate_portfolio",
+      "prompt_file": "C:/Users/rober/Downloads/Projects/Agent/dispatch/prompts/kraken-bot-hardening/03-fiat-filter.md",
+      "owned_paths": [
+        "scripts/cc_brain.py"
+      ],
+      "depends_on": ["01-floor-round"]
+    },
+    {
+      "name": "04-extended-veto",
+      "description": "Hybrid shadow veto: redirect entries to shadow's preferred asset or hard-veto when no redirect possible",
+      "prompt_file": "C:/Users/rober/Downloads/Projects/Agent/dispatch/prompts/kraken-bot-hardening/04-extended-veto.md",
+      "owned_paths": [
+        "scripts/cc_brain.py"
+      ],
+      "depends_on": ["03-fiat-filter"]
+    },
+    {
+      "name": "05-backfill-analysis",
+      "description": "Run backfill_shadow with 6h forward window and write analysis result",
+      "prompt_file": "C:/Users/rober/Downloads/Projects/Agent/dispatch/prompts/kraken-bot-hardening/05-backfill-analysis.md",
+      "owned_paths": [
+        "tasks/specs/05-backfill-6h-analysis.result.md",
+        "scripts/backfill_shadow.py"
+      ]
+    }
+  ],
+  "merge": {
+    "enabled": true,
+    "commit_prefix": "CC merge pass: kraken-bot-hardening",
+    "verify_commands": [
+      "python -c \"import ast; ast.parse(open('scripts/cc_brain.py').read()); print('OK')\""
+    ]
+  }
+}
