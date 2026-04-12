@@ -76,9 +76,11 @@ def compute_stability(volume_usd_24h: float, volatility_pct: float) -> float:
     """Asset stability: 0.0 = volatile micro-cap, 1.0 = stable blue-chip.
 
     Uses 24h USD volume as market-cap proxy and predicted volatility as risk.
+    Log-scale range is calibrated so the highest-volume Kraken asset (USD
+    quote currency, ~$300M/day in routed volume) reaches vol_score = 1.0.
     """
     import math
-    vol_score = min(1.0, max(0.0, (math.log10(max(1, volume_usd_24h)) - 4.7) / 4.3))
+    vol_score = min(1.0, max(0.0, (math.log10(max(1, volume_usd_24h)) - 4.7) / 3.8))
     vol_penalty = min(1.0, volatility_pct / 10.0)  # 10%+ daily vol = full penalty
     return round(vol_score * (1.0 - 0.5 * vol_penalty), 4)
 
@@ -162,21 +164,53 @@ def discover_all_pairs(
 
 
 def get_asset_volumes() -> dict[str, float]:
-    """Get 24h USD volume per asset (sum across all USD pairs)."""
+    """Get 24h USD volume attributed to each asset.
+
+    Currency-agnostic: both base and quote assets are credited with each
+    pair's USD volume. BTC gains volume from BTC/USD (as base) and from
+    all */BTC cross-pairs (as quote), just as USD gains volume from all
+    */USD pairs (as quote). This replaces a USD-only scan that incorrectly
+    scored USD and other quote currencies at zero.
+    """
     try:
         all_pairs = _fetch_kraken_pairs()
-        usd_pairs = {n: p for n, p in all_pairs.items() if p["quote"] == "USD"}
-        tickers = _fetch_tickers(usd_pairs)
+        # Kraken rejects Ticker requests with too many pairs (~1000+), so chunk.
+        pair_items = list(all_pairs.items())
+        tickers: dict[str, dict] = {}
+        for i in range(0, len(pair_items), 500):
+            tickers.update(_fetch_tickers(dict(pair_items[i:i + 500])))
     except Exception:
         return {}
 
+    # Pass 1: build USD price map from USD-quoted pairs so non-USD pairs
+    # (e.g., SOL/BTC, BTC/EUR) can be valued in USD.
+    usd_prices: dict[str, float] = {"USD": 1.0}
+    for norm, ticker in tickers.items():
+        info = all_pairs.get(norm)
+        if not info or info["quote"] != "USD":
+            continue
+        try:
+            usd_prices[info["base"]] = float(ticker["c"][0])
+        except (KeyError, ValueError, IndexError):
+            continue
+
+    # Pass 2: credit both base and quote for every pair we can value.
     volumes: dict[str, float] = {}
     for norm, ticker in tickers.items():
-        info = usd_pairs.get(norm)
+        info = all_pairs.get(norm)
         if not info:
             continue
-        vol_usd = float(ticker["v"][1]) * float(ticker["c"][0])
+        quote_usd = usd_prices.get(info["quote"])
+        if quote_usd is None:
+            continue
+        try:
+            vol_usd = float(ticker["v"][1]) * float(ticker["c"][0]) * quote_usd
+        except (KeyError, ValueError, IndexError):
+            continue
+        if vol_usd <= 0:
+            continue
         volumes[info["base"]] = volumes.get(info["base"], 0) + vol_usd
+        volumes[info["quote"]] = volumes.get(info["quote"], 0) + vol_usd
     return volumes
 
 
@@ -446,6 +480,72 @@ def rotation_threshold(source_stability: float) -> float:
     Stable assets (BTC, ETH) need a bigger improvement to justify rotation.
     """
     return 0.10 + 0.20 * source_stability  # 0.10 for volatile micro, 0.30 for BTC
+
+
+def invert_analysis(a: dict) -> dict:
+    """Mirror a pair analysis to the opposite (quote) direction.
+
+    Flips direction-dependent signals so score_entry returns the "hold-quote"
+    score instead of the "hold-base" score. Regime and trade_gate are
+    direction-agnostic and pass through unchanged. RSI inversion uses the
+    100 - rsi approximation (not mathematically exact, but within noise).
+    """
+    flipped = dict(a)
+    if "/" in a.get("pair", ""):
+        b, q = a["pair"].split("/", 1)
+        flipped["pair"] = f"{q}/{b}"
+    if a.get("price", 0) > 0:
+        flipped["price"] = 1.0 / a["price"]
+
+    trend_flip = {"UP": "DOWN", "DOWN": "UP", "UNKNOWN": "UNKNOWN"}
+    flipped["trend_1h"] = trend_flip.get(a.get("trend_1h", "UNKNOWN"), "UNKNOWN")
+    flipped["trend_4h"] = trend_flip.get(a.get("trend_4h", "UNKNOWN"), "UNKNOWN")
+    flipped["rsi_1h"] = round(100.0 - float(a.get("rsi_1h", 50.0)), 1)
+
+    dir_flip = {"bullish": "bearish", "bearish": "bullish", "neutral": "neutral"}
+    flipped["kronos_direction"] = dir_flip.get(a.get("kronos_direction", "unknown"), "unknown")
+    flipped["kronos_pct"] = -float(a.get("kronos_pct", 0))
+    flipped["timesfm_direction"] = dir_flip.get(a.get("timesfm_direction", "unknown"), "unknown")
+    return flipped
+
+
+UNIFIED_HOLD_MIN_N = 3  # minimum surviving pairs before an asset is eligible
+
+
+def compute_unified_holds(analyses: list[dict]) -> dict[str, dict]:
+    """Aggregate per-asset hold_scores from a list of pair analyses.
+
+    For each pair X/Y, scores both sides: base via score_entry(a), quote via
+    score_entry(invert_analysis(a)). Pairs where BOTH sides hit the regime
+    floor (both 0.0) are excluded. Per asset, returns:
+      {asset: {top3_mean, max, n, pairs: [(pair, score), ...]}}
+    Assets with fewer than UNIFIED_HOLD_MIN_N contributing pairs are marked
+    ineligible (included in dict but with eligible=False).
+    """
+    contributions: dict[str, list[tuple[str, float]]] = {}
+    for a in analyses:
+        if "/" not in a.get("pair", ""):
+            continue
+        base_s, _ = score_entry(a)
+        quote_s, _ = score_entry(invert_analysis(a))
+        if base_s == 0.0 and quote_s == 0.0:
+            continue  # regime gated on both sides — no signal
+        base, quote = a["pair"].split("/", 1)
+        contributions.setdefault(base, []).append((a["pair"], base_s))
+        contributions.setdefault(quote, []).append((a["pair"], quote_s))
+
+    result: dict[str, dict] = {}
+    for asset, scores in contributions.items():
+        values = sorted((s for _, s in scores), reverse=True)
+        top3 = values[:3]
+        result[asset] = {
+            "top3_mean": round(sum(top3) / len(top3), 4),
+            "max": round(values[0], 4),
+            "n": len(values),
+            "eligible": len(values) >= UNIFIED_HOLD_MIN_N,
+            "pairs": sorted(scores, key=lambda x: -x[1]),
+        }
+    return result
 
 
 def evaluate_portfolio(
@@ -919,13 +1019,16 @@ def run_brain(dry_run: bool = False) -> str:
         if h["value_usd"] < 1.0:
             continue
         vol = asset_volumes.get(asset, 0)
-        pair_for_vol = f"{asset}/USD"
-        regime_resp = fetch(f"/api/regime/{pair_for_vol.replace('/', '%2F')}?interval=60&count=300")
-        vol_pct = 5.0
-        if "error" not in regime_resp and regime_resp.get("regime") == "volatile":
-            vol_pct = 8.0
-        elif "error" not in regime_resp and regime_resp.get("regime") == "trending":
-            vol_pct = 3.0
+        if asset == "USD":
+            vol_pct = 0.0  # USD has no volatility in its own terms
+        else:
+            pair_for_vol = f"{asset}/USD"
+            regime_resp = fetch(f"/api/regime/{pair_for_vol.replace('/', '%2F')}?interval=60&count=300")
+            vol_pct = 5.0
+            if "error" not in regime_resp and regime_resp.get("regime") == "volatile":
+                vol_pct = 8.0
+            elif "error" not in regime_resp and regime_resp.get("regime") == "trending":
+                vol_pct = 3.0
         stabilities[asset] = compute_stability(vol, vol_pct)
 
     # Show all holdings with stability
@@ -941,9 +1044,23 @@ def run_brain(dry_run: bool = False) -> str:
     # === Step 3: Analyze (two-pass) ===
     log("\n--- Step 3: Analyze ---")
     all_discovered = discover_all_pairs(limit=40)
-    # For now, prioritize USD-quoted pairs (most liquid) but include cross-pairs
     pairs_to_scan = [p["pair"] for p in all_discovered]
-    log(f"  Discovered {len(pairs_to_scan)} liquid pairs")
+
+    # Add cross-quoted pairs so unified hold scoring (shadow mode) gets
+    # statistical weight for BTC/ETH/USDT/USDC as quote currencies. Top 8
+    # by row order per quote — roughly proportional to Kraken listing order.
+    try:
+        _all_kraken = _fetch_kraken_pairs()
+        _cross_added = 0
+        for _q in ("BTC", "ETH", "USDT", "USDC"):
+            _crosses = [n for n, p in _all_kraken.items() if p["quote"] == _q][:8]
+            for _c in _crosses:
+                if _c not in pairs_to_scan:
+                    pairs_to_scan.append(_c)
+                    _cross_added += 1
+        log(f"  Discovered {len(all_discovered)} USD pairs + {_cross_added} cross pairs = {len(pairs_to_scan)} total")
+    except Exception as _e:
+        log(f"  Discovered {len(pairs_to_scan)} liquid pairs (cross expansion failed: {_e})")
 
     # Pass 1: quick regime check — filter out dead pairs
     viable: list[tuple[str, float]] = []
@@ -957,9 +1074,15 @@ def run_brain(dry_run: bool = False) -> str:
             viable.append((pair, gate))
     log(f"  Pass 1: {len(viable)}/{len(pairs_to_scan)} pairs above regime floor ({MIN_REGIME_GATE})")
 
-    # Pass 2: full analysis on viable pairs (cap at 15 to limit Kronos GPU time)
+    # Pass 2: full analysis on viable pairs. Split the budget: top 15 USD
+    # pairs (for live decisions) + all surviving cross pairs (for shadow
+    # unified hold coverage). Total capped around 35 for Kronos GPU time.
+    usd_viable = [(p, g) for p, g in viable if p.endswith("/USD")]
+    cross_viable = [(p, g) for p, g in viable if not p.endswith("/USD")]
+    pass2_targets = usd_viable[:15] + cross_viable[:20]
+    log(f"  Pass 2 budget: {len(usd_viable[:15])} USD + {len(cross_viable[:20])} cross = {len(pass2_targets)}")
     analyses: list[dict] = []
-    for pair, _ in viable[:15]:
+    for pair, _ in pass2_targets:
         analysis = analyze_pair(pair)
         if analysis:
             score, bd = score_entry(analysis)
@@ -1056,6 +1179,31 @@ def run_brain(dry_run: bool = False) -> str:
                 "pair": ex["pair"], "side": "sell", "order_type": "limit",
                 "quantity": str(round(ex["qty"], 6)), "limit_price": str(limit_price),
             })
+
+    # 5d: SHADOW — unified currency-agnostic hold scoring (observation only).
+    # Evaluates every asset (including USD/USDT/USDC) via bidirectional pair
+    # analysis. Does NOT affect order placement; logs only for comparison.
+    unified = compute_unified_holds(analyses)
+    eligible = [(a, v) for a, v in unified.items() if v["eligible"]]
+    eligible.sort(key=lambda x: -x[1]["top3_mean"])
+    log("\n[SHADOW] Unified hold_scores (currency-agnostic, top-3 mean):")
+    if not eligible:
+        log(f"  No eligible assets (need n >= {UNIFIED_HOLD_MIN_N} surviving pairs)")
+    else:
+        for asset, v in eligible[:8]:
+            log(f"  {asset:8s} top3m={v['top3_mean']:.3f}  max={v['max']:.3f}  n={v['n']}")
+        best_shadow = eligible[0]
+        log(f"  SHADOW best hold: {best_shadow[0]} (top3m={best_shadow[1]['top3_mean']:.3f})")
+        # Compare against held assets
+        held_assets = {h["asset"] for h in holdings if h["value_usd"] >= 1.0}
+        for asset in held_assets:
+            u = unified.get(asset)
+            if u and u["eligible"]:
+                log(f"  HELD {asset}: shadow top3m={u['top3_mean']:.3f} (n={u['n']})")
+            elif u:
+                log(f"  HELD {asset}: shadow n={u['n']} (insufficient data)")
+            else:
+                log(f"  HELD {asset}: no shadow signal")
 
     # === Step 6: Act ===
     log("\n--- Step 6: Act ---")
