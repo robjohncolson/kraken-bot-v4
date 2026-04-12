@@ -116,6 +116,64 @@ Performance impact of spec 22: per-run input dropped from ~300k to ~120k tokens 
 
 Cumulative cost so far across the bring-up runs: ~$1.50 (Max sub covers it, but the wrapper now tracks it for capacity planning).
 
+### 2026-04-12T21:55Z -- spec 24 landed + bot restart
+
+Spec 24 (commit `a0c9750`): runtime_loop._handle_effects() now persists ReconciliationDiscrepancy events to cc_memory with category='reconciliation_anomaly', dedupe within 5min. Tests +3, full suite **693 passed** (up from 690).
+
+Bot restarted (PID 2100, uptime ~20s) to pick up the runtime_loop change. cc_brain --loop unchanged (PID 27516). Both scheduled tasks still registered.
+
+This closes the loop on the orchestrator's snapshot recon_errors_24h field -- when the next reducer cycle fires (~30s), it will write the first reconciliation_anomaly memory and the orchestrator's tactical priority rule 5 can finally trigger.
+
+### Session 4 grand total -- STOPPING POINT
+
+**14 specs landed (11-24) in one session**, all live on master, all pushed.
+
+| # | Slug | What it does |
+|---|------|-------------|
+| 11 | runtime-loop-root-exit-unit-fix | Fixed USDT phantom $15.85; underlying P&L now visible |
+| 12 | permissions-blacklist | AUD/USD permission errors blacklisted after first failure |
+| 13 | parallel-runner-stale-worktree-cleanup | Agent-repo runner robust on Windows file locks |
+| 14 | dev-loop-token-tracking | Wrapper tracks claude json output, sums full input footprint |
+| 15 | untracked-assets-investigation | Codex investigation; found CC API orders bypass SQLite |
+| 16 | persist-cc-api-orders | /api/orders now persists to SQLite via upsert_order |
+| 17 | dev-loop-time-window-observation | Wrapper injects last_code_commit_ts; LLM ignores pre-fix history |
+| 18 | dev-loop-codex-challenge-verdicts | Auto Codex second-opinion on every live no_action verdict |
+| 19 | dev-loop-weekly-review | New weekly task with 7d-horizon pattern-focused prompt |
+| 20 | dev-loop-recent-dispatch-history | Cross-run memory; orchestrator sees its own last 7d dispatches |
+| 21 | dev-loop-cost-tracking-cap-raise | Per-run USD cost tracking; daily input cap raised 320k -> 1.5M |
+| 22 | dev-loop-health-snapshot | Precomputed structured health snapshot via separate .py script |
+| 23 | health-snapshot-data-fixes | Snapshot reads rotation_nodes + cc_memory.portfolio_snapshot |
+| 24 | bot-persist-recon-anomalies | Bot writes reconciliation_anomaly memories with 5min dedupe |
+
+**Tests**: 693 passing (679 baseline -> +14 across this session)
+
+**Architecture state**:
+- L1 Bot main.py (PID 2100) -- restarted with spec 24
+- L2 CC-Brain cc_brain.py --loop (PID 27516) -- restarted with spec 12 earlier this session
+- L3 Orchestrator -- KrakenBot-CcOrchestrator every 6h (next 15:15 PT) + KrakenBot-CcOrchestrator-Weekly Sundays 10am
+- All commits on master; remote up-to-date
+
+**Cumulative cost in dry-run testing**: ~$1.50 across maybe 5 dry runs. The first scheduled fire at 15:15 PT will be the first real-data exercise of the full new pipeline.
+
+**Open follow-ups for the NEXT session** (in priority order):
+1. **Watch the next scheduled fire** -- 15:15 PT today, 21:15 PT, 03:15 / 09:15 tomorrow. Read the run logs, see what the orchestrator does with all the new context (snapshot, dispatch history, time-windowing, challenge logic).
+2. **Address residual orphan balances** (FLOW, TRIA) -- these are pre-existing legacy balances spec 16 doesn't fix. Either import them into rotation_nodes or explicitly allowlist them in the reconciler.
+3. **Jetson Orin Nano migration** -- user has spring break starting next weekend. Plan: port dev_loop.ps1 -> bash/python, Task Scheduler -> systemd timers, Intel XPU -> CUDA for Kronos. Bot itself ports unchanged. See task #10.
+4. **Per-pair detail in the snapshot** -- right now the snapshot is aggregate only. Adding which specific pairs are losing money would help priority rule 1/2/6.
+5. **Cumulative orchestrator effectiveness metric** -- track which past dispatches led to measurable P&L improvement vs which were no-ops. Long-running data, not actionable yet.
+6. **Move responsibility for the snapshot to the bot** -- bot writes a structured `state/health.json` every cycle, snapshot script just reads it. Cleaner separation.
+
+User's standing instructions (from CLAUDE.md "Autonomous CC+Codex Session Workflow" section):
+- Use cross-agent dispatch for implementation
+- 1 spec per dispatch, max
+- Verify pytest before commit
+- Restart bot/brain if live code paths changed
+- Update this file at every break point
+- /context check at every pause; <70% continue, >=70% stop and wait
+- User assumes you'll make reasonable judgment calls
+
+**Stopping here.** Next session: read this file, run /context, decide whether to wait for orchestrator scheduled fires or pick up spec 25.
+
 ### Pause for context check 2026-04-12T20:55Z
 
 Context check needed. Estimate based on work since /context read 29%: ~60-65% used. Approaching 70% threshold.
