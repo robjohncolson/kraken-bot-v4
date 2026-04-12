@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sqlite3
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -33,9 +34,16 @@ from exchange.websocket import ConnectionState, FillConfirmed, PriceTick
 from guardian import PriceSnapshot
 from persistence.sqlite import SqliteReader, SqliteWriter, ensure_schema
 from runtime_loop import SchedulerRuntime, build_initial_scheduler_state
-from scheduler import SchedulerConfig
+from scheduler import ReconciliationDiscrepancy, SchedulerConfig
 from trading.conditional_tree import ConditionalTreeState
-from trading.reconciler import RecordedPosition, RecordedState, ReconciliationReport
+from trading.reconciler import (
+    ReconciliationAction,
+    ReconciliationReport,
+    ReconciliationSeverity,
+    RecordedPosition,
+    RecordedState,
+    UntrackedAsset,
+)
 
 NOW = datetime(2026, 3, 25, 12, 0, tzinfo=timezone.utc)
 
@@ -154,6 +162,23 @@ def _runtime(*, settings: Settings | None = None) -> SchedulerRuntime:
         sse_publisher=_noop_publish,
         heartbeat_writer=lambda snapshot: None,
         utc_now=lambda: NOW,
+    )
+
+
+def _reconciliation_report_with_untracked_assets(
+    *symbols: str,
+) -> ReconciliationReport:
+    return ReconciliationReport(
+        untracked_assets=tuple(
+            UntrackedAsset(
+                asset=symbol,
+                available=Decimal("1"),
+                held=Decimal("0"),
+                severity=ReconciliationSeverity.HIGH,
+                recommended_action=ReconciliationAction.ALERT,
+            )
+            for symbol in symbols
+        )
     )
 
 
@@ -608,6 +633,144 @@ def test_execute_cancel_order_resolves_client_order_id_and_persists_cancelled_st
 
         assert executor.cancel_calls == ["EX-1"]
         assert reader.fetch_open_orders() == ()
+
+    asyncio.run(scenario())
+
+
+def test_recon_discrepancy_persists_to_cc_memory() -> None:
+    async def scenario() -> None:
+        conn = _memory_db()
+        current_time = NOW
+        runtime = SchedulerRuntime(
+            settings=_settings(),
+            executor=FakeExecutor(KrakenState()),
+            conn=conn,
+            initial_state=build_initial_scheduler_state(
+                kraken_state=KrakenState(),
+                recorded_state=RecordedState(),
+                report=ReconciliationReport(),
+                now=NOW,
+            ),
+            websocket_factory=lambda on_tick, on_fill: FakeRuntimeWebSocket(
+                on_tick, on_fill
+            ),
+            serve_dashboard=False,
+            sse_publisher=_noop_publish,
+            heartbeat_writer=lambda snapshot: None,
+            utc_now=lambda: current_time,
+        )
+        report = _reconciliation_report_with_untracked_assets(
+            "FLOW", "HYPE", "MON", "TRIA"
+        )
+
+        await runtime._handle_effects(
+            (
+                ReconciliationDiscrepancy(
+                    report=report,
+                    summary="untracked_assets=4",
+                ),
+            )
+        )
+
+        rows = conn.execute(
+            "SELECT category, pair, content, importance FROM cc_memory ORDER BY id"
+        ).fetchall()
+        assert len(rows) == 1
+        assert rows[0]["category"] == "reconciliation_anomaly"
+        assert rows[0]["pair"] is None
+        assert rows[0]["importance"] == 0.7
+        assert json.loads(rows[0]["content"]) == {
+            "ghost_positions": 0,
+            "foreign_orders": 0,
+            "fee_drift": 0,
+            "untracked_assets": 4,
+            "untracked_asset_symbols": ["FLOW", "HYPE", "MON", "TRIA"],
+        }
+
+    asyncio.run(scenario())
+
+
+def test_recon_discrepancy_dedupe_within_5min() -> None:
+    async def scenario() -> None:
+        conn = _memory_db()
+        current_time = NOW
+        runtime = SchedulerRuntime(
+            settings=_settings(),
+            executor=FakeExecutor(KrakenState()),
+            conn=conn,
+            initial_state=build_initial_scheduler_state(
+                kraken_state=KrakenState(),
+                recorded_state=RecordedState(),
+                report=ReconciliationReport(),
+                now=NOW,
+            ),
+            websocket_factory=lambda on_tick, on_fill: FakeRuntimeWebSocket(
+                on_tick, on_fill
+            ),
+            serve_dashboard=False,
+            sse_publisher=_noop_publish,
+            heartbeat_writer=lambda snapshot: None,
+            utc_now=lambda: current_time,
+        )
+        discrepancy = ReconciliationDiscrepancy(
+            report=_reconciliation_report_with_untracked_assets(
+                "FLOW", "HYPE", "MON", "TRIA"
+            ),
+            summary="untracked_assets=4",
+        )
+
+        await runtime._handle_effects((discrepancy,))
+        await runtime._handle_effects((discrepancy,))
+
+        row = conn.execute(
+            "SELECT COUNT(*) AS count FROM cc_memory WHERE category = ?",
+            ("reconciliation_anomaly",),
+        ).fetchone()
+        assert row is not None
+        assert row["count"] == 1
+
+    asyncio.run(scenario())
+
+
+def test_recon_discrepancy_writes_again_after_dedupe_window() -> None:
+    async def scenario() -> None:
+        conn = _memory_db()
+        current_time = NOW
+        runtime = SchedulerRuntime(
+            settings=_settings(),
+            executor=FakeExecutor(KrakenState()),
+            conn=conn,
+            initial_state=build_initial_scheduler_state(
+                kraken_state=KrakenState(),
+                recorded_state=RecordedState(),
+                report=ReconciliationReport(),
+                now=NOW,
+            ),
+            websocket_factory=lambda on_tick, on_fill: FakeRuntimeWebSocket(
+                on_tick, on_fill
+            ),
+            serve_dashboard=False,
+            sse_publisher=_noop_publish,
+            heartbeat_writer=lambda snapshot: None,
+            utc_now=lambda: current_time,
+        )
+        discrepancy = ReconciliationDiscrepancy(
+            report=_reconciliation_report_with_untracked_assets(
+                "FLOW", "HYPE", "MON", "TRIA"
+            ),
+            summary="untracked_assets=4",
+        )
+
+        await runtime._handle_effects((discrepancy,))
+        current_time = NOW + timedelta(minutes=6)
+        await runtime._handle_effects((discrepancy,))
+
+        row = conn.execute(
+            "SELECT COUNT(*) AS count FROM cc_memory WHERE category = ?",
+            ("reconciliation_anomaly",),
+        ).fetchone()
+        assert row is not None
+        assert row["count"] == 2
 
     asyncio.run(scenario())
 

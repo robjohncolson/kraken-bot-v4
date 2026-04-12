@@ -106,6 +106,16 @@ Spec 20 (recent-dispatch history injection) dispatched, verified, committed, pus
 
 Closes the cross-run amnesia gap: state.json only holds last_spec_slug (one slot), so the orchestrator could re-propose a spec it dispatched 2+ runs ago without knowing. Wrapper now parses the orchestrator log, injects the last 7 days of dispatches into the runtime context, and both prompts (tactical + weekly) instruct the LLM to check the history before picking a target.
 
+### 2026-04-12T21:40Z -- specs 21/22/23 landed, +cost format fix
+
+Real /context user-checked at 41% before this batch. Now adding specs 21 (cost tracking + cap raise), 22 (health snapshot, retry after first attempt botched embedded python), and 23 (snapshot data fixes -- query rotation_nodes not positions, read portfolio_value from cc_memory not /api/balances). Also fixed a typo in spec 21 cost format string (PowerShell parsed `${7}` as variable reference instead of literal-dollar + format placeholder).
+
+Health snapshot now returns realistic data: open_positions=6, total_root_positions=13, holdings_count=20, current_total_value_usd=$471.71, **net_pnl_7d=$1.26** (the underlying P&L excluding the spec-11 phantom).
+
+Performance impact of spec 22: per-run input dropped from ~300k to ~120k tokens (the snapshot saves the LLM from re-deriving stats). Wall-clock dropped from ~100s to ~50s.
+
+Cumulative cost so far across the bring-up runs: ~$1.50 (Max sub covers it, but the wrapper now tracks it for capacity planning).
+
 ### Pause for context check 2026-04-12T20:55Z
 
 Context check needed. Estimate based on work since /context read 29%: ~60-65% used. Approaching 70% threshold.

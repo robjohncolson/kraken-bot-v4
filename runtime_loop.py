@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import logging
 import sqlite3
 import time as _time
@@ -60,6 +61,7 @@ from exchange.websocket import (
 )
 from guardian import PriceSnapshot
 from healing.heartbeat import HeartbeatSnapshot, HeartbeatStatus, write_heartbeat
+from persistence.cc_memory import CCMemory
 from persistence.sqlite import SqliteReader, SqliteWriter
 from scheduler import (
     BeliefRefreshRequest,
@@ -112,6 +114,7 @@ DEFAULT_CYCLE_INTERVAL_SEC = 30
 DEFAULT_GUARDIAN_INTERVAL_SEC = 120
 ROTATION_ENTRY_MAX_RETRIES = 3
 ROTATION_PAIR_COOLDOWN_SEC = 1800  # 30 min cooldown after cancel
+RECONCILIATION_ANOMALY_DEDUPE_WINDOW = timedelta(minutes=5)
 
 SsePublisher = Callable[..., Awaitable[None]]
 HeartbeatWriter = Callable[[HeartbeatSnapshot], None]
@@ -300,6 +303,7 @@ class SchedulerRuntime:
         self._conn = conn
         self._reader = SqliteReader(conn)
         self._writer = SqliteWriter(conn)
+        self._cc_memory = CCMemory(conn)
         self._scheduler_config = scheduler_config or SchedulerConfig(
             cycle_interval_sec=DEFAULT_CYCLE_INTERVAL_SEC,
             reconcile_interval_sec=settings.reconcile_interval_sec,
@@ -469,6 +473,8 @@ class SchedulerRuntime:
         self._execution_feed_ready = False
         self._last_runtime_error: str | None = None
         self._last_belief_poll_at: datetime | None = None
+        self._last_recon_anomaly_content: str | None = None
+        self._last_recon_anomaly_ts: datetime | None = None
         self._belief_poll_interval_sec = (
             settings.belief_stale_hours * 3600 // 2
         )  # poll at half staleness
@@ -977,9 +983,39 @@ class SchedulerRuntime:
                 logger.warning(
                     "Reconciliation discrepancy detected: %s", effect.summary
                 )
+                self._record_reconciliation_anomaly(effect.report)
                 continue
             if isinstance(effect, DashboardStateUpdate):
                 await self._publish_dashboard_update()
+
+    def _record_reconciliation_anomaly(self, report: ReconciliationReport) -> None:
+        content = {
+            "ghost_positions": len(report.ghost_positions),
+            "foreign_orders": len(report.foreign_orders),
+            "fee_drift": len(report.fee_drift),
+            "untracked_assets": len(report.untracked_assets),
+            "untracked_asset_symbols": [
+                asset.asset for asset in report.untracked_assets
+            ],
+        }
+        frozen_content = json.dumps(content, sort_keys=True, separators=(",", ":"))
+        now = _normalize_timestamp(self._utc_now())
+        if (
+            frozen_content == self._last_recon_anomaly_content
+            and self._last_recon_anomaly_ts is not None
+            and now - self._last_recon_anomaly_ts
+            < RECONCILIATION_ANOMALY_DEDUPE_WINDOW
+        ):
+            return
+        memory_id = self._cc_memory._write(
+            "reconciliation_anomaly",
+            content,
+            pair=None,
+            importance=0.7,
+        )
+        if memory_id:
+            self._last_recon_anomaly_content = frozen_content
+            self._last_recon_anomaly_ts = now
 
     async def _execute_place_order(self, effect: PlaceOrder) -> None:
         try:
