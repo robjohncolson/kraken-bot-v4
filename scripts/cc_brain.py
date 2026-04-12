@@ -640,8 +640,8 @@ def evaluate_portfolio(
     proposals: list[dict] = []
     for pos in positions:
         from_asset = pos["asset"]
-        if from_asset in QUOTE_CURRENCIES:
-            continue  # USD/USDT/USDC evaluated separately as "cash to deploy"
+        if from_asset in QUOTE_CURRENCIES or from_asset in FIAT_CURRENCIES:
+            continue  # quote/fiat evaluated separately
         from_stab = stabilities.get(from_asset, 0)
         from_analysis = analysis_by_base.get(from_asset)
         if not from_analysis:
@@ -651,6 +651,8 @@ def evaluate_portfolio(
 
         for to_asset, to_analysis in analysis_by_base.items():
             if to_asset == from_asset:
+                continue
+            if to_asset in QUOTE_CURRENCIES or to_asset in FIAT_CURRENCIES:
                 continue
             to_score = to_analysis["_score"]
             improvement = to_score - hold_score
@@ -689,6 +691,12 @@ def evaluate_portfolio(
 
 
 QUOTE_CURRENCIES = frozenset(("USD", "USDT", "USDC"))  # can't sell these as dust
+# Non-USD fiat currencies. Held as leftover balances from conversions
+# but not actively traded; excluded from exit scoring and rotation
+# evaluation. Stability scoring still applies (currency-agnostic).
+FIAT_CURRENCIES = frozenset((
+    "EUR", "GBP", "AUD", "CAD", "CHF", "JPY", "ZAR", "HKD", "SGD",
+))
 STALE_ORDER_HOURS = 2  # cancel unfilled orders after this
 
 # Self-tuning bounds
@@ -1010,7 +1018,7 @@ def check_exits(
     exits: list[dict] = []
     for h in holdings:
         asset = h["asset"]
-        if asset in QUOTE_CURRENCIES or h["value_usd"] < 5.0:
+        if asset in QUOTE_CURRENCIES or asset in FIAT_CURRENCIES or h["value_usd"] < 5.0:
             continue
         pair = f"{asset}/USD"
         analysis = next((a for a in analyses if a["pair"] == pair), None)
