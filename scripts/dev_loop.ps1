@@ -59,6 +59,11 @@ function Load-State {
         } elseif ($null -eq $state.cumulative_token_output) {
             $state.cumulative_token_output = 0
         }
+        if (-not $state.PSObject.Properties["cumulative_cost_usd"]) {
+            $state | Add-Member -NotePropertyName "cumulative_cost_usd" -NotePropertyValue 0
+        } elseif ($null -eq $state.cumulative_cost_usd) {
+            $state.cumulative_cost_usd = 0
+        }
         return $state
     }
     return [PSCustomObject]@{
@@ -71,6 +76,7 @@ function Load-State {
         total_specs_dispatched  = 0
         cumulative_token_input  = 0
         cumulative_token_output = 0
+        cumulative_cost_usd     = 0
     }
 }
 
@@ -188,6 +194,12 @@ function Get-ClaudeTokenCount($payload, [string[]]$propertyNames) {
     } catch {
         return [long]0
     }
+}
+
+function Get-ClaudeCostUsd($payload) {
+    $value = Get-JsonPropertyValue $payload @('total_cost_usd', 'totalCostUsd', 'cost_usd', 'costUsd')
+    if ($null -eq $value) { return [double]0 }
+    try { return [double]$value } catch { return [double]0 }
 }
 
 function Update-Orch-Doc($entry) {
@@ -410,9 +422,10 @@ $state = Load-State
 $todayUtc = (Get-Date).ToUniversalTime().ToString("yyyy-MM-dd")
 
 if ($state.last_run_ts -and -not $state.last_run_ts.StartsWith($todayUtc)) {
-    Write-RunLog "UTC day rollover detected (last_run_ts=$($state.last_run_ts)) -- resetting cumulative token counters"
+    Write-RunLog "UTC day rollover detected (last_run_ts=$($state.last_run_ts)) -- resetting cumulative token and cost counters"
     $state.cumulative_token_input = 0
     $state.cumulative_token_output = 0
+    $state.cumulative_cost_usd = 0
 }
 
 if ((Test-Path $DisableFile) -and -not $Force) {
@@ -455,8 +468,8 @@ if ($dirty -and -not $Force) {
     Exit-NoAction "unstaged user changes present (user is mid-edit)" $state
 }
 
-# Check daily token budget (soft cap: 320k input/day across all runs)
-if ($state.last_run_ts -and $state.last_run_ts.StartsWith($todayUtc) -and $state.cumulative_token_input -gt 320000) {
+# 1.5M = ~5 runs/day at ~300k input each. Keeps the loop from blowing up on a runaway day without arbitrarily blocking normal operation.
+if ($state.last_run_ts -and $state.last_run_ts.StartsWith($todayUtc) -and $state.cumulative_token_input -gt 1500000) {
     Exit-NoAction "daily token budget exceeded ($($state.cumulative_token_input) tokens)" $state
 }
 
@@ -569,6 +582,7 @@ $claudePayload = $null
 $claudeResponseText = $rawClaudeOutput
 $parsedInputTokens = [long]0
 $parsedOutputTokens = [long]0
+$parsedCostUsd = [double]0
 
 try {
     $claudePayload = $rawClaudeOutput | ConvertFrom-Json
@@ -579,12 +593,13 @@ try {
         Write-RunLog "WARN: claude JSON parsed, but no response text field was found; using raw JSON for summary parsing"
     }
     # Total input includes all 3 categories: un-cached input, cache creation, cache read.
-    # The 320k/day budget gate counts the FULL input footprint, not just non-cached tokens.
+    # The 1.5M/day budget gate counts the FULL input footprint, not just non-cached tokens.
     $uncachedInput = Get-ClaudeTokenCount $claudePayload @("input_tokens", "inputTokens", "prompt_tokens", "promptTokens")
     $cacheCreate   = Get-ClaudeTokenCount $claudePayload @("cache_creation_input_tokens", "cacheCreationInputTokens")
     $cacheRead     = Get-ClaudeTokenCount $claudePayload @("cache_read_input_tokens", "cacheReadInputTokens")
     $parsedInputTokens = [long]($uncachedInput + $cacheCreate + $cacheRead)
     $parsedOutputTokens = Get-ClaudeTokenCount $claudePayload @("output_tokens", "outputTokens", "completion_tokens", "completionTokens")
+    $parsedCostUsd = Get-ClaudeCostUsd $claudePayload
 } catch {
     Write-RunLog "WARN: failed to parse claude JSON output: $_"
 }
@@ -745,7 +760,8 @@ if ((Test-Path $EscalFile) -or $parsedStatus -eq "escalated" -or $challengeEscal
 
 $state.cumulative_token_input = ([long]$state.cumulative_token_input) + $parsedInputTokens
 $state.cumulative_token_output = ([long]$state.cumulative_token_output) + $parsedOutputTokens
-Write-RunLog "usage: input=$parsedInputTokens (uncached=$uncachedInput cache_create=$cacheCreate cache_read=$cacheRead) output=$parsedOutputTokens cumulative_input=$($state.cumulative_token_input) cumulative_output=$($state.cumulative_token_output)"
+$state.cumulative_cost_usd = ([double]$state.cumulative_cost_usd) + $parsedCostUsd
+Write-RunLog ("usage: input={0} (uncached={1} cache_create={2} cache_read={3}) output={4} cumulative_input={5} cumulative_output={6} cost=${7} cumulative_cost=${8}" -f $parsedInputTokens, $uncachedInput, $cacheCreate, $cacheRead, $parsedOutputTokens, $state.cumulative_token_input, $state.cumulative_token_output, $parsedCostUsd.ToString('F2'), ([double]$state.cumulative_cost_usd).ToString('F2'))
 
 # Update state
 # Only update spec/commit tracking on REAL completed dispatches.
@@ -793,6 +809,8 @@ $summaryLines = @(
     "- output_tokens: $parsedOutputTokens"
     "- cumulative_input_tokens: $($state.cumulative_token_input)"
     "- cumulative_output_tokens: $($state.cumulative_token_output)"
+    "- cost_usd: $($parsedCostUsd.ToString('F2'))"
+    "- cumulative_cost_usd: $(([double]$state.cumulative_cost_usd).ToString('F2'))"
     "- consecutive_failures: $($state.consecutive_failures)"
     ""
     "See full claude output in $RunLog"
