@@ -27,6 +27,12 @@ class KrakenOrder:
     pair: Pair
     client_order_id: ClientOrderId | None = None
     opened_at: datetime | None = None
+    side: str | None = None
+    volume: Decimal = ZERO_DECIMAL
+    volume_executed: Decimal = ZERO_DECIMAL
+    price: Decimal = ZERO_DECIMAL
+    status: str | None = None
+    opentm: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
