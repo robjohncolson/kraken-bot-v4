@@ -1278,6 +1278,49 @@ def test_handle_root_expiry_recalculates_entry_cost_from_last_close() -> None:
     asyncio.run(scenario())
 
 
+def test_handle_root_expiry_keeps_quote_side_root_entry_cost_in_quote_units() -> None:
+    async def scenario() -> None:
+        runtime = _runtime()
+        root = RotationNode(
+            node_id="root-usd",
+            parent_node_id=None,
+            depth=0,
+            asset="USD",
+            quantity_total=Decimal("36.9612"),
+            quantity_free=Decimal("36.9612"),
+            entry_cost=Decimal("999"),
+            status=RotationNodeStatus.OPEN,
+        )
+        runtime._rotation_tree = RotationTreeState(
+            nodes=(root,),
+            root_node_ids=(root.node_id,),
+        )
+        runtime._pair_scanner = FakeRootPairScanner(
+            _bars_with_closes(([1.0] * 49) + [0.99965]),
+            pairs=(("USDT/USD", "USDT", "USD"),),
+        )
+
+        closed_nodes: list[RotationNode] = []
+
+        async def fake_close(node, *, reason: str, now: datetime, order_type=None) -> None:
+            closed_nodes.append(node)
+
+        runtime._close_rotation_node = fake_close  # type: ignore[method-assign]
+
+        with patch("runtime_loop.evaluate_root_ta", return_value=("bearish", 8.0, 0.7)):
+            await runtime._handle_root_expiry(root, NOW)
+
+        updated = next(n for n in runtime._rotation_tree.nodes if n.node_id == root.node_id)
+        assert updated.entry_price == Decimal("0.99965")
+        assert updated.entry_cost == Decimal("36.9612")
+        assert updated.order_side == OrderSide.SELL
+        assert updated.exit_reason == "root_exit_bearish"
+        assert closed_nodes
+        assert closed_nodes[0].entry_cost == Decimal("36.9612")
+
+    asyncio.run(scenario())
+
+
 def test_monitor_rotation_prices_ratchets_buy_stop_after_trailing_activation() -> None:
     async def scenario() -> None:
         runtime = _runtime()

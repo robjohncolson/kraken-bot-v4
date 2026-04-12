@@ -111,7 +111,8 @@ CREATE TABLE IF NOT EXISTS trade_outcomes (
     confidence    REAL,
     opened_at     TEXT NOT NULL,
     closed_at     TEXT NOT NULL,
-    node_depth    INTEGER NOT NULL DEFAULT 0
+    node_depth    INTEGER NOT NULL DEFAULT 0,
+    anomaly_flag  TEXT
 )"""
 
 SCHEMA_STATEMENTS = (
@@ -160,6 +161,17 @@ _ROTATION_NODE_MIGRATIONS = (
 
 _TRADE_OUTCOME_MIGRATIONS = (
     ("node_depth", "INTEGER DEFAULT 0"),
+    ("anomaly_flag", "TEXT"),
+)
+
+_ROOT_STABLECOIN_ANOMALY_FLAG = "root_stablecoin_parity_outlier"
+_ROOT_STABLECOIN_PARITY_PAIRS = frozenset(
+    {
+        "USDT/USD",
+        "USDC/USD",
+        "DAI/USD",
+        "PYUSD/USD",
+    }
 )
 
 
@@ -218,6 +230,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         _migrate_columns(conn, "orders", _ORDER_MIGRATIONS)
         _migrate_columns(conn, "rotation_nodes", _ROTATION_NODE_MIGRATIONS)
         _migrate_columns(conn, "trade_outcomes", _TRADE_OUTCOME_MIGRATIONS)
+        _backfill_trade_outcome_anomaly_flags(conn)
         conn.commit()
         logger.info(
             "SQLite schema verified (positions, orders, ledger, cooldowns, rotation_nodes, pair_metadata, trade_outcomes)"
@@ -236,6 +249,58 @@ def _migrate_columns(
         if col_name not in existing:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {col_name} {col_def}")
             logger.info("Migrated %s: added column %s", table, col_name)
+
+
+def _normalize_decimal(value: Decimal | str | None) -> Decimal | None:
+    if value is None:
+        return None
+    if isinstance(value, Decimal):
+        return value
+    return Decimal(str(value))
+
+
+def _detect_trade_outcome_anomaly_flag(
+    *,
+    pair: str,
+    entry_cost: Decimal | str,
+    net_pnl: Decimal | str,
+    node_depth: int,
+) -> str | None:
+    if node_depth != 0 or pair not in _ROOT_STABLECOIN_PARITY_PAIRS:
+        return None
+    normalized_entry_cost = _normalize_decimal(entry_cost)
+    normalized_net_pnl = _normalize_decimal(net_pnl)
+    if (
+        normalized_entry_cost is None
+        or normalized_net_pnl is None
+        or normalized_entry_cost <= ZERO_DECIMAL
+    ):
+        return None
+    if normalized_net_pnl.copy_abs() >= normalized_entry_cost * Decimal("0.10"):
+        return _ROOT_STABLECOIN_ANOMALY_FLAG
+    return None
+
+
+def _backfill_trade_outcome_anomaly_flags(conn: sqlite3.Connection) -> None:
+    cursor = conn.execute(
+        "SELECT id, pair, entry_cost, net_pnl, node_depth, anomaly_flag "
+        "FROM trade_outcomes"
+    )
+    updates: list[tuple[str, int]] = []
+    for row in cursor.fetchall():
+        anomaly_flag = _detect_trade_outcome_anomaly_flag(
+            pair=row[1],
+            entry_cost=row[2],
+            net_pnl=row[3],
+            node_depth=int(row[4] or 0),
+        )
+        if anomaly_flag and row[5] != anomaly_flag:
+            updates.append((anomaly_flag, int(row[0])))
+    for anomaly_flag, row_id in updates:
+        conn.execute(
+            "UPDATE trade_outcomes SET anomaly_flag = ? WHERE id = ?",
+            (anomaly_flag, row_id),
+        )
 
 
 class SqliteReader:
@@ -558,15 +623,23 @@ class SqliteWriter:
         opened_at: str,
         closed_at: str,
         node_depth: int = 0,
+        anomaly_flag: str | None = None,
     ) -> None:
         """Append a settled trade outcome."""
         try:
+            if anomaly_flag is None:
+                anomaly_flag = _detect_trade_outcome_anomaly_flag(
+                    pair=pair,
+                    entry_cost=entry_cost,
+                    net_pnl=net_pnl,
+                    node_depth=node_depth,
+                )
             self._conn.execute(
                 "INSERT INTO trade_outcomes ("
                 "node_id, pair, direction, entry_price, exit_price, entry_cost, "
                 "exit_proceeds, net_pnl, fee_total, exit_reason, hold_hours, "
-                "confidence, opened_at, closed_at, node_depth"
-                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "confidence, opened_at, closed_at, node_depth, anomaly_flag"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     node_id,
                     pair,
@@ -583,6 +656,7 @@ class SqliteWriter:
                     opened_at,
                     closed_at,
                     node_depth,
+                    anomaly_flag,
                 ),
             )
             self._conn.commit()

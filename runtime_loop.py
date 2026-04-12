@@ -235,6 +235,44 @@ def build_initial_scheduler_state(
     )
 
 
+def _pair_assets(pair: str | None) -> tuple[str | None, str | None]:
+    """Return (base, quote) for a Kraken pair string."""
+    if not pair or "/" not in pair:
+        return (None, None)
+    base, quote = pair.split("/", 1)
+    return (base, quote)
+
+
+def _is_quote_side_root_exit(node: RotationNode) -> bool:
+    """Return True when a root node holds the quote side of its exit pair."""
+    if node.depth != 0:
+        return False
+    _base, quote = _pair_assets(node.entry_pair)
+    return quote == node.asset
+
+
+def _root_exit_trade_entry_cost(
+    node: RotationNode,
+    fill_qty: Decimal,
+    fill_price: Decimal,
+) -> Decimal:
+    """Keep quote-side root outcomes in executed quote notional."""
+    executed_notional = fill_qty * fill_price
+    if _is_quote_side_root_exit(node):
+        return executed_notional
+    if node.entry_cost is not None:
+        return node.entry_cost
+    return executed_notional
+
+
+def _root_exit_entry_cost(node: RotationNode, pair: str, price: Decimal) -> Decimal:
+    """Value a root exit in the quote asset that the fill will settle into."""
+    _base, quote = _pair_assets(pair)
+    if quote == node.asset:
+        return node.quantity_total
+    return node.quantity_total * price
+
+
 class SchedulerRuntime:
     """Async runtime that bridges WebSocket events into the pure scheduler."""
 
@@ -1585,7 +1623,20 @@ class SchedulerRuntime:
             elif kind == "rotation_exit":
                 if node.order_side is None:
                     continue
-                proceeds = exit_proceeds(node.order_side, fill_qty, fill_price)
+                if node.depth == 0:
+                    proceeds = fill_qty * fill_price
+                    entry_cost = _root_exit_trade_entry_cost(
+                        node,
+                        fill_qty,
+                        fill_price,
+                    )
+                else:
+                    proceeds = exit_proceeds(node.order_side, fill_qty, fill_price)
+                    entry_cost = (
+                        node.entry_cost
+                        if node.entry_cost is not None
+                        else ZERO_DECIMAL
+                    )
                 # Mark node as CLOSED with P&L data
                 self._rotation_tree = update_node(
                     self._rotation_tree,
@@ -1594,9 +1645,6 @@ class SchedulerRuntime:
                     exit_price=fill_price,
                     closed_at=now,
                     exit_proceeds=proceeds,
-                )
-                entry_cost = (
-                    node.entry_cost if node.entry_cost is not None else ZERO_DECIMAL
                 )
                 entry_fill_price = (
                     node.fill_price
@@ -2228,7 +2276,7 @@ class SchedulerRuntime:
         # Set entry_pair, order_side, and current price on the root so
         # _close_rotation_node can place the exit order even without WebSocket price
         last_close = Decimal(str(bars["close"].iloc[-1]))
-        recalculated_entry_cost = node.quantity_total * last_close
+        recalculated_entry_cost = _root_exit_entry_cost(node, pair, last_close)
         self._rotation_tree = update_node(
             self._rotation_tree,
             node.node_id,
