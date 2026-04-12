@@ -31,7 +31,54 @@ Bot (always-on, deterministic body)
 - **Platform**: Windows 11, Python 3.13, Intel Arc GPU (torch 2.8.0+xpu)
 - **Repo**: `git@github.com:robjohncolson/kraken-bot-v4.git`, branch `master`
 
-## Current state (as of 2026-04-12, session 3)
+## Current state (as of 2026-04-12, session 4)
+
+**Session 4 in progress.** Post-batch validation done, specs 11/12/13 planned and dispatched to Codex.
+
+| Validation step | Result |
+|-----------------|--------|
+| Bot HTTP server | DEAD when session began (silent since 13:00 EDT). **Restarted** at 13:09 EDT. |
+| `cc_brain.py --loop` | Alive throughout (PID 12776), writing shadow verdicts every 2h |
+| Shadow verdicts (24h) | 13 in `cc_memory`, persistence working |
+| Narrow USD veto | Did NOT fire in last 5 cycles. USD was best-shadow in 2 of 5, but live decisions were sells (rotations/exits), not buys — veto only blocks buys, so correct behavior. No buys attempted because portfolio is fully allocated ($35 USD cash). |
+| Spec 08 fee landing | NO new entries since 08 landed (everything has been sells/rotations). Fee delta unmeasurable yet. Need an entry to land. |
+| AUD/USD permission errors | **Firing every cycle** — `EAccount:Invalid permissions:AUD/USD trading restricted for US:MA`. Spec 12 will fix. |
+| USDT $15.85 phantom | Still in `trade_outcomes.id=1`. Spec 11 will fix. |
+
+### Spec dispatch (session 4) — ALL LIVE
+
+| Spec | Target repo | Status | Commit |
+|------|------------|--------|--------|
+| 11 — runtime_loop root-exit unit fix | kraken-bot-v4 | **LIVE** | `1eacda6` |
+| 12 — permissions blacklist | kraken-bot-v4 | **LIVE** | `5f98704` |
+| 13 — parallel-runner stale worktree cleanup | Agent | **LIVE** | `81b7515` (Agent), `d54efa2` (kbv4 docs) |
+
+**Tests**: 688 passed, 0 failures (up from 679 baseline = +9 new tests).
+
+**What changed in the code**:
+
+1. **Spec 11** (`runtime_loop.py`, `persistence/sqlite.py`):
+   - Quote-side root exits now persist `exit_proceeds` in the same quote currency as `entry_cost`. The unit-mixing path that produced `-$15.85` on stablecoin parity is closed.
+   - `_handle_root_expiry` recalculates `entry_cost` per side: base-side roots use `quantity_total * price`, quote-side roots use the held quote amount as-is.
+   - New `trade_outcomes.anomaly_flag` column with stablecoin-parity detection on `USDT/USD`, `USDC/USD`, `DAI/USD`, `PYUSD/USD`. Schema bootstrap backfills the flag onto historical bad rows (id=1 phantom is now flagged, **not** rewritten).
+   - +6 regression tests in `tests/test_runtime_loop_root_exit.py` plus parity guards.
+
+2. **Spec 12** (`scripts/cc_brain.py`):
+   - New `load_permission_blocked()` reads all `permission_blocked` memories.
+   - Single chokepoint filter strips blocked pairs from `orders_to_place` before placement, shadow logging, and decision memory writes.
+   - On Kraken `EAccount:Invalid permissions`, persists `cc_memory(category=permission_blocked, pair, error_text, first_blocked_ts, importance=0.9)`.
+   - The AUD/USD permission-error loop is fixed: after the first failure, the pair is permanently blacklisted.
+   - +2 tests in `tests/test_cc_brain_permission_blacklist.py`.
+
+3. **Spec 13** (Agent repo: `runner/parallel-codex-runner.py`):
+   - New `_force_remove_dir(target, log_handle, max_retries=4, retry_delay=1.0)` helper.
+   - Replaces the previous `shutil.rmtree(..., ignore_errors=True)` cleanup that silently swallowed `Permission denied` on Windows pytest cache files.
+   - Loud `RunnerError` with manual cleanup hint on persistent failure.
+   - +4 tests in `runner/test_parallel_runner_cleanup.py`.
+
+**Bot/brain restart**: required for cc_brain.py changes to take effect (PID 12776 still running pre-spec-12 code) and for runtime_loop.py changes (main.py PID 25914 still running pre-spec-11 code).
+
+## Earlier state (session 3)
 
 **CC IS THE BRAIN** — Bot runs as deterministic body, CC makes all trading decisions.
 
