@@ -1024,11 +1024,15 @@ def run_brain(dry_run: bool = False) -> str:
         else:
             pair_for_vol = f"{asset}/USD"
             regime_resp = fetch(f"/api/regime/{pair_for_vol.replace('/', '%2F')}?interval=60&count=300")
-            vol_pct = 5.0
-            if "error" not in regime_resp and regime_resp.get("regime") == "volatile":
-                vol_pct = 8.0
-            elif "error" not in regime_resp and regime_resp.get("regime") == "trending":
-                vol_pct = 3.0
+            if "error" in regime_resp:
+                vol_pct = 5.0  # fallback when regime API unavailable
+            else:
+                # Use the HMM's volatile-probability directly as a volatility
+                # proxy. Stablecoins (USDT/USDC) correctly score near 0 because
+                # their volatile-prob is ~0.01. Volatile BTC scores ~8 because
+                # its volatile-prob is ~0.85. Currency-agnostic — no fiat hack.
+                pvol = float(regime_resp.get("probabilities", {}).get("volatile", 0.5))
+                vol_pct = max(0.1, pvol * 10.0)
         stabilities[asset] = compute_stability(vol, vol_pct)
 
     # Show all holdings with stability
@@ -1204,6 +1208,49 @@ def run_brain(dry_run: bool = False) -> str:
                 log(f"  HELD {asset}: shadow n={u['n']} (insufficient data)")
             else:
                 log(f"  HELD {asset}: no shadow signal")
+
+    # Persist the shadow verdict to memory so backfill/promotion analysis
+    # can replay agreement/disagreement over many cycles without re-running
+    # the brain. Captures: eligible rankings, best hold, per-held shadow
+    # scores, and the live decision this cycle produced.
+    live_decision: dict
+    if orders_to_place:
+        o = orders_to_place[0]
+        live_decision = {"type": "order", "pair": o["pair"], "side": o["side"]}
+    else:
+        live_decision = {"type": "hold"}
+    held_shadow_snapshot = {}
+    for h in holdings:
+        if h["value_usd"] < 1.0:
+            continue
+        u = unified.get(h["asset"])
+        held_shadow_snapshot[h["asset"]] = {
+            "top3_mean": u["top3_mean"] if u else None,
+            "n": u["n"] if u else 0,
+            "eligible": bool(u and u["eligible"]),
+            "value_usd": round(float(h["value_usd"]), 2),
+        }
+    shadow_content = {
+        "cycle_ts": now.isoformat(),
+        "min_n": UNIFIED_HOLD_MIN_N,
+        "pass2_analyzed": len(analyses),
+        "eligible": {
+            a: {"top3_mean": v["top3_mean"], "max": v["max"], "n": v["n"]}
+            for a, v in unified.items() if v["eligible"]
+        },
+        "best_shadow_hold": eligible[0][0] if eligible else None,
+        "held_shadow": held_shadow_snapshot,
+        "live_decision": live_decision,
+    }
+    try:
+        fetch("/api/memory", method="POST", data={
+            "category": "shadow_verdict",
+            "pair": live_decision.get("pair", "-"),
+            "content": shadow_content,
+            "importance": 0.5,
+        })
+    except Exception as _e:
+        log(f"  [SHADOW] memory write failed: {_e}")
 
     # === Step 6: Act ===
     log("\n--- Step 6: Act ---")
