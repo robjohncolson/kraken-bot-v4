@@ -1,0 +1,67 @@
+{
+  "version": 1,
+  "batch_name": "kraken-bot-hardening-part2",
+  "target_branch": "master",
+  "base_ref": "master",
+  "codex_approval_mode": "suggest",
+  "verify_commands": [
+    "python -c \"import ast; ast.parse(open('scripts/cc_brain.py').read()); print('OK')\""
+  ],
+  "agents": [
+    {
+      "name": "02-open-orders",
+      "description": "Add /api/open-orders endpoint + authoritative ghost-order cancellation (expanded owned_paths for exchange models/parsers)",
+      "prompt_file": "C:/Users/rober/Downloads/Projects/Agent/dispatch/prompts/kraken-bot-hardening/02-open-orders.md",
+      "owned_paths": [
+        "web/routes.py",
+        "scripts/cc_brain.py",
+        "main.py",
+        "exchange/models.py",
+        "exchange/parsers.py"
+      ]
+    },
+    {
+      "name": "07-ordermin-precheck",
+      "description": "Pre-check Kraken ordermin and costmin before proposing any order",
+      "prompt_file": "C:/Users/rober/Downloads/Projects/Agent/dispatch/prompts/kraken-bot-hardening/07-ordermin-precheck.md",
+      "owned_paths": [
+        "scripts/cc_brain.py"
+      ],
+      "depends_on": ["02-open-orders"]
+    },
+    {
+      "name": "03-fiat-filter",
+      "description": "Exclude non-USD fiat (EUR/GBP/AUD/CAD/CHF/JPY) from check_exits and evaluate_portfolio",
+      "prompt_file": "C:/Users/rober/Downloads/Projects/Agent/dispatch/prompts/kraken-bot-hardening/03-fiat-filter.md",
+      "owned_paths": [
+        "scripts/cc_brain.py"
+      ],
+      "depends_on": ["07-ordermin-precheck"]
+    },
+    {
+      "name": "08-maker-fee",
+      "description": "Tighten limit price buffer from 0.2% to 0.1% to reduce taker fees",
+      "prompt_file": "C:/Users/rober/Downloads/Projects/Agent/dispatch/prompts/kraken-bot-hardening/08-maker-fee.md",
+      "owned_paths": [
+        "scripts/cc_brain.py"
+      ],
+      "depends_on": ["03-fiat-filter"]
+    },
+    {
+      "name": "10-self-tune-fix",
+      "description": "Fix backwards self-tune rule: bump ENTRY_THRESHOLD instead of MAX_POSITION_PCT when fees dominate wins",
+      "prompt_file": "C:/Users/rober/Downloads/Projects/Agent/dispatch/prompts/kraken-bot-hardening/10-self-tune-fix.md",
+      "owned_paths": [
+        "scripts/cc_brain.py"
+      ],
+      "depends_on": ["08-maker-fee"]
+    }
+  ],
+  "merge": {
+    "enabled": true,
+    "commit_prefix": "CC merge pass: kraken-bot-hardening-part2",
+    "verify_commands": [
+      "python -c \"import ast; ast.parse(open('scripts/cc_brain.py').read()); print('OK')\""
+    ]
+  }
+}
