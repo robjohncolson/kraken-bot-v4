@@ -48,6 +48,23 @@
 - **Simplicity First**: Make every change as simple as possible. Inpact minimal code.
 - **No Laziness**: Find root causes. No temporary fixes. Senior developer standards.
 
+## Autonomous CC+Codex Session Workflow
+
+When the user gives an open-ended directive like "go for it" or "keep going" with no specific stopping point, follow this loop:
+
+1. **Identify the next target** from priority order: open follow-ups in `CONTINUATION_PROMPT.md` or `CONTINUATION_PROMPT_CODEX.md`, then explicit user-named work. Pick the single highest-leverage item the user would reasonably approve.
+2. **Plan it** locally — write `tasks/specs/NN-slug.spec.md` and `.plan.md` if non-trivial. Trivial fixes can skip the spec/plan files.
+3. **Dispatch implementation to Codex** via `python ../Agent/runner/cross-agent.py --direction cc-to-codex --task-type implement --working-dir <repo> --owned-paths <files> --timeout 1200 --prompt "..."`. CC writes specs, Codex writes code. Two repos available: `kraken-bot-v4` and `Agent`.
+4. **Verify** by running pytest yourself (Codex does NOT run tests in subagent mode). If green, commit. If red, restore + escalate.
+5. **Restart bot/brain** if the change touched live code paths.
+6. **Pause and update `CONTINUATION_PROMPT_CODEX.md`** at every meaningful break point — completed spec, blocker, or context check.
+7. **Estimate context use**. If `/context` is below 70%, continue to the next target. If above 70%, STOP and wait. The user will clear context and resume from `CONTINUATION_PROMPT_CODEX.md`. Ask the user to invoke `/context` when uncertain — Claude cannot run that slash command itself.
+8. **Push to remote** at logical end-of-batch points (after a coherent set of related specs land), not after every single commit.
+
+The user has confirmed they will 99% of the time approve any reasonable judgment call. Don't ask permission for individual specs once the loop is running — just commit, document, and move on. Ask only when you're about to do something irreversible or off-script (force push, env edits, schema migrations without backfill).
+
+`CONTINUATION_PROMPT_CODEX.md` is the handoff document. Every entry should be self-contained enough that a fresh CC session can resume the loop just by reading it.
+
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 

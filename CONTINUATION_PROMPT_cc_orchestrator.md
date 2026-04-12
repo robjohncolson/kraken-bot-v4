@@ -120,3 +120,7 @@ Each run appends one line below. Format: `- <UTC ts> -- **<status>** action=<...
 - 20260412_185432 UTC -- **dry_run** action=would_dispatch spec=blacklist-restricted-fiat-pairs
 
 - 20260412_185827 UTC -- **dry_run** action=no_action
+
+- 20260412_191500 UTC -- **skipped** (bot uptime < 1h (87s))
+
+- 20260412_202856 UTC -- **dry_run** action=no_action
