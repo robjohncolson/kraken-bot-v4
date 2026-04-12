@@ -71,6 +71,26 @@ def _safe_timestamp(value: object) -> datetime | None:
     return datetime.fromtimestamp(ts, tz=timezone.utc)
 
 
+def _safe_float(value: object) -> float | None:
+    """Convert a numeric value to float, or *None* when unavailable."""
+    if value is None:
+        return None
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
+def _safe_decimal(value: object) -> Decimal:
+    """Convert a numeric value to Decimal, or ZERO_DECIMAL on failure."""
+    if value is None:
+        return ZERO_DECIMAL
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return ZERO_DECIMAL
+
+
 def _classify_kraken_errors(errors: list[str]) -> KrakenAPIError:
     """Map Kraken API error strings to the project's typed exception hierarchy."""
     for err in errors:
@@ -196,7 +216,13 @@ def parse_open_orders(result: Mapping[str, object]) -> tuple[KrakenOrder, ...]:
 
         pair = normalize_pair(descr["pair"])
         client_order_id = order_data.get("cl_ord_id") or None
-        opened_at = _safe_timestamp(order_data.get("opentm"))
+        side = descr.get("type") if isinstance(descr.get("type"), str) else None
+        status = order_data.get("status") if isinstance(order_data.get("status"), str) else None
+        volume = _safe_decimal(order_data.get("vol"))
+        volume_executed = _safe_decimal(order_data.get("vol_exec"))
+        price = _safe_decimal(descr.get("price"))
+        opentm = _safe_float(order_data.get("opentm"))
+        opened_at = _safe_timestamp(opentm)
 
         orders.append(
             KrakenOrder(
@@ -204,6 +230,12 @@ def parse_open_orders(result: Mapping[str, object]) -> tuple[KrakenOrder, ...]:
                 pair=pair,
                 client_order_id=client_order_id,
                 opened_at=opened_at,
+                side=side,
+                volume=volume,
+                volume_executed=volume_executed,
+                price=price,
+                status=status,
+                opentm=opentm,
             )
         )
 

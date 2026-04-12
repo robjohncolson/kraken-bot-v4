@@ -891,6 +891,8 @@ def check_pending_orders(log_fn, dry_run: bool) -> None:
     if "error" in pending:
         return
     now_ts = time.time()
+    cutoff_s = STALE_ORDER_HOURS * 3600
+    handled_txids: set[str] = set()
     for mem in pending.get("memories", []):
         content = mem.get("content", {})
         txid = content.get("txid")
@@ -900,6 +902,7 @@ def check_pending_orders(log_fn, dry_run: bool) -> None:
         age_hours = (now_ts - placed_ts) / 3600
         if age_hours < STALE_ORDER_HOURS:
             continue
+        handled_txids.add(txid)
         if dry_run:
             log_fn(f"  WOULD cancel stale order {txid} ({content.get('pair', '?')}, {age_hours:.1f}h old)")
         else:
@@ -908,6 +911,29 @@ def check_pending_orders(log_fn, dry_run: bool) -> None:
                 log_fn(f"  Stale order {txid}: already filled or cancelled")
             else:
                 log_fn(f"  Cancelled stale order {txid} ({age_hours:.1f}h old)")
+
+    open_resp = fetch("/api/open-orders")
+    if "error" in open_resp:
+        return
+    for order in open_resp.get("orders", []):
+        txid = order.get("txid")
+        if not txid or txid in handled_txids:
+            continue
+        try:
+            opentm = float(order.get("opentm", 0))
+        except (TypeError, ValueError):
+            continue
+        if opentm == 0 or (now_ts - opentm) < cutoff_s:
+            continue
+        age_hours = (now_ts - opentm) / 3600
+        if dry_run:
+            log_fn(f"  WOULD cancel ghost order {txid} ({order.get('pair', '?')}, {age_hours:.1f}h old)")
+        else:
+            result = fetch(f"/api/orders/{txid}", method="DELETE")
+            if "error" in result:
+                log_fn(f"  Ghost order {txid}: cancel failed ({result.get('error')})")
+            else:
+                log_fn(f"  Cancelled ghost order {txid} ({age_hours:.1f}h old)")
 
 
 def get_pairs_with_pending_orders() -> set[str]:
@@ -929,6 +955,19 @@ def get_pairs_with_pending_orders() -> set[str]:
         if not placed_ts or (now_ts - placed_ts) >= cutoff_s:
             continue
         pair = content.get("pair")
+        if pair:
+            pairs.add(pair)
+    return pairs
+
+
+def get_pairs_with_open_orders() -> set[str]:
+    """Return pair names with current open orders on the exchange."""
+    open_orders = fetch("/api/open-orders")
+    if "error" in open_orders:
+        return set()
+    pairs: set[str] = set()
+    for order in open_orders.get("orders", []):
+        pair = order.get("pair")
         if pair:
             pairs.add(pair)
     return pairs
@@ -1212,10 +1251,9 @@ def run_brain(dry_run: bool = False) -> str:
     shadow_best_score = eligible[0][1]["top3_mean"] if eligible else 0.0
 
     # Pending-order blocklist: don't re-propose a trade that already has an
-    # unfilled order in flight. Fixes the duplicate-entry pattern where the
-    # bot kept re-buying the same pair across consecutive cycles while the
-    # initial limit order was still waiting to fill.
-    pending_pairs = get_pairs_with_pending_orders()
+    # unfilled order in flight. This uses both the brain's memory-backed view
+    # and Kraken's live open-order view so older "ghost" orders still block.
+    pending_pairs = get_pairs_with_pending_orders() | get_pairs_with_open_orders()
     if pending_pairs:
         log(f"  Pending orders blocking re-proposal: {sorted(pending_pairs)}")
 

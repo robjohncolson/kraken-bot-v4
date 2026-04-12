@@ -633,6 +633,42 @@ def create_cc_router(
             _log.warning("exchange-balances failed: %s", exc)
             raise HTTPException(status_code=502, detail=f"Exchange error: {exc}") from exc
 
+    @router.get("/open-orders")
+    async def get_open_orders() -> dict[str, Any]:
+        """Fetch live open orders directly from Kraken."""
+        if not hasattr(executor, "fetch_open_orders"):
+            raise HTTPException(status_code=503, detail="Executor not available")
+        try:
+            loop = asyncio.get_event_loop()
+            orders = await loop.run_in_executor(None, executor.fetch_open_orders)
+            return {
+                "orders": [
+                    {
+                        "txid": order.order_id,
+                        "pair": order.pair,
+                        "side": order.side,
+                        "volume": str(order.volume),
+                        "volume_executed": str(order.volume_executed),
+                        "price": str(order.price),
+                        "status": order.status,
+                        "opentm": (
+                            order.opentm
+                            if order.opentm is not None
+                            else (
+                                order.opened_at.timestamp()
+                                if order.opened_at is not None
+                                else None
+                            )
+                        ),
+                    }
+                    for order in orders
+                ],
+                "count": len(orders),
+            }
+        except Exception as exc:
+            _log.warning("open-orders failed: %s", exc)
+            raise HTTPException(status_code=502, detail=f"Exchange error: {exc}") from exc
+
     return router
 
 
