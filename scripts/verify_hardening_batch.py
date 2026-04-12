@@ -17,6 +17,9 @@ import sys
 import urllib.request
 from pathlib import Path
 
+# Allow `from scripts.cc_brain import ...` when this script is run directly.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 RESULTS: list[tuple[str, bool, str]] = []  # (label, ok, detail)
 
 
