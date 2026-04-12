@@ -93,18 +93,32 @@ Bot (always-on, deterministic body)
 
 Specs + plans live in `tasks/specs/`. Manifest at `dispatch/kraken-bot-hardening.manifest.json`. Dispatch prompts at `../Agent/dispatch/prompts/kraken-bot-hardening/`.
 
+**Session 3 expanded batch in flight as of 2026-04-12 ~15:33 UTC.** Dependency chain after expansion:
+
+```
+Batch 1 (parallel): 02-open-orders, 06-backfill-fidelity, 09-usdt-investigation
+Batch 2:            07-ordermin-precheck     (depends on 02)
+Batch 3:            03-fiat-filter           (depends on 07)
+Batch 4:            08-maker-fee             (depends on 03)
+Batch 5:            10-self-tune-fix         (depends on 08)
+```
+
 | Spec | Status | Notes |
 |------|--------|-------|
-| 01 floor-round-exit-qty | **MERGED** (codex/01, commit `446ba44`) | Works — verified against real balances |
-| 02 open-orders-tracking | **FAILED** — ownership enforcement rejected it | Codex needed to extend `exchange/models.py` + `exchange/parsers.py` which weren't in owned_paths. Also hit git-worktree permission issue on commit. Work was lost. Needs retry with expanded owned_paths. |
-| 03 fiat-filter-check-exits | BLOCKED (depends on 02) | Ready to run once 02 lands |
-| 04 extended-shadow-veto | ON HOLD | Evidence is not in for the extended veto. The narrow USD veto is sufficient based on current data. Deferring until more real filled-trade data accumulates. |
-| 05 backfill-6h-analysis | **MERGED** (codex/05, commit `f18172e`) | BUT the backfill script itself needs a fix (spec 06) — it conflates dry-runs and failures with filled trades. |
-| **06 (new)** fix-backfill-script | QUEUED | `scripts/backfill_shadow.py` should skip `Mode: DRY RUN` cycles and only count `PLACED:` (not `FAILED:`) lines |
-| **07 (new)** ordermin-precheck | QUEUED | Before proposing an entry, check pair `ordermin`/`costmin` from AssetPairs and skip if budget can't meet them. Would have prevented the RAVE failure. |
-| **08 (new)** maker-fee-optimization | QUEUED — **CRITICAL** | Replace `price * 1.002` aggressive limit with passive post-only limits at best-bid/best-ask OR reduce buffer to 0.01-0.05%. Current 0.40% roundtrip → target 0.32% (maker rate). |
-| **09 (new)** usdt-loss-investigation | QUEUED — HIGH | Debug the `USDT/USD -$15.85` loss. Probably partial-fill accounting error. That one trade IS the entire 7-day loss. |
-| **10 (new)** self-tune-rule-fix | QUEUED — LOW | Remove the "fees/gross_wins > 60% → bump MAX_POSITION_PCT" rule or rewrite it to adjust fee rate instead of position size. |
+| 01 floor-round-exit-qty | **MERGED** (commit `446ba44`) | Verified |
+| 02 open-orders-tracking | **FAILED (attempt 2)** — orphaned worktree dir from attempt 1 blocked worktree creation. Cleaned (`rm -rf state/parallel-worktrees/02-open-orders`). Needs manual retry after current batch drains. |
+| 03 fiat-filter-check-exits | BLOCKED (waits on 07 → 02) |
+| 04 extended-shadow-veto | **DROPPED from batch** — corrected 6h backfill + investigation findings do not support extending veto beyond USD-only. Reconsider after more real filled-trade data accumulates. |
+| 05 backfill-6h-analysis | **MERGED** (commit `f18172e`) — BUT its result was skewed by the backfill script bug. Spec 06 fixes the script; rerun backfill after 06 lands. |
+| 06 backfill-fidelity | **RUNNING in current batch** |
+| 07 ordermin-precheck | BLOCKED (waits on 02) |
+| 08 maker-fee | BLOCKED (waits on 03) — **CRITICAL for P&L** |
+| 09 usdt-loss-investigation | **RUNNING in current batch** |
+| 10 self-tune-rule-fix | BLOCKED (waits on 08) |
+
+**Pre-built validation:** `scripts/verify_hardening_batch.py` (committed in `62bf0a8`) runs smoke-tests for every spec's acceptance criteria. Invoke after the batch merges to master.
+
+**Known runner quirk:** after a failed dispatch, orphaned worktree directories remain at `state/parallel-worktrees/<agent>/` and block subsequent retries. Manual cleanup (`rm -rf`) is required before re-dispatching. The git branch `codex/<agent>` survives and can be force-reset via the runner's `git worktree add --force -B` call — only the directory collision needs manual resolution.
 
 ### CC REST Toolkit
 
