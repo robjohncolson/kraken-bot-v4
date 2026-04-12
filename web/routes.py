@@ -283,20 +283,31 @@ def create_cc_router(
     from core.errors import ExchangeError, SafeModeBlockedError
     from core.types import OrderRequest, OrderSide, OrderType
     from exchange.ohlcv import OHLCVFetchError, fetch_ohlcv
-    from persistence.sqlite import SqliteReader
+    from persistence.sqlite import SqliteReader, SqliteWriter
 
     _log = logging.getLogger(__name__)
     router = APIRouter(prefix="/api")
     # Create a separate SQLite connection for the CC router thread pool
     # (the runtime's connection has check_same_thread=True by default)
     _cc_reader = None
+    _cc_writer = None
+    for candidate in (
+        getattr(executor, "_writer", None),
+        getattr(executor, "writer", None),
+        db_conn,
+    ):
+        if hasattr(candidate, "upsert_order"):
+            _cc_writer = candidate
+            break
     if isinstance(db_conn, sqlite3.Connection):
         db_path = db_conn.execute("PRAGMA database_list").fetchone()[2]
         if db_path:
             _cc_conn = sqlite3.connect(db_path, check_same_thread=False)
             _cc_conn.row_factory = sqlite3.Row
             _cc_reader = SqliteReader(_cc_conn)
+            _cc_writer = SqliteWriter(_cc_conn)
     reader = _cc_reader
+    writer = _cc_writer
 
     def _validate_order_params(payload: OrderPayload) -> None:
         if payload.order_type == "limit" and not payload.limit_price:
@@ -321,7 +332,41 @@ def create_cc_router(
             loop = asyncio.get_event_loop()
             txid = await loop.run_in_executor(None, executor.execute_order, order)
             _log.info("CC placed order %s on %s", txid, payload.pair)
-            return {"txid": txid, "status": "placed", "pair": payload.pair}
+            response: dict[str, Any] = {
+                "txid": txid,
+                "status": "placed",
+                "pair": payload.pair,
+            }
+            if writer is not None:
+                try:
+                    await loop.run_in_executor(
+                        None,
+                        partial(
+                            writer.upsert_order,
+                            order_id=txid,
+                            pair=payload.pair,
+                            client_order_id=f"kbv4-cc-{txid}",
+                            kind="cc_api",
+                            side=order.side.value,
+                            base_qty=order.quantity,
+                            filled_qty=ZERO_DECIMAL,
+                            quote_qty=ZERO_DECIMAL,
+                            limit_price=order.limit_price,
+                            exchange_order_id=txid,
+                            rotation_node_id=None,
+                        ),
+                    )
+                except Exception as exc:
+                    response["warning"] = (
+                        "Order placed on Kraken but failed to persist to SQLite."
+                    )
+                    _log.warning(
+                        "CC order %s on %s placed but persistence failed: %s",
+                        txid,
+                        payload.pair,
+                        exc,
+                    )
+            return response
         except SafeModeBlockedError as exc:
             raise HTTPException(status_code=403, detail="Safe mode is enabled") from exc
         except ExchangeError as exc:

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -33,6 +35,7 @@ from web.routes import (
     PositionSnapshot,
     ReconciliationSnapshot,
     StrategyStatsSnapshot,
+    create_cc_router,
     create_router,
 )
 
@@ -42,6 +45,18 @@ AS_OF = datetime(2026, 3, 24, 16, 0, 0)
 def _client(state: DashboardState) -> TestClient:
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     app.include_router(create_router(state_provider=lambda: state))
+    return TestClient(app)
+
+
+def _cc_client(*, executor: object, db_conn: object) -> TestClient:
+    app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+    app.include_router(
+        create_cc_router(
+            state_provider=_dashboard_state,
+            executor=executor,
+            db_conn=db_conn,
+        )
+    )
     return TestClient(app)
 
 
@@ -246,3 +261,60 @@ def test_routes_are_get_only() -> None:
         assert "POST" not in methods
         assert "PUT" not in methods
         assert "DELETE" not in methods
+
+
+def test_place_order_persists_to_sqlite() -> None:
+    executor = SimpleNamespace(execute_order=Mock(return_value="tx-123"))
+    writer = Mock()
+
+    response = _cc_client(executor=executor, db_conn=writer).post(
+        "/api/orders",
+        json={
+            "pair": "MON/USDT",
+            "side": "buy",
+            "order_type": "limit",
+            "quantity": "12.5",
+            "limit_price": "0.42",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"txid": "tx-123", "status": "placed", "pair": "MON/USDT"}
+    writer.upsert_order.assert_called_once_with(
+        order_id="tx-123",
+        pair="MON/USDT",
+        client_order_id="kbv4-cc-tx-123",
+        kind="cc_api",
+        side="buy",
+        base_qty=Decimal("12.5"),
+        filled_qty=Decimal("0"),
+        quote_qty=Decimal("0"),
+        limit_price=Decimal("0.42"),
+        exchange_order_id="tx-123",
+        rotation_node_id=None,
+    )
+
+
+def test_place_order_persists_warning_on_writer_failure() -> None:
+    executor = SimpleNamespace(execute_order=Mock(return_value="tx-456"))
+    writer = Mock()
+    writer.upsert_order.side_effect = RuntimeError("sqlite unavailable")
+
+    response = _cc_client(executor=executor, db_conn=writer).post(
+        "/api/orders",
+        json={
+            "pair": "ALEO/USDT",
+            "side": "buy",
+            "order_type": "limit",
+            "quantity": "5",
+            "limit_price": "1.23",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "txid": "tx-456",
+        "status": "placed",
+        "pair": "ALEO/USDT",
+        "warning": "Order placed on Kraken but failed to persist to SQLite.",
+    }
