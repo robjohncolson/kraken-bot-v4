@@ -45,7 +45,18 @@ function Write-RunLog($msg) {
 
 function Load-State {
     if (Test-Path $StateFile) {
-        return Get-Content $StateFile -Raw | ConvertFrom-Json
+        $state = Get-Content $StateFile -Raw | ConvertFrom-Json
+        if (-not $state.PSObject.Properties["cumulative_token_input"]) {
+            $state | Add-Member -NotePropertyName "cumulative_token_input" -NotePropertyValue 0
+        } elseif ($null -eq $state.cumulative_token_input) {
+            $state.cumulative_token_input = 0
+        }
+        if (-not $state.PSObject.Properties["cumulative_token_output"]) {
+            $state | Add-Member -NotePropertyName "cumulative_token_output" -NotePropertyValue 0
+        } elseif ($null -eq $state.cumulative_token_output) {
+            $state.cumulative_token_output = 0
+        }
+        return $state
     }
     return [PSCustomObject]@{
         last_run_ts             = $null
@@ -62,6 +73,118 @@ function Load-State {
 
 function Save-State($state) {
     $state | ConvertTo-Json -Depth 5 | Set-Content -Path $StateFile -Encoding UTF8
+}
+
+function Get-JsonPropertyValue($node, [string[]]$propertyNames) {
+    if ($null -eq $node) {
+        return $null
+    }
+
+    $queue = [System.Collections.Queue]::new()
+    $queue.Enqueue($node)
+
+    while ($queue.Count -gt 0) {
+        $current = $queue.Dequeue()
+        if ($null -eq $current) {
+            continue
+        }
+
+        if ($current -is [string] -or $current -is [ValueType]) {
+            continue
+        }
+
+        if ($current -is [System.Collections.IEnumerable] -and -not ($current -is [string])) {
+            foreach ($item in $current) {
+                $queue.Enqueue($item)
+            }
+            continue
+        }
+
+        foreach ($prop in $current.PSObject.Properties) {
+            if ($propertyNames -contains $prop.Name) {
+                return $prop.Value
+            }
+        }
+
+        foreach ($prop in $current.PSObject.Properties) {
+            if ($null -ne $prop.Value) {
+                $queue.Enqueue($prop.Value)
+            }
+        }
+    }
+
+    return $null
+}
+
+function Convert-JsonNodeToText($node) {
+    if ($null -eq $node) {
+        return $null
+    }
+
+    if ($node -is [string]) {
+        return $node.Trim()
+    }
+
+    if ($node -is [ValueType]) {
+        return $null
+    }
+
+    if ($node -is [System.Collections.IEnumerable] -and -not ($node -is [string])) {
+        $parts = @()
+        foreach ($item in $node) {
+            $text = Convert-JsonNodeToText $item
+            if ($text) {
+                $parts += $text
+            }
+        }
+        if ($parts.Count -gt 0) {
+            return ($parts -join "`n").Trim()
+        }
+        return $null
+    }
+
+    foreach ($preferredName in @("text", "result", "response", "output", "completion", "message", "content")) {
+        $prop = $node.PSObject.Properties[$preferredName]
+        if ($prop) {
+            $text = Convert-JsonNodeToText $prop.Value
+            if ($text) {
+                return $text
+            }
+        }
+    }
+
+    foreach ($prop in $node.PSObject.Properties) {
+        $text = Convert-JsonNodeToText $prop.Value
+        if ($text) {
+            return $text
+        }
+    }
+
+    return $null
+}
+
+function Get-ClaudeResponseText($payload) {
+    foreach ($propertyName in @("result", "response", "output", "completion", "message", "content")) {
+        $value = Get-JsonPropertyValue $payload @($propertyName)
+        $text = Convert-JsonNodeToText $value
+        if ($text) {
+            return $text
+        }
+    }
+    return $null
+}
+
+function Get-ClaudeTokenCount($payload, [string[]]$propertyNames) {
+    $value = Get-JsonPropertyValue $payload $propertyNames
+    if ($null -eq $value) {
+        return [long]0
+    }
+
+    try {
+        return [long]$value
+    } catch {
+        return [long]0
+    }
 }
 
 function Update-Orch-Doc($entry) {
@@ -149,6 +272,13 @@ function Test-PreviousSpecSettled($state) {
 
 Write-RunLog "=== dev_loop start ==="
 $state = Load-State
+$todayUtc = (Get-Date).ToUniversalTime().ToString("yyyy-MM-dd")
+
+if ($state.last_run_ts -and -not $state.last_run_ts.StartsWith($todayUtc)) {
+    Write-RunLog "UTC day rollover detected (last_run_ts=$($state.last_run_ts)) -- resetting cumulative token counters"
+    $state.cumulative_token_input = 0
+    $state.cumulative_token_output = 0
+}
 
 if ((Test-Path $DisableFile) -and -not $Force) {
     Exit-NoAction "kill switch present (state/dev-loop/disabled)" $state
@@ -191,8 +321,7 @@ if ($dirty -and -not $Force) {
 }
 
 # Check daily token budget (soft cap: 320k input/day across all runs)
-$today = (Get-Date).ToUniversalTime().ToString("yyyy-MM-dd")
-if ($state.last_run_ts -and $state.last_run_ts.StartsWith($today) -and $state.cumulative_token_input -gt 320000) {
+if ($state.last_run_ts -and $state.last_run_ts.StartsWith($todayUtc) -and $state.cumulative_token_input -gt 320000) {
     Exit-NoAction "daily token budget exceeded ($($state.cumulative_token_input) tokens)" $state
 }
 
@@ -241,6 +370,7 @@ if ($DryRun) {
 $ClaudeCmd = "claude"
 $ClaudeArgs = @(
     "--print"
+    "--output-format", "json"
     "--max-turns", "60"
     "--permission-mode", "bypassPermissions"
 )
@@ -263,17 +393,42 @@ try {
 }
 $claudeDur = [math]::Round((New-TimeSpan -Start $claudeStart -End (Get-Date)).TotalSeconds, 1)
 
-# Save raw claude output to run log
-Add-Content -Path $RunLog -Value "`n=== claude output (exit=$exitCode, dur=$($claudeDur)s) ===`n"
-Add-Content -Path $RunLog -Value ($output -join "`n")
+$rawClaudeOutput = ($output | ForEach-Object { "$_" }) -join "`n"
+$claudePayload = $null
+$claudeResponseText = $rawClaudeOutput
+$parsedInputTokens = [long]0
+$parsedOutputTokens = [long]0
+
+try {
+    $claudePayload = $rawClaudeOutput | ConvertFrom-Json
+    $extractedText = Get-ClaudeResponseText $claudePayload
+    if ($extractedText) {
+        $claudeResponseText = $extractedText
+    } else {
+        Write-RunLog "WARN: claude JSON parsed, but no response text field was found; using raw JSON for summary parsing"
+    }
+    # Total input includes all 3 categories: un-cached input, cache creation, cache read.
+    # The 320k/day budget gate counts the FULL input footprint, not just non-cached tokens.
+    $uncachedInput = Get-ClaudeTokenCount $claudePayload @("input_tokens", "inputTokens", "prompt_tokens", "promptTokens")
+    $cacheCreate   = Get-ClaudeTokenCount $claudePayload @("cache_creation_input_tokens", "cacheCreationInputTokens")
+    $cacheRead     = Get-ClaudeTokenCount $claudePayload @("cache_read_input_tokens", "cacheReadInputTokens")
+    $parsedInputTokens = [long]($uncachedInput + $cacheCreate + $cacheRead)
+    $parsedOutputTokens = Get-ClaudeTokenCount $claudePayload @("output_tokens", "outputTokens", "completion_tokens", "completionTokens")
+} catch {
+    Write-RunLog "WARN: failed to parse claude JSON output: $_"
+}
+
+Add-Content -Path $RunLog -Value "`n=== claude response text (exit=$exitCode, dur=$($claudeDur)s) ===`n"
+Add-Content -Path $RunLog -Value $claudeResponseText
+Add-Content -Path $RunLog -Value "`n=== claude json metadata ===`n"
+Add-Content -Path $RunLog -Value $rawClaudeOutput
 
 # ============================================================
 # POST-FLIGHT
 # ============================================================
 
-# Parse the YAML summary block from the output
-$outputJoined = $output -join "`n"
-$yamlMatch = [regex]::Match($outputJoined, '(?ms)---\s*loop_run_summary:(.*?)---')
+# Parse the YAML summary block from the narrative response text
+$yamlMatch = [regex]::Match($claudeResponseText, '(?ms)---\s*loop_run_summary:(.*?)---')
 $parsedAction = "unknown"
 $parsedStatus = "unknown"
 $parsedSpecSlug = $null
@@ -299,6 +454,10 @@ if ((Test-Path $EscalFile) -or $parsedStatus -eq "escalated") {
 } else {
     $state.consecutive_failures = 0
 }
+
+$state.cumulative_token_input = ([long]$state.cumulative_token_input) + $parsedInputTokens
+$state.cumulative_token_output = ([long]$state.cumulative_token_output) + $parsedOutputTokens
+Write-RunLog "usage: input=$parsedInputTokens (uncached=$uncachedInput cache_create=$cacheCreate cache_read=$cacheRead) output=$parsedOutputTokens cumulative_input=$($state.cumulative_token_input) cumulative_output=$($state.cumulative_token_output)"
 
 # Update state
 # Only update spec/commit tracking on REAL completed dispatches.
@@ -338,6 +497,10 @@ $summaryLines = @(
     "- commit: $parsedCommit"
     "- restarted: $parsedRestart"
     "- duration: $($claudeDur)s"
+    "- input_tokens: $parsedInputTokens"
+    "- output_tokens: $parsedOutputTokens"
+    "- cumulative_input_tokens: $($state.cumulative_token_input)"
+    "- cumulative_output_tokens: $($state.cumulative_token_output)"
     "- consecutive_failures: $($state.consecutive_failures)"
     ""
     "See full claude output in $RunLog"

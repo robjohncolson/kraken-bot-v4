@@ -116,3 +116,7 @@ Each run appends one line below. Format: `- <UTC ts> -- **<status>** action=<...
 - 20260412_182741 UTC -- **no_action** -- first successful live fire (222s wall-clock). Correctly deferred: AUD/USD pattern no longer present after spec 12 went live, USDT phantom already fixed by spec 11, recon warning is benign held-fiat accounting. Run log: `state/dev-loop/runs/20260412_182741.log`
 
 ### Scheduled fires
+
+- 20260412_185432 UTC -- **dry_run** action=would_dispatch spec=blacklist-restricted-fiat-pairs
+
+- 20260412_185827 UTC -- **dry_run** action=no_action
