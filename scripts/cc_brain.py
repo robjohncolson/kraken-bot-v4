@@ -33,8 +33,24 @@ BOT_URL = "http://127.0.0.1:58392"
 KRAKEN_API = "https://api.kraken.com/0/public"
 REVIEWS_DIR = Path(__file__).parent.parent / "state" / "cc-reviews"
 
-def _price_decimals(price: float) -> int:
-    """Determine appropriate decimal places for a limit price on Kraken."""
+def _price_decimals(price: float, pair: str | None = None) -> int:
+    """Determine appropriate decimal places for a limit price on Kraken.
+
+    Prefers the pair's actual pair_decimals field from AssetPairs (authoritative),
+    falls back to a price-magnitude heuristic if the pair is unknown or the
+    lookup fails. Kraken rejects orders whose limit_price has more decimals
+    than the pair allows — e.g. RENDER/USD allows 3 decimals even though
+    price is in the $1-10 range where the heuristic would guess 4.
+    """
+    if pair:
+        try:
+            pairs = _fetch_kraken_pairs()
+            info = pairs.get(pair)
+            if info and "pair_decimals" in info:
+                return int(info["pair_decimals"])
+        except Exception:
+            pass
+    # Fallback heuristic
     if price >= 10:
         return 2      # SOL ($85), LTC ($55), XMR ($338)
     if price >= 1:
@@ -108,7 +124,11 @@ def _fetch_kraken_pairs() -> dict[str, dict]:
         quote = _ALIASES.get(quote, quote)
         if base in _SKIP_BASES and quote in _SKIP_BASES:
             continue
-        all_pairs[f"{base}/{quote}"] = {"key": key, "base": base, "quote": quote}
+        all_pairs[f"{base}/{quote}"] = {
+            "key": key, "base": base, "quote": quote,
+            "pair_decimals": meta.get("pair_decimals"),
+            "lot_decimals": meta.get("lot_decimals"),
+        }
 
     _discovered_cache["pairs"] = all_pairs
     _discovered_at = time.time()
@@ -963,7 +983,7 @@ def sweep_dust(dust_positions: list[dict], dry_run: bool, log_fn) -> list[dict]:
             continue
         price = float(bars[-1]["close"])
         # Limit sell slightly below market to ensure fill while paying maker fees
-        limit_price = round(price * 0.998, _price_decimals(price))
+        limit_price = round(price * 0.998, _price_decimals(price, pair))
         if dry_run:
             log_fn(f"  WOULD SELL dust: {d['asset']} qty={d['qty']:.6f} (~${d['usd_value']:.2f}) via {pair} @ {limit_price}")
             results.append({"asset": d["asset"], "action": "dry_run"})
@@ -1189,7 +1209,7 @@ def run_brain(dry_run: bool = False) -> str:
             pos_for_rot = next((p for p in open_positions if p["asset"] == best_rot["from_asset"]), None)
             rot_value = min(max_position_value, float(pos_for_rot["quantity_total"]) * price) if pos_for_rot else max_position_value
             qty = round(rot_value / price, 6)
-            limit_price = round(price * (1.002 if best_rot["side"] == "buy" else 0.998), _price_decimals(price))
+            limit_price = round(price * (1.002 if best_rot["side"] == "buy" else 0.998), _price_decimals(price, best_rot["pair"]))
             orders_to_place.append({
                 "pair": best_rot["pair"], "side": best_rot["side"], "order_type": "limit",
                 "quantity": str(qty), "limit_price": str(limit_price),
@@ -1212,7 +1232,7 @@ def run_brain(dry_run: bool = False) -> str:
                 bd_str = " ".join(f"{k}={v:+.2f}" for k, v in bd.items() if isinstance(v, (int, float)))
                 log(f"ENTRY from USD: {best['pair']} score={score:.2f} [{bd_str}]")
                 qty = round(max_position_value / best["price"], 6)
-                limit_price = round(best["price"] * 1.002, _price_decimals(best["price"]))
+                limit_price = round(best["price"] * 1.002, _price_decimals(best["price"], best["pair"]))
                 orders_to_place.append({
                     "pair": best["pair"], "side": "buy", "order_type": "limit",
                     "quantity": str(qty), "limit_price": str(limit_price),
@@ -1229,7 +1249,7 @@ def run_brain(dry_run: bool = False) -> str:
             ex = exit_orders[0]
             log(f"EXIT: {ex['asset']} via {ex['pair']} — hold_score={ex['hold_score']:.2f} "
                 f"(${ex['value_usd']:.2f}, reason={ex['reason']})")
-            limit_price = round(ex["price"] * 0.998, _price_decimals(ex["price"]))
+            limit_price = round(ex["price"] * 0.998, _price_decimals(ex["price"], ex["pair"]))
             orders_to_place.append({
                 "pair": ex["pair"], "side": "sell", "order_type": "limit",
                 "quantity": str(round(ex["qty"], 6)), "limit_price": str(limit_price),
