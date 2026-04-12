@@ -16,6 +16,8 @@ SNAPSHOT_FIELDS = (
     "recon_errors_24h",
     "permission_blocked_pairs",
     "open_positions",
+    "total_root_positions",
+    "holdings_count",
     "current_cash_usd",
     "current_total_value_usd",
 )
@@ -33,6 +35,12 @@ def to_float(value: object | None) -> float | None:
     if value is None:
         return None
     return float(value)
+
+
+def to_int(value: object | None) -> int | None:
+    if value is None:
+        return None
+    return int(value)
 
 
 def truthy_anomaly_sql(column_name: str) -> str:
@@ -131,29 +139,52 @@ def query_permission_blocked_pairs(conn: sqlite3.Connection) -> int:
     return int(row[0] or 0) if row is not None else 0
 
 
-def query_open_positions(conn: sqlite3.Connection) -> int:
-    columns = get_table_columns(conn, "positions")
+def query_root_position_counts(conn: sqlite3.Connection) -> tuple[int, int]:
+    columns = get_table_columns(conn, "rotation_nodes")
     if not columns:
-        raise RuntimeError("positions table is missing or unreadable")
-    if "status" in columns:
-        row = conn.execute(
-            """
-            SELECT COUNT(*)
-            FROM positions
-            WHERE status IS NULL
-               OR TRIM(CAST(status AS TEXT)) = ''
-               OR LOWER(TRIM(CAST(status AS TEXT))) = 'open'
-            """
-        ).fetchone()
-    else:
-        row = conn.execute(
-            """
-            SELECT COUNT(*)
-            FROM positions
-            WHERE closed_at IS NULL
-            """
-        ).fetchone()
-    return int(row[0] or 0) if row is not None else 0
+        raise RuntimeError("rotation_nodes table is missing or unreadable")
+
+    open_row = conn.execute(
+        """
+        SELECT COUNT(*)
+        FROM rotation_nodes
+        WHERE status = 'open'
+          AND depth = 0
+        """
+    ).fetchone()
+    total_row = conn.execute(
+        """
+        SELECT COUNT(*)
+        FROM rotation_nodes
+        WHERE depth = 0
+        """
+    ).fetchone()
+    open_positions = int(open_row[0] or 0) if open_row is not None else 0
+    total_root_positions = int(total_row[0] or 0) if total_row is not None else 0
+    return open_positions, total_root_positions
+
+
+def query_latest_portfolio_snapshot(conn: sqlite3.Connection) -> dict[str, object] | None:
+    row = conn.execute(
+        """
+        SELECT content
+        FROM cc_memory
+        WHERE category = 'portfolio_snapshot'
+        ORDER BY timestamp DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    if row is None or row[0] is None:
+        return None
+
+    content = str(row[0]).strip()
+    if not content:
+        return None
+
+    data = json.loads(content)
+    if not isinstance(data, dict):
+        raise RuntimeError("portfolio_snapshot content is not a JSON object")
+    return data
 
 
 def fetch_balances(balances_url: str) -> tuple[float | None, float | None]:
@@ -232,16 +263,35 @@ def populate_memory_metrics(snapshot: dict[str, object | None], conn: sqlite3.Co
 
 def populate_position_metrics(snapshot: dict[str, object | None], conn: sqlite3.Connection) -> None:
     try:
-        snapshot["open_positions"] = query_open_positions(conn)
+        open_positions, total_root_positions = query_root_position_counts(conn)
+        snapshot["open_positions"] = open_positions
+        snapshot["total_root_positions"] = total_root_positions
     except Exception as exc:
         log_error("open_positions", exc)
 
 
-def populate_balance_metrics(snapshot: dict[str, object | None], balances_url: str) -> None:
+def populate_balance_metrics(
+    snapshot: dict[str, object | None],
+    conn: sqlite3.Connection | None,
+    balances_url: str,
+) -> None:
     try:
-        current_cash_usd, current_total_value_usd = fetch_balances(balances_url)
+        portfolio_snapshot = query_latest_portfolio_snapshot(conn) if conn is not None else None
+        if portfolio_snapshot is not None:
+            snapshot["current_total_value_usd"] = to_float(
+                portfolio_snapshot.get("portfolio_value_usd")
+            )
+            snapshot["current_cash_usd"] = to_float(portfolio_snapshot.get("cash_usd"))
+            snapshot["holdings_count"] = to_int(portfolio_snapshot.get("holdings_count"))
+            return
+    except Exception as exc:
+        log_error("portfolio_snapshot", exc)
+
+    try:
+        current_cash_usd, _ = fetch_balances(balances_url)
         snapshot["current_cash_usd"] = current_cash_usd
-        snapshot["current_total_value_usd"] = current_total_value_usd
+        snapshot["current_total_value_usd"] = None
+        snapshot["holdings_count"] = None
     except Exception as exc:
         log_error("balances", exc)
 
@@ -262,13 +312,14 @@ def main() -> int:
             populate_trade_metrics(snapshot, conn)
             populate_memory_metrics(snapshot, conn)
             populate_position_metrics(snapshot, conn)
+            populate_balance_metrics(snapshot, conn, balances_url)
         except Exception as exc:
             log_error("sqlite_connect", exc)
+            populate_balance_metrics(snapshot, None, balances_url)
         finally:
             if conn is not None:
                 conn.close()
 
-        populate_balance_metrics(snapshot, balances_url)
         print(json.dumps(snapshot, separators=(",", ":")))
         return 0
     except Exception as exc:

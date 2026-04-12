@@ -595,6 +595,8 @@ if ($null -eq $healthSnapshot) {
     $reconErrors24hText = Format-HealthSnapshotCount $healthSnapshot.recon_errors_24h
     $permissionBlockedPairsText = Format-HealthSnapshotCount $healthSnapshot.permission_blocked_pairs
     $openPositionsText = Format-HealthSnapshotCount $healthSnapshot.open_positions
+    $totalRootPositionsText = Format-HealthSnapshotCount $healthSnapshot.total_root_positions
+    $holdingsCountText = Format-HealthSnapshotCount $healthSnapshot.holdings_count
     $cashText = Format-HealthSnapshotCurrency $healthSnapshot.current_cash_usd
     $totalValueText = Format-HealthSnapshotCurrency $healthSnapshot.current_total_value_usd
     $pnlDelta7dText = 'n/a'
@@ -606,13 +608,13 @@ if ($null -eq $healthSnapshot) {
     Write-RunLog ("computed health snapshot: trades_7d={0} pnl_7d={1}" -f $trades7dText, $netPnl7dText)
 
     $healthSnapshotLines = @(
-        "## HEALTH SNAPSHOT (computed by wrapper from SQLite + /api/balances)"
+        "## HEALTH SNAPSHOT (computed by wrapper from SQLite + cc_memory + /api/balances)"
         ("- Trades 24h:    {0}    (7d: {1}, prior 7d: {2})" -f $trades24hText, $trades7dText, $tradesPrior7dText)
         ("- Net P&L 24h:   {0}   (7d: {1}, prior 7d: {2})  Delta 7d: {3}" -f $netPnl24hText, $netPnl7dText, $netPnlPrior7dText, $pnlDelta7dText)
         ("- Win rate 7d:   {0}   (prior 7d: {1})  Delta: {2}" -f $winRate7dText, $winRatePrior7dText, $winRateDeltaText)
         ("- Recon errors 24h:    {0}" -f $reconErrors24hText)
         ("- Permission-blocked pairs:    {0}" -f $permissionBlockedPairsText)
-        ("- Open positions:    {0}" -f $openPositionsText)
+        ("- Open positions:    {0}/{1} root  (holdings: {2})" -f $openPositionsText, $totalRootPositionsText, $holdingsCountText)
         ("- Cash:    {0}   |   Total value:    {1}" -f $cashText, $totalValueText)
     )
     $healthSnapshotSection = ($healthSnapshotLines -join "`n") + "`n"
