@@ -759,13 +759,15 @@ def self_tune(outcomes: list[dict], analyses: list[dict], log_fn) -> None:
         _record_param_change("ENTRY_THRESHOLD", old, ENTRY_THRESHOLD, f"win rate {wr:.0%} above 60%")
         return
 
-    # Rule 3: Fee burden too high — increase position size
-    if gross_wins > 0 and total_fees / gross_wins > 0.60 and MAX_POSITION_PCT < _POSITION_PCT_MAX:
-        old = MAX_POSITION_PCT
-        MAX_POSITION_PCT = round(MAX_POSITION_PCT + 0.01, 2)
+    # Rule 3: Fee burden too high - tighten entry. Fee ratio is invariant
+    # to position size at fixed percentage fees, so bigger positions do
+    # not fix the problem.
+    if gross_wins > 0 and total_fees / gross_wins > 0.60 and ENTRY_THRESHOLD < _ENTRY_THRESHOLD_MAX:
+        old = ENTRY_THRESHOLD
+        ENTRY_THRESHOLD = round(ENTRY_THRESHOLD + 0.05, 2)
         fee_pct = total_fees / gross_wins
-        log_fn(f"  TUNE: MAX_POSITION_PCT {old} -> {MAX_POSITION_PCT} (fees={fee_pct:.0%} of wins)")
-        _record_param_change("MAX_POSITION_PCT", old, MAX_POSITION_PCT, f"fee burden {fee_pct:.0%}")
+        log_fn(f"  TUNE: ENTRY_THRESHOLD {old} -> {ENTRY_THRESHOLD} (fees={fee_pct:.0%} of wins - be pickier)")
+        _record_param_change("ENTRY_THRESHOLD", old, ENTRY_THRESHOLD, f"fees {fee_pct:.0%} of gross wins, tighten entry")
         return
 
     # Rule 4: Too many stop-loss exits — tighten regime gate
