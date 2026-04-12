@@ -9,23 +9,44 @@
   ],
   "agents": [
     {
-      "name": "01-floor-round",
-      "description": "Floor-round sell quantities to avoid insufficient-funds rejections on CRV/COMP",
-      "prompt_file": "C:/Users/rober/Downloads/Projects/Agent/dispatch/prompts/kraken-bot-hardening/01-floor-round.md",
-      "owned_paths": [
-        "scripts/cc_brain.py"
-      ]
-    },
-    {
       "name": "02-open-orders",
-      "description": "Add /api/open-orders endpoint and authoritative ghost-order cancellation for AUD/USD ghost",
+      "description": "Add /api/open-orders endpoint + authoritative ghost-order cancellation (retry with expanded owned_paths)",
       "prompt_file": "C:/Users/rober/Downloads/Projects/Agent/dispatch/prompts/kraken-bot-hardening/02-open-orders.md",
       "owned_paths": [
         "web/routes.py",
         "scripts/cc_brain.py",
-        "main.py"
+        "main.py",
+        "exchange/models.py",
+        "exchange/parsers.py"
+      ]
+    },
+    {
+      "name": "06-backfill-fidelity",
+      "description": "Filter dry-runs and failed orders out of backfill_shadow.py comparisons",
+      "prompt_file": "C:/Users/rober/Downloads/Projects/Agent/dispatch/prompts/kraken-bot-hardening/06-backfill-fidelity.md",
+      "owned_paths": [
+        "scripts/backfill_shadow.py"
+      ]
+    },
+    {
+      "name": "09-usdt-investigation",
+      "description": "Investigate USDT/USD -$15.85 outlier and apply appropriate fix (accounting, execution, or anomaly flag)",
+      "prompt_file": "C:/Users/rober/Downloads/Projects/Agent/dispatch/prompts/kraken-bot-hardening/09-usdt-investigation.md",
+      "owned_paths": [
+        "tasks/specs/09-usdt-loss-investigation.result.md",
+        "scripts/cc_brain.py",
+        "web/routes.py",
+        "persistence/reconciler.py"
+      ]
+    },
+    {
+      "name": "07-ordermin-precheck",
+      "description": "Pre-check Kraken ordermin and costmin before proposing any order",
+      "prompt_file": "C:/Users/rober/Downloads/Projects/Agent/dispatch/prompts/kraken-bot-hardening/07-ordermin-precheck.md",
+      "owned_paths": [
+        "scripts/cc_brain.py"
       ],
-      "depends_on": ["01-floor-round"]
+      "depends_on": ["02-open-orders"]
     },
     {
       "name": "03-fiat-filter",
@@ -34,25 +55,25 @@
       "owned_paths": [
         "scripts/cc_brain.py"
       ],
-      "depends_on": ["02-open-orders"]
+      "depends_on": ["07-ordermin-precheck"]
     },
     {
-      "name": "04-extended-veto",
-      "description": "Hybrid shadow veto: redirect entries to shadow's preferred asset or hard-veto when no redirect possible",
-      "prompt_file": "C:/Users/rober/Downloads/Projects/Agent/dispatch/prompts/kraken-bot-hardening/04-extended-veto.md",
+      "name": "08-maker-fee",
+      "description": "Tighten limit price buffer from 0.2% to 0.1% to reduce taker fees",
+      "prompt_file": "C:/Users/rober/Downloads/Projects/Agent/dispatch/prompts/kraken-bot-hardening/08-maker-fee.md",
       "owned_paths": [
         "scripts/cc_brain.py"
       ],
       "depends_on": ["03-fiat-filter"]
     },
     {
-      "name": "05-backfill-analysis",
-      "description": "Run backfill_shadow with 6h forward window and write analysis result",
-      "prompt_file": "C:/Users/rober/Downloads/Projects/Agent/dispatch/prompts/kraken-bot-hardening/05-backfill-analysis.md",
+      "name": "10-self-tune-fix",
+      "description": "Fix backwards self-tune rule: bump ENTRY_THRESHOLD instead of MAX_POSITION_PCT when fees dominate wins",
+      "prompt_file": "C:/Users/rober/Downloads/Projects/Agent/dispatch/prompts/kraken-bot-hardening/10-self-tune-fix.md",
       "owned_paths": [
-        "tasks/specs/05-backfill-6h-analysis.result.md",
-        "scripts/backfill_shadow.py"
-      ]
+        "scripts/cc_brain.py"
+      ],
+      "depends_on": ["08-maker-fee"]
     }
   ],
   "merge": {

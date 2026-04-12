@@ -31,7 +31,7 @@ Bot (always-on, deterministic body)
 - **Platform**: Windows 11, Python 3.13, Intel Arc GPU (torch 2.8.0+xpu)
 - **Repo**: `git@github.com:robjohncolson/kraken-bot-v4.git`, branch `master`
 
-## Current state (as of 2026-04-11)
+## Current state (as of 2026-04-12, session 3)
 
 **CC IS THE BRAIN** — Bot runs as deterministic body, CC makes all trading decisions.
 
@@ -39,13 +39,72 @@ Bot (always-on, deterministic body)
 |-------|-------|
 | CC Brain Mode | `CC_BRAIN_MODE=true` — bot's planner + root evaluator disabled |
 | Belief model | `timesfm` (still wired but CC uses its own signals) |
-| CC Signals | RSI(14) + EMA(7/26) + Kronos + HMM regime |
-| Portfolio | ~$482 total value (down from $593.90 peak, ~19% drawdown) |
-| First CC trade | AVAX/USD limit buy @ $9.22 (txid OHJ2OJ-4LIFS-UBFFUD) |
-| CC Memory | 17+ events (decisions, observations, regimes, post-mortems, param changes) |
-| Tests | **679 passing** |
-| MTF gates | `MTF_4H_GATE_ENABLED=true`, `MTF_15M_CONFIRM_ENABLED=true` |
-| HMM regime | 3-state (trending/ranging/volatile), most pairs currently ranging |
+| CC Signals | RSI(14) + EMA(7/26) + Kronos + TimesFM + HMM regime |
+| Portfolio | ~$471 total value (down from $482 start-of-session) |
+| 7-day P&L | **−$14.58** (14 trades, 6W/8L, but dominated by one −$15.85 USDT/USD outlier) |
+| Scheduled task | Windows Task Scheduler `KrakenBot-CcBrainCycle` fires every 2h, logs to `state/scheduled-logs/` |
+| Shadow mode | Live. Writes `shadow_verdict` memories each cycle via `compute_unified_holds` |
+| Shadow veto | **Narrow USD-only veto LIVE** (commit b177900) — blocks cash-to-crypto entries when shadow's best hold is USD |
+| Shadow analyzer | `scripts/analyze_shadow.py` reads verdicts for forward eval |
+| Historical backfill | `scripts/backfill_shadow.py` — has a known bug (counts dry-runs + failed orders as filled) |
+| Tests | 679+ passing (TUI suite 54/54, runtime loop unchanged) |
+
+### Session 3 architectural changes (all LIVE on master)
+
+1. **Currency-agnostic stability** (commit `06fb1b1`)
+   - `get_asset_volumes()` now credits both base AND quote assets for each pair
+   - `compute_stability` log range recalibrated (4.3 → 3.8) so top Kraken asset saturates at 1.0
+   - USD gets `vol_pct=0` (principled — no self-pair means no volatility in its own terms)
+2. **Shadow-mode unified hold scoring** (commit `06fb1b1`)
+   - New `invert_analysis()` flips directional signals for the quote side of any pair
+   - New `compute_unified_holds()` aggregates per-asset hold scores via bidirectional pair analysis
+   - Requires `n >= 3` for eligibility, uses top-3 mean as aggregator
+3. **Shadow verdict persistence + analyzer + promotion doc** (commit `8344ba5`)
+   - Each cycle writes a `shadow_verdict` memory with full state
+   - `scripts/analyze_shadow.py` reads back and computes agreement stats
+   - `tasks/shadow_promotion_criterion.md` spells out the three-part promotion bar
+4. **Stablecoin vol_pct fix** (commit `8344ba5`)
+   - vol_pct now scales with HMM `probabilities.volatile`, not a fixed ranging default
+   - USDT/USDC stability went from ~0.64 → **0.86** with no other changes
+5. **TUI Shadow column** (commit `5b3eb4d`) — new holdings column shows per-held top3_mean
+6. **Duplicate-entry fix + narrow shadow veto** (commit `b177900`)
+   - `get_pairs_with_pending_orders()` reads pending_order memory and blocklists re-proposal
+   - **Narrow USD veto is LIVE**: when shadow's best hold is USD, cash-to-crypto entries are blocked
+   - Only fires on `best_shadow == "USD"`; does not veto rotations or exits
+7. **pair_decimals fix** (commit `5c59540`) — `_price_decimals` now uses Kraken's authoritative `pair_decimals` field (fallback to magnitude heuristic)
+8. **Windows Task Scheduler** (commit `42d76e1`) — `scripts/register_scheduled_task.ps1` + `scripts/run_cc_brain_scheduled.ps1`, registered task name `KrakenBot-CcBrainCycle`
+9. **Floor-round sell qty** (merged from codex/01-floor-round, `446ba44`)
+   - New `_floor_qty(qty, pair)` uses `lot_decimals` from AssetPairs, rounds DOWN
+   - Applied to sweep_dust, rotation sells, and exit sells
+   - Fixes `EOrder:Insufficient funds` loop that was stuck on CRV/COMP
+10. **Backfill forward-return 6h analysis** (merged from codex/05, `f18172e`)
+    - Result at `tasks/specs/05-backfill-6h-analysis.result.md`
+    - **IMPORTANT**: the analysis script has a methodology bug — it treats dry-runs and failed orders as filled. Corrected ground-truth analysis on the 6 actually-filled cycles shows shadow wins **+11.59%** over 6h (see investigation findings below).
+
+### Session 3 investigation findings (fee + backfill validity)
+
+1. **RAVE +35.25% "live win" never happened** — 2026-04-12 01:32 UTC brain report shows `FAILED: RAVE/USD — EGeneral:Invalid arguments:volume minimum not met`. Kraken rejected the order on ordermin. Codex-05 backfill counted it in live's column; correcting that reverses the cumulative-edge sign.
+2. **Corrected shadow analysis (filled cycles only)**: 6/6 shadow wins at 6h, shadow edge **+11.59%**. Shadow was right every time the bot actually committed capital.
+3. **Fees are 0.40% roundtrip = 0.20% per side** — that's taker, not maker. Root cause: `scripts/cc_brain.py` lines 1010/1236/1261/1278 set limit price to `price * 1.002` for buys / `price * 0.998` for sells, which crosses the spread and executes as taker. Should be passive maker (or post-only flag).
+4. **True underlying performance (ex-USDT outlier) is essentially break-even** — the bot's edge per trade is roughly equal to its fee burden. The entire 7-day `-$14.58` loss is dominated by one suspicious `USDT/USD -$15.85` trade (cost $36.96, proc $21.11 — 43% loss on a stablecoin, almost certainly an accounting error).
+5. **Self-tune rule is backwards**: it bumps `MAX_POSITION_PCT` when `fees/gross_wins > 60%`, but bigger positions don't change the fee/win ratio. The correct lever is fee rate per side (maker vs taker).
+
+### Hardening batch status (dispatched via `../Agent/runner/parallel-codex-runner.py`)
+
+Specs + plans live in `tasks/specs/`. Manifest at `dispatch/kraken-bot-hardening.manifest.json`. Dispatch prompts at `../Agent/dispatch/prompts/kraken-bot-hardening/`.
+
+| Spec | Status | Notes |
+|------|--------|-------|
+| 01 floor-round-exit-qty | **MERGED** (codex/01, commit `446ba44`) | Works — verified against real balances |
+| 02 open-orders-tracking | **FAILED** — ownership enforcement rejected it | Codex needed to extend `exchange/models.py` + `exchange/parsers.py` which weren't in owned_paths. Also hit git-worktree permission issue on commit. Work was lost. Needs retry with expanded owned_paths. |
+| 03 fiat-filter-check-exits | BLOCKED (depends on 02) | Ready to run once 02 lands |
+| 04 extended-shadow-veto | ON HOLD | Evidence is not in for the extended veto. The narrow USD veto is sufficient based on current data. Deferring until more real filled-trade data accumulates. |
+| 05 backfill-6h-analysis | **MERGED** (codex/05, commit `f18172e`) | BUT the backfill script itself needs a fix (spec 06) — it conflates dry-runs and failures with filled trades. |
+| **06 (new)** fix-backfill-script | QUEUED | `scripts/backfill_shadow.py` should skip `Mode: DRY RUN` cycles and only count `PLACED:` (not `FAILED:`) lines |
+| **07 (new)** ordermin-precheck | QUEUED | Before proposing an entry, check pair `ordermin`/`costmin` from AssetPairs and skip if budget can't meet them. Would have prevented the RAVE failure. |
+| **08 (new)** maker-fee-optimization | QUEUED — **CRITICAL** | Replace `price * 1.002` aggressive limit with passive post-only limits at best-bid/best-ask OR reduce buffer to 0.01-0.05%. Current 0.40% roundtrip → target 0.32% (maker rate). |
+| **09 (new)** usdt-loss-investigation | QUEUED — HIGH | Debug the `USDT/USD -$15.85` loss. Probably partial-fill accounting error. That one trade IS the entire 7-day loss. |
+| **10 (new)** self-tune-rule-fix | QUEUED — LOW | Remove the "fees/gross_wins > 60% → bump MAX_POSITION_PCT" rule or rewrite it to adjust fee rate instead of position size. |
 
 ### CC REST Toolkit
 
@@ -188,23 +247,33 @@ SCANNER_MAX_SPREAD_PCT=2.0
 - **Post-mortem everything.** Every closed trade gets analyzed. Patterns become rules.
 - **Memory is continuity.** Write decisions and reasoning. Future CC reads them.
 
-## Goal for next session
+## Goal for next session (session 3 continuation)
 
-### Priority 1: Run CC brain cycles and observe
+**You are resuming mid-task.** The user approved "B, then A" which means:
+- B = fee investigation — **DONE** (findings in "Session 3 investigation findings" above)
+- A = dispatch the hardening batch with new specs 06-10 added
 
-- Run `scripts/cc_brain.py --dry-run` to verify scoring produces non-zero scores
-- Watch the score breakdown output — tune component weights if needed
-- Monitor AVAX/USD trade outcome (first CC-placed trade)
+### Immediate next action
 
-### Priority 2: Simplify TA ensemble
+Write specs and plans for 06, 07, 08, 09, 10 in `tasks/specs/`. Then update `dispatch/kraken-bot-hardening.manifest.json` to:
+- Re-add `02-open-orders` with expanded `owned_paths` including `exchange/models.py` and `exchange/parsers.py`
+- Add agents for 06, 07, 08, 09, 10
+- **Remove** 04-extended-shadow-veto from the batch (on hold pending more data)
+- Re-dispatch via `python ../Agent/runner/parallel-codex-runner.py --manifest dispatch/kraken-bot-hardening.manifest.json --reset`
 
-- Strip from 6 signals (EMA, RSI, MACD, Bollinger, momentum x2) to 2 (RSI + EMA)
-- The bot's TA ensemble is less relevant now (CC does its own analysis) but still used by TimesFM belief handler
+### After the batch lands
 
-### Priority 3: Live brain run with dust sweep
+1. Run `scripts/analyze_shadow.py --hours 24` — check how many shadow verdicts have accumulated since the scheduled task started firing
+2. Verify the narrow USD veto fired at least once (shadow_wants_cash == True on any cycle where live would otherwise have entered)
+3. Re-run the corrected backfill (after spec 06 ships) to get a clean shadow-vs-live comparison
+4. Look at fee reduction after spec 08 — should see per-trade fees drop from 0.40% → ~0.32% roundtrip
 
-- Run `scripts/cc_brain.py` (live mode) to attempt dust sell (ASTER/AZTEC/BANANAS31)
-- If dust is below ordermin, it'll be logged as stuck — consider manual cleanup or just ignore
+### Do NOT do (explicit on-hold list)
+
+- Do not extend the shadow veto (spec 04) — evidence doesn't support it yet
+- Do not trust `scripts/backfill_shadow.py` output until spec 06 ships (counts dry-runs as filled)
+- Do not raise `MAX_POSITION_PCT` further — self-tune rule is backwards
+- Do not touch the scheduled task unless it starts misfiring
 
 ## What shipped 2026-04-11 (session 2)
 
