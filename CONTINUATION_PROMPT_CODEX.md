@@ -80,8 +80,60 @@ Each entry is a paragraph of context that survives a clean session restart. Form
 - context % at end (or estimate if /context wasn't run)
 - next target
 
-### 2026-04-12T19:00Z — initial handoff doc created
+### 2026-04-12T19:00Z -- initial handoff doc created
 
 Loop just transitioned from manual user dispatch to autonomous mode. User said "go for it" on specs 17 + 18 (orchestrator self-correction). Context at start of this batch: ~35% (estimated, /context last read 29% before specs 14/15/16 landed). About to dispatch spec 17.
 
 Next target: spec 17 implementation via Codex dispatch.
+
+### 2026-04-12T20:35Z -- specs 17/18/19 landed
+
+Specs 17 (time-window observation), 18 (Codex challenge on no_action), and 19 (weekly review run) all dispatched, verified, committed, pushed. KrakenBot-CcOrchestrator-Weekly task registered (Sundays 10am local).
+
+Stack now: tactical 6h loop + weekly Sunday loop + Codex-challenge fail-safe on no_action + time-windowed observation. The full self-improving meta-loop is structurally complete.
+
+Commits since last handoff:
+- 354b6f5 spec 17 time-window
+- 0858406 spec 18 Codex challenge
+- ef87bee workflow docs + CONTINUATION_PROMPT_CODEX.md
+- 50e4f53 spec 19 weekly review
+
+Tests: still 690 passing (no Python changes since spec 16). All wrapper changes verified by PSParser.
+
+### 2026-04-12T20:50Z -- spec 20 landed
+
+Spec 20 (recent-dispatch history injection) dispatched, verified, committed, pushed (commit 73536bf).
+
+Closes the cross-run amnesia gap: state.json only holds last_spec_slug (one slot), so the orchestrator could re-propose a spec it dispatched 2+ runs ago without knowing. Wrapper now parses the orchestrator log, injects the last 7 days of dispatches into the runtime context, and both prompts (tactical + weekly) instruct the LLM to check the history before picking a target.
+
+### Pause for context check 2026-04-12T20:55Z
+
+Context check needed. Estimate based on work since /context read 29%: ~60-65% used. Approaching 70% threshold.
+
+Specs landed in this autonomous run: 17, 18, 19, 20 (4 specs in one batch).
+
+Stack state at this pause:
+- L1 Bot (PID 9832) -- healthy, restarted with spec 16 changes
+- L2 CC-Brain (PID 27516) -- healthy, --loop active
+- L3 CC-Orchestrator -- 2 scheduled tasks registered:
+  - KrakenBot-CcOrchestrator (every 6h, tactical, next fire 2026-04-12 15:15 PT)
+  - KrakenBot-CcOrchestrator-Weekly (Sundays 10am local)
+- All 690 pytest tests still passing
+- Master branch: 73536bf
+
+Untested in production:
+- Spec 17 (time-window): verified via dry run, but no live fire yet has had pre/post-fix data to test against
+- Spec 18 (Codex challenge): logic exists but only fires on LIVE no_action -- not yet exercised
+- Spec 19 (weekly): never run
+- Spec 20 (dispatch history): verified via PSParser, not live-tested yet
+
+Open follow-ups for next session:
+1. Live-test spec 17/18/20 by waiting for the next scheduled fire (15:15 PT) or by manual -Force run
+2. Raise the 320k daily token cap (currently nonsensical -- a single run uses ~250k)
+3. Add per-run cost tracking from total_cost_usd field
+4. Investigate residual orphan balances (FLOW, TRIA) -- spec 16 only fixed NEW orders
+5. Persistent observe-state caching to reduce token use across runs (the bot's brain reports change slowly; we can cache summaries)
+
+Next target if continuing: probably spec 21 (raise + cost tracking) since it's small and unblocks accurate budgeting. Or wait for live fire to validate 17/18/20 first.
+
+User instruction: stop here if context > 70%, wait for clear, resume from this doc. If under 70%, continue with spec 21 or live-test sequence.
