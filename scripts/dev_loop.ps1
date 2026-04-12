@@ -1,6 +1,6 @@
 # CC Orchestrator -- Dev Loop Wrapper
 #
-# Pre-flight: gate checks. Invokes claude with the dev_loop_prompt.md.
+# Pre-flight: gate checks. Invokes claude with the selected prompt file.
 # Post-flight: parses output, updates state.json, appends to run log.
 #
 # Usage:
@@ -8,11 +8,13 @@
 #   pwsh -File scripts/dev_loop.ps1 -DryRun        # observe + diagnose only, no writes
 #   pwsh -File scripts/dev_loop.ps1 -Force         # bypass gates (manual fire only)
 #   pwsh -File scripts/dev_loop.ps1 -SkipChallenge # skip Codex challenge on no_action
+#   pwsh -File scripts/dev_loop.ps1 -PromptFile scripts/dev_loop_weekly_prompt.md -DryRun -Force
 
 param(
     [switch]$DryRun,
     [switch]$Force,
-    [switch]$SkipChallenge
+    [switch]$SkipChallenge,
+    [string]$PromptFile = "$PSScriptRoot/dev_loop_prompt.md"
 )
 
 $ErrorActionPreference = "Stop"
@@ -28,7 +30,6 @@ $RunsDir    = Join-Path $StateDir "runs"
 $StateFile  = Join-Path $StateDir "state.json"
 $DisableFile= Join-Path $StateDir "disabled"
 $EscalFile  = Join-Path $StateDir "escalate.md"
-$PromptFile = Join-Path $RepoRoot "scripts/dev_loop_prompt.md"
 $OrchDoc    = Join-Path $RepoRoot "CONTINUATION_PROMPT_cc_orchestrator.md"
 
 $Ts = (Get-Date).ToUniversalTime().ToString("yyyyMMdd_HHmmss")
@@ -353,12 +354,19 @@ Write-RunLog "injecting last_code_commit_ts=$lastCodeCommitIso"
 # INVOKE CLAUDE
 # ============================================================
 
-if (-not (Test-Path $PromptFile)) {
+if (-not [System.IO.Path]::IsPathRooted($PromptFile)) {
+    $PromptFile = Join-Path $RepoRoot $PromptFile
+}
+
+if (-not (Test-Path -LiteralPath $PromptFile)) {
     Write-RunLog "ERROR: prompt file missing at $PromptFile"
     Exit-NoAction "prompt file missing" $state
 }
 
-$promptText = Get-Content $PromptFile -Raw
+$PromptFile = (Resolve-Path -LiteralPath $PromptFile).Path
+Write-RunLog "prompt: $PromptFile"
+
+$promptText = Get-Content -LiteralPath $PromptFile -Raw
 $runtimeContextBlock = "## RUNTIME CONTEXT (injected by wrapper)`n" +
                        "- last_code_commit_ts: $lastCodeCommitIso`n" +
                        "- Brain reports / memories with timestamps BEFORE this point reflect the OLD code and may show pathology that has already been fixed. When counting ""recurring patterns"" for priority rules 2/4/5/6/7, ONLY count occurrences with timestamp > last_code_commit_ts.`n`n"
