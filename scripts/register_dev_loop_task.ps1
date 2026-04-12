@@ -48,7 +48,7 @@ if ($startTime -lt $now.AddMinutes(5)) {
     $startTime = $startTime.AddHours(1)
 }
 # Round to the next 6h slot from $startTime
-# Just use $startTime as-is — task will fire at $startTime, then every 6h after
+# Just use $startTime as-is -- task will fire at $startTime, then every 6h after
 
 $Trigger = New-ScheduledTaskTrigger `
     -Once `
@@ -74,7 +74,7 @@ $Task = New-ScheduledTask `
     -Trigger $Trigger `
     -Settings $Settings `
     -Principal $Principal `
-    -Description "CC Orchestrator — autonomous dev loop for kraken-bot-v4. Runs every 6h. See CONTINUATION_PROMPT_cc_orchestrator.md."
+    -Description "CC Orchestrator -- autonomous dev loop for kraken-bot-v4. Runs every 6h. See CONTINUATION_PROMPT_cc_orchestrator.md."
 
 # Unregister existing if present
 if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {

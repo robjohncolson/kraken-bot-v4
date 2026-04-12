@@ -1,4 +1,4 @@
-# CC Orchestrator — Continuation Prompt
+# CC Orchestrator -- Continuation Prompt
 
 This file documents the **autonomous dev loop** that runs above CC-Brain.
 It is appended to by `scripts/dev_loop.ps1` on every run.
@@ -19,7 +19,7 @@ Layer 2: CC-Brain (cc_brain.py --loop)
 
 Layer 1: Bot (main.py)
    WebSocket prices, TP/SL, fill settlement, REST API at :58392
-   "deterministic body" — no autonomous decisions when CC_BRAIN_MODE=true
+   "deterministic body" -- no autonomous decisions when CC_BRAIN_MODE=true
 ```
 
 ## Files owned by Layer 3
@@ -30,11 +30,11 @@ Layer 1: Bot (main.py)
 | `scripts/dev_loop_prompt.md` | The prompt the LLM follows |
 | `scripts/register_dev_loop_task.ps1` | Helper to register the Windows scheduled task |
 | `state/dev-loop/state.json` | Persistent state across runs |
-| `state/dev-loop/disabled` | Manual kill switch — `touch` to disable |
-| `state/dev-loop/escalate.md` | Written by loop when stuck — user must resolve |
+| `state/dev-loop/disabled` | Manual kill switch -- `touch` to disable |
+| `state/dev-loop/escalate.md` | Written by loop when stuck -- user must resolve |
 | `state/dev-loop/runs/<ts>.log` | Per-run claude stdout/stderr |
 | `state/dev-loop/runs/<ts>.summary.md` | Per-run structured summary |
-| `CONTINUATION_PROMPT_cc_orchestrator.md` | THIS file — chronological run log + current state |
+| `CONTINUATION_PROMPT_cc_orchestrator.md` | THIS file -- chronological run log + current state |
 
 ## Hard rules (the loop will NOT violate these)
 
@@ -47,16 +47,16 @@ Layer 1: Bot (main.py)
 7. NEVER dispatch if previous spec is "unsettled" (1+ brain cycle since commit AND no new permission_blocked / stuck_dust)
 8. NEVER touch `tasks/lessons.md` or `CLAUDE.md`
 9. ALWAYS update this file at end of every run
-10. If anything risky / unclear → write `escalate.md` and exit
+10. If anything risky / unclear -> write `escalate.md` and exit
 
 ## Pre-flight gates (the wrapper will skip the run if any fail)
 
 | Gate | Failure mode |
 |------|--------------|
-| `state/dev-loop/disabled` exists | Manual kill — user disabled |
+| `state/dev-loop/disabled` exists | Manual kill -- user disabled |
 | `state/dev-loop/escalate.md` exists | Loop is waiting for user resolution |
 | `consecutive_failures >= 3` | Auto-disabled, requires manual reset |
-| Bot `/api/health` unreachable | Bot is down — escalate manually |
+| Bot `/api/health` unreachable | Bot is down -- escalate manually |
 | Bot uptime < 3600s | Bot just restarted, let it settle |
 | Last commit < 30 min old | Previous spec hasn't settled yet |
 | Unstaged user changes (modified, not untracked) | User is mid-edit, don't stomp |
@@ -82,10 +82,10 @@ Remove-Item state/dev-loop/disabled
 # Normal run (gates enforced)
 pwsh -File scripts/dev_loop.ps1
 
-# Dry run — gates enforced, claude invoked, but no commit/restart (relies on prompt to honor flag)
+# Dry run -- gates enforced, claude invoked, but no commit/restart (relies on prompt to honor flag)
 pwsh -File scripts/dev_loop.ps1 -DryRun
 
-# Force — bypass gates (use sparingly, e.g. to test after fixing escalation)
+# Force -- bypass gates (use sparingly, e.g. to test after fixing escalation)
 pwsh -File scripts/dev_loop.ps1 -Force
 ```
 
@@ -107,12 +107,12 @@ For live state, read `state/dev-loop/state.json` and the most recent file in `st
 
 ## Run log
 
-Each run appends one line below. Format: `- <UTC ts> -- **<status>** action=<...> spec=<...> commit=<sha> restarted=<...>`. The wrapper owns this section — claude is told NOT to write here directly.
+Each run appends one line below. Format: `- <UTC ts> -- **<status>** action=<...> spec=<...> commit=<sha> restarted=<...>`. The wrapper owns this section -- claude is told NOT to write here directly.
 
 ### Bring-up (2026-04-12)
 
-- 20260412_182308 UTC -- **dry_run** action=would_dispatch (proposed spec=14 seed-restricted-fiat-pair-blacklist) — bring-up dry run, identified historical AUD/USD recurring pattern from pre-restart cycles
-- 20260412_182639 UTC -- **error** (claude refused: curl tool not allowed under acceptEdits permission mode) — fixed by switching wrapper to bypassPermissions
-- 20260412_182741 UTC -- **no_action** — first successful live fire (222s wall-clock). Correctly deferred: AUD/USD pattern no longer present after spec 12 went live, USDT phantom already fixed by spec 11, recon warning is benign held-fiat accounting. Run log: `state/dev-loop/runs/20260412_182741.log`
+- 20260412_182308 UTC -- **dry_run** action=would_dispatch (proposed spec=14 seed-restricted-fiat-pair-blacklist) -- bring-up dry run, identified historical AUD/USD recurring pattern from pre-restart cycles
+- 20260412_182639 UTC -- **error** (claude refused: curl tool not allowed under acceptEdits permission mode) -- fixed by switching wrapper to bypassPermissions
+- 20260412_182741 UTC -- **no_action** -- first successful live fire (222s wall-clock). Correctly deferred: AUD/USD pattern no longer present after spec 12 went live, USDT phantom already fixed by spec 11, recon warning is benign held-fiat accounting. Run log: `state/dev-loop/runs/20260412_182741.log`
 
 ### Scheduled fires
