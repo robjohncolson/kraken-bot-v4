@@ -50,6 +50,8 @@ Also check the Agent repo:
 
 ### Step 2 -- Diagnose
 
+When counting recurring patterns (rules 2, 4, 5, 6, 7), the wrapper has injected `last_code_commit_ts` in the runtime context block at the top of this prompt. Only count pattern occurrences from brain reports / memories with `timestamp > last_code_commit_ts`. Earlier observations are PRE-FIX HISTORY -- noted, not counted.
+
 Pick the **single highest-leverage issue** from this priority order. Stop at the first match.
 
 1. **Pytest failure** in any recent CI artifact or after a recent commit -- fix the broken test

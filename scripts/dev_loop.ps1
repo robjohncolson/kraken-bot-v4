@@ -334,6 +334,19 @@ if (-not $settled.settled -and -not $Force) {
 
 Write-RunLog "all gates passed -- invoking claude"
 
+$lastCodeCommitRaw = @(git log -1 --format=%ct -- '*.py' 2>$null) | Select-Object -First 1
+if (-not $lastCodeCommitRaw) {
+    $lastCodeCommitRaw = @(git log -1 --format=%ct -- "*.py" 2>$null) | Select-Object -First 1
+}
+if (-not $lastCodeCommitRaw) {
+    throw "unable to determine last .py commit timestamp from git log"
+}
+
+$lastCodeCommitTs = [int]("$lastCodeCommitRaw".Trim())
+$epoch = Get-Date "1970-01-01Z"
+$lastCodeCommitIso = $epoch.AddSeconds($lastCodeCommitTs).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+Write-RunLog "injecting last_code_commit_ts=$lastCodeCommitIso"
+
 # ============================================================
 # INVOKE CLAUDE
 # ============================================================
@@ -344,6 +357,10 @@ if (-not (Test-Path $PromptFile)) {
 }
 
 $promptText = Get-Content $PromptFile -Raw
+$runtimeContextBlock = "## RUNTIME CONTEXT (injected by wrapper)`n" +
+                       "- last_code_commit_ts: $lastCodeCommitIso`n" +
+                       "- Brain reports / memories with timestamps BEFORE this point reflect the OLD code and may show pathology that has already been fixed. When counting ""recurring patterns"" for priority rules 2/4/5/6/7, ONLY count occurrences with timestamp > last_code_commit_ts.`n`n"
+$promptText = $runtimeContextBlock + $promptText
 $invocationMode = if ($DryRun) { "DRY RUN -- claude will plan but not write/dispatch/commit/restart" } else { "LIVE" }
 Write-RunLog "mode: $invocationMode"
 
