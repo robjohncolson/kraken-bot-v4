@@ -84,6 +84,25 @@ def _floor_qty(qty: float, pair: str | None = None) -> str:
     return f"{floored:.{decimals}f}".rstrip("0").rstrip(".") or "0"
 
 
+def _meets_order_minimums(pair: str, qty: float, price: float) -> tuple[bool, str]:
+    """Check whether an order clears Kraken's cached minimum size constraints."""
+    try:
+        pairs = _fetch_kraken_pairs()
+    except Exception:
+        return True, ""
+    info = pairs.get(pair)
+    if not info:
+        return True, ""
+    ordermin = info.get("ordermin")
+    costmin = info.get("costmin")
+    if ordermin is not None and qty < ordermin:
+        return False, f"qty {qty:.6f} < ordermin {ordermin}"
+    cost = qty * price
+    if costmin is not None and cost < costmin:
+        return False, f"cost ${cost:.2f} < costmin ${costmin}"
+    return True, ""
+
+
 # Strategy parameters
 MAX_POSITION_PCT = 0.04      # 4% of portfolio per position
 DUST_THRESHOLD_PCT = 0.01    # 1% of portfolio — below this is dust
@@ -152,6 +171,8 @@ def _fetch_kraken_pairs() -> dict[str, dict]:
             "key": key, "base": base, "quote": quote,
             "pair_decimals": meta.get("pair_decimals"),
             "lot_decimals": meta.get("lot_decimals"),
+            "ordermin": float(meta["ordermin"]) if meta.get("ordermin") else None,
+            "costmin": float(meta["costmin"]) if meta.get("costmin") else None,
         }
 
     _discovered_cache["pairs"] = all_pairs
@@ -643,6 +664,15 @@ def evaluate_portfolio(
 
             pair = pair_info["pair"]
             side = "sell" if pair_info["base"] == from_asset else "buy"
+            check_price = float(to_analysis.get("price", 0) or 0)
+            if side == "sell":
+                check_qty = float(pos.get("quantity_total", 0) or 0)
+            else:
+                check_qty = (float(pos.get("usd_value", 0) or 0) / check_price
+                             if check_price > 0 else 0)
+            ok, _ = _meets_order_minimums(pair, check_qty, check_price)
+            if not ok:
+                continue
             proposals.append({
                 "from_asset": from_asset,
                 "to_asset": to_asset,
@@ -991,14 +1021,18 @@ def check_exits(
         stab = stabilities.get(asset, 0)
         hold = score_hold(analysis, stab)
         if hold < 0.20:
-            exits.append({
+            exit_order = {
                 "pair": pair, "side": "sell", "asset": asset,
                 "hold_score": round(hold, 3),
                 "reason": "quality_collapse",
                 "price": analysis["price"],
                 "qty": h["qty"],
                 "value_usd": h["value_usd"],
-            })
+            }
+            ok, _ = _meets_order_minimums(pair, h["qty"], analysis["price"])
+            if not ok:
+                continue
+            exits.append(exit_order)
     # Only exit worst position per cycle — avoid panic-selling
     exits.sort(key=lambda e: e["hold_score"])
     return exits[:1]
@@ -1285,6 +1319,16 @@ def run_brain(dry_run: bool = False) -> str:
     if not orders_to_place:
         scored = [(a, a["_score"], a["_breakdown"]) for a in analyses
                   if a["pair"] not in pending_pairs]
+        filtered_scored = []
+        for a, s, bd in scored:
+            price = float(a.get("price", 0) or 0)
+            candidate_qty = max_position_value / price if price > 0 else 0
+            ok, reason = _meets_order_minimums(a["pair"], candidate_qty, price)
+            if ok:
+                filtered_scored.append((a, s, bd))
+            else:
+                log(f"  Skip {a['pair']} (score={s:.2f}): {reason}")
+        scored = filtered_scored
         scored.sort(key=lambda x: -x[1])
         if scored and scored[0][1] > ENTRY_THRESHOLD and cash_usd >= max_position_value:
             if shadow_wants_cash:
