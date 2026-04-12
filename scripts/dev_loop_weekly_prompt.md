@@ -57,6 +57,8 @@ Use date-bounded queries everywhere. The task is weekly review, not lifetime arc
 
 When deciding whether a weekly pattern is still active, the wrapper has injected `last_code_commit_ts` in the runtime context block at the top of this prompt. Use it to separate PRE-FIX HISTORY from POST-FIX BEHAVIOR. Earlier observations can provide background, but do not count them as still-current recurrence if the code changed afterward.
 
+Before picking a target, scan the RECENT DISPATCH HISTORY section in the runtime context. If your candidate spec slug or action conceptually matches one already dispatched in the last 7 days, pick something else (or set status=no_action with a reason citing the prior dispatch).
+
 Pick the **single highest-leverage issue** from this priority order. Stop at the first match.
 
 1. **Trend in win rate over 7d** (e.g. dropped > 10 percentage points week-over-week)
