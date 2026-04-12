@@ -202,6 +202,80 @@ function Get-ClaudeCostUsd($payload) {
     try { return [double]$value } catch { return [double]0 }
 }
 
+function Get-BotHealthSnapshot {
+    try {
+        $dbPath = Join-Path $RepoRoot 'data/bot.db'
+        $pyScript = Join-Path $RepoRoot 'scripts/dev_loop_health_snapshot.py'
+        $balancesUrl = 'http://127.0.0.1:58392/api/balances'
+        if (-not (Test-Path -LiteralPath $pyScript)) { return $null }
+        if (-not (Test-Path -LiteralPath $dbPath)) { return $null }
+        $json = & 'C:/Python313/python.exe' $pyScript $dbPath $balancesUrl 2>&1
+        if ($LASTEXITCODE -ne 0) { return $null }
+        $jsonText = ($json | Select-Object -Last 1 | Out-String).Trim()
+        if (-not $jsonText) { return $null }
+        return $jsonText | ConvertFrom-Json
+    } catch {
+        Write-RunLog "WARN: health snapshot failed: $_"
+        return $null
+    }
+}
+
+function Format-HealthSnapshotCount([object]$value) {
+    if ($null -eq $value) {
+        return 'n/a'
+    }
+
+    try {
+        return ([int]$value).ToString()
+    } catch {
+        return 'n/a'
+    }
+}
+
+function Format-HealthSnapshotCurrency([object]$value) {
+    if ($null -eq $value) {
+        return 'n/a'
+    }
+
+    try {
+        $number = [double]$value
+        if ($number -lt 0) {
+            return ('-$' + ([math]::Abs($number)).ToString('F2'))
+        }
+        return ('$' + $number.ToString('F2'))
+    } catch {
+        return 'n/a'
+    }
+}
+
+function Format-HealthSnapshotPercent([object]$value) {
+    if ($null -eq $value) {
+        return 'n/a'
+    }
+
+    try {
+        return ([math]::Round(([double]$value) * 100).ToString() + '%')
+    } catch {
+        return 'n/a'
+    }
+}
+
+function Format-HealthSnapshotDeltaPp([object]$current, [object]$prior) {
+    if ($null -eq $current -or $null -eq $prior) {
+        return 'n/a'
+    }
+
+    try {
+        $deltaPp = [math]::Round((([double]$current) - ([double]$prior)) * 100)
+        if ($deltaPp -gt 0) {
+            return ('+' + $deltaPp.ToString() + 'pp')
+        }
+        return ($deltaPp.ToString() + 'pp')
+    } catch {
+        return 'n/a'
+    }
+}
+
 function Update-Orch-Doc($entry) {
     # Append a new entry to the chronological log at the bottom of CONTINUATION_PROMPT_cc_orchestrator.md
     if (-not (Test-Path $OrchDoc)) {
@@ -505,6 +579,44 @@ if ($recentDispatches.Count -gt 0) {
     $recentDispatchLines += "(No dispatches in the last 7 days.)"
 }
 $recentDispatchSection = ($recentDispatchLines -join "`n") + "`n"
+$healthSnapshot = Get-BotHealthSnapshot
+if ($null -eq $healthSnapshot) {
+    Write-RunLog 'health snapshot unavailable'
+    $healthSnapshotSection = "## HEALTH SNAPSHOT (unavailable)`n"
+} else {
+    $trades24hText = Format-HealthSnapshotCount $healthSnapshot.total_trades_24h
+    $trades7dText = Format-HealthSnapshotCount $healthSnapshot.total_trades_7d
+    $tradesPrior7dText = Format-HealthSnapshotCount $healthSnapshot.total_trades_prior_7d
+    $netPnl24hText = Format-HealthSnapshotCurrency $healthSnapshot.net_pnl_24h
+    $netPnl7dText = Format-HealthSnapshotCurrency $healthSnapshot.net_pnl_7d
+    $netPnlPrior7dText = Format-HealthSnapshotCurrency $healthSnapshot.net_pnl_prior_7d
+    $winRate7dText = Format-HealthSnapshotPercent $healthSnapshot.win_rate_7d
+    $winRatePrior7dText = Format-HealthSnapshotPercent $healthSnapshot.win_rate_prior_7d
+    $reconErrors24hText = Format-HealthSnapshotCount $healthSnapshot.recon_errors_24h
+    $permissionBlockedPairsText = Format-HealthSnapshotCount $healthSnapshot.permission_blocked_pairs
+    $openPositionsText = Format-HealthSnapshotCount $healthSnapshot.open_positions
+    $cashText = Format-HealthSnapshotCurrency $healthSnapshot.current_cash_usd
+    $totalValueText = Format-HealthSnapshotCurrency $healthSnapshot.current_total_value_usd
+    $pnlDelta7dText = 'n/a'
+    if ($null -ne $healthSnapshot.net_pnl_7d -and $null -ne $healthSnapshot.net_pnl_prior_7d) {
+        $pnlDelta7dText = Format-HealthSnapshotCurrency (([double]$healthSnapshot.net_pnl_7d) - ([double]$healthSnapshot.net_pnl_prior_7d))
+    }
+    $winRateDeltaText = Format-HealthSnapshotDeltaPp $healthSnapshot.win_rate_7d $healthSnapshot.win_rate_prior_7d
+
+    Write-RunLog ("computed health snapshot: trades_7d={0} pnl_7d={1}" -f $trades7dText, $netPnl7dText)
+
+    $healthSnapshotLines = @(
+        "## HEALTH SNAPSHOT (computed by wrapper from SQLite + /api/balances)"
+        ("- Trades 24h:    {0}    (7d: {1}, prior 7d: {2})" -f $trades24hText, $trades7dText, $tradesPrior7dText)
+        ("- Net P&L 24h:   {0}   (7d: {1}, prior 7d: {2})  Delta 7d: {3}" -f $netPnl24hText, $netPnl7dText, $netPnlPrior7dText, $pnlDelta7dText)
+        ("- Win rate 7d:   {0}   (prior 7d: {1})  Delta: {2}" -f $winRate7dText, $winRatePrior7dText, $winRateDeltaText)
+        ("- Recon errors 24h:    {0}" -f $reconErrors24hText)
+        ("- Permission-blocked pairs:    {0}" -f $permissionBlockedPairsText)
+        ("- Open positions:    {0}" -f $openPositionsText)
+        ("- Cash:    {0}   |   Total value:    {1}" -f $cashText, $totalValueText)
+    )
+    $healthSnapshotSection = ($healthSnapshotLines -join "`n") + "`n"
+}
 
 # ============================================================
 # INVOKE CLAUDE
@@ -527,6 +639,7 @@ $runtimeContextBlock = "## RUNTIME CONTEXT (injected by wrapper)`n" +
                        "- last_code_commit_ts: $lastCodeCommitIso`n" +
                        "- Brain reports / memories with timestamps BEFORE this point reflect the OLD code and may show pathology that has already been fixed. When counting ""recurring patterns"" for priority rules 2/4/5/6/7, ONLY count occurrences with timestamp > last_code_commit_ts.`n`n" +
                        $recentDispatchSection + "`n"
+$runtimeContextBlock = $runtimeContextBlock + $healthSnapshotSection + "`n"
 $promptText = $runtimeContextBlock + $promptText
 $invocationMode = if ($DryRun) { "DRY RUN -- claude will plan but not write/dispatch/commit/restart" } else { "LIVE" }
 Write-RunLog "mode: $invocationMode"

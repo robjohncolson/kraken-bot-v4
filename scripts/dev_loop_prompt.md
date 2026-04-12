@@ -31,6 +31,8 @@ If the previous spec is unsettled -> log "previous spec unsettled, waiting" and 
 
 ### Step 1 -- Observe
 
+The wrapper has computed a HEALTH SNAPSHOT in the runtime context block above. USE IT as your primary signal. Brain reports and SQLite queries should be a follow-up to verify or zoom in on what the snapshot shows.
+
 Read state from these sources (use the tools available -- Read, Bash, Grep):
 
 | Source | Command / Path |
