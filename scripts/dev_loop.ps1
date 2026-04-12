@@ -1,11 +1,11 @@
-# CC Orchestrator — Dev Loop Wrapper
+# CC Orchestrator -- Dev Loop Wrapper
 #
 # Pre-flight: gate checks. Invokes claude with the dev_loop_prompt.md.
 # Post-flight: parses output, updates state.json, appends to run log.
 #
 # Usage:
 #   pwsh -File scripts/dev_loop.ps1                # normal run
-#   pwsh -File scripts/dev_loop.ps1 -DryRun        # gates + invoke, no commits/restarts (relies on prompt to honor flag)
+#   pwsh -File scripts/dev_loop.ps1 -DryRun        # observe + diagnose only, no writes
 #   pwsh -File scripts/dev_loop.ps1 -Force         # bypass gates (manual fire only)
 
 param(
@@ -16,6 +16,10 @@ param(
 $ErrorActionPreference = "Stop"
 $RepoRoot = (Resolve-Path "$PSScriptRoot/..").Path
 Set-Location $RepoRoot
+
+# Force UTF-8 on console output so unicode chars from claude survive the pipe
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
 
 $StateDir   = Join-Path $RepoRoot "state/dev-loop"
 $RunsDir    = Join-Path $StateDir "runs"
@@ -64,20 +68,79 @@ function Update-Orch-Doc($entry) {
     # Append a new entry to the chronological log at the bottom of CONTINUATION_PROMPT_cc_orchestrator.md
     if (-not (Test-Path $OrchDoc)) {
         Write-RunLog "WARN: $OrchDoc not found, creating minimal stub"
-        Set-Content -Path $OrchDoc -Value "# CC Orchestrator — Continuation Prompt`n`n## Run log`n"
+        Set-Content -Path $OrchDoc -Value "# CC Orchestrator -- Continuation Prompt`n`n## Run log`n"
     }
     Add-Content -Path $OrchDoc -Value "`n$entry"
 }
 
 function Exit-NoAction($reason, $state) {
-    Write-RunLog "GATE: $reason — skipping run"
+    Write-RunLog "GATE: $reason -- skipping run"
     $state.last_run_ts = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
     $state.last_run_action = "skipped:$reason"
     $state.total_runs += 1
     Save-State $state
     Set-Content -Path $RunSummary -Value "## Run $Ts`n`nSkipped: $reason`n"
-    Update-Orch-Doc "- $Ts UTC — **skipped** ($reason)"
+    Update-Orch-Doc "- $Ts UTC -- **skipped** ($reason)"
     exit 0
+}
+
+function Test-PreviousSpecSettled($state) {
+    # The previous spec is "settled" when:
+    #   1. At least 1 brain cycle has run AFTER the last commit
+    #   2. No new permission_blocked / stuck_dust / reconciliation_anomaly memories
+    #      with timestamp > last commit timestamp
+    # Returns @{ settled = $true/$false; reason = "..." }
+
+    # If we've never dispatched a spec, nothing to settle
+    if (-not $state.last_spec_slug) {
+        return @{ settled = $true; reason = "no prior spec" }
+    }
+
+    $lastCommitTs = [int](git log -1 --format=%ct)
+    $epoch = Get-Date "1970-01-01Z"
+    $lastCommitDate = $epoch.AddSeconds($lastCommitTs).ToUniversalTime()
+    $lastCommitIso = $lastCommitDate.ToString("yyyy-MM-ddTHH:mm:ssZ")
+
+    # 1. Brain cycles after commit
+    $reviewDir = Join-Path $RepoRoot "state/cc-reviews"
+    if (-not (Test-Path $reviewDir)) {
+        return @{ settled = $false; reason = "state/cc-reviews missing" }
+    }
+    $cyclesAfter = Get-ChildItem -Path $reviewDir -Filter "brain_*.md" |
+        Where-Object { $_.LastWriteTimeUtc -gt $lastCommitDate } |
+        Measure-Object | Select-Object -ExpandProperty Count
+
+    if ($cyclesAfter -lt 1) {
+        return @{ settled = $false; reason = "no brain cycle after last commit (commit_ts=$lastCommitIso)" }
+    }
+
+    # 2. Check for new pathology memories via sqlite (use a temp script file to avoid here-string headaches)
+    $dbPath = Join-Path $RepoRoot "data/bot.db"
+    if (-not (Test-Path $dbPath)) {
+        return @{ settled = $true; reason = "no db, $cyclesAfter brain cycle(s) since commit" }
+    }
+
+    $tmpPy = Join-Path $env:TEMP "dev_loop_settled_check.py"
+    $pyCode = "import sqlite3, sys`n" +
+              "conn = sqlite3.connect(sys.argv[1])`n" +
+              "cur = conn.cursor()`n" +
+              "cur.execute(`"SELECT COUNT(*) FROM cc_memory WHERE category IN ('permission_blocked','stuck_dust','reconciliation_anomaly') AND timestamp > ?`", (sys.argv[2],))`n" +
+              "print(cur.fetchone()[0])`n"
+    Set-Content -Path $tmpPy -Value $pyCode -Encoding UTF8
+
+    try {
+        $newProblems = & "C:/Python313/python.exe" $tmpPy $dbPath $lastCommitIso 2>&1
+        $newProblems = [int]$newProblems
+    } catch {
+        Write-RunLog "WARN: sqlite query failed: $_ -- assuming settled"
+        return @{ settled = $true; reason = "sqlite query failed (treating as settled)" }
+    }
+
+    if ($newProblems -gt 0) {
+        return @{ settled = $false; reason = "$newProblems new pathology memories since commit" }
+    }
+
+    return @{ settled = $true; reason = "$cyclesAfter brain cycle(s) since commit, 0 new pathology" }
 }
 
 # ============================================================
@@ -96,7 +159,7 @@ if ($state.consecutive_failures -ge 3 -and -not $Force) {
 }
 
 if (Test-Path $EscalFile) {
-    Exit-NoAction "escalation file present (state/dev-loop/escalate.md) — user must resolve" $state
+    Exit-NoAction "escalation file present (state/dev-loop/escalate.md) -- user must resolve" $state
 }
 
 # Check bot uptime (need health endpoint)
@@ -114,9 +177,9 @@ try {
 $lastCommitTs = [int](git log -1 --format=%ct)
 $nowTs = [int](Get-Date -UFormat %s)
 $commitAgeMin = [math]::Round(($nowTs - $lastCommitTs) / 60.0, 1)
-Write-RunLog "last commit age: ${commitAgeMin}m"
+Write-RunLog "last commit age: $($commitAgeMin)m"
 if ($commitAgeMin -lt 30 -and -not $Force) {
-    Exit-NoAction "last commit < 30min old (${commitAgeMin}m)" $state
+    Exit-NoAction "last commit < 30min old ($($commitAgeMin)m)" $state
 }
 
 # Check unstaged user changes
@@ -133,7 +196,14 @@ if ($state.last_run_ts -and $state.last_run_ts.StartsWith($today) -and $state.cu
     Exit-NoAction "daily token budget exceeded ($($state.cumulative_token_input) tokens)" $state
 }
 
-Write-RunLog "all gates passed — invoking claude"
+# Check previous spec is settled (deterministic gate, not LLM judgment)
+$settled = Test-PreviousSpecSettled $state
+Write-RunLog "previous spec settled: $($settled.settled) ($($settled.reason))"
+if (-not $settled.settled -and -not $Force) {
+    Exit-NoAction "previous spec unsettled: $($settled.reason)" $state
+}
+
+Write-RunLog "all gates passed -- invoking claude"
 
 # ============================================================
 # INVOKE CLAUDE
@@ -145,16 +215,27 @@ if (-not (Test-Path $PromptFile)) {
 }
 
 $promptText = Get-Content $PromptFile -Raw
-$invocationMode = if ($DryRun) { "DRY RUN — claude will be told to plan but not commit/restart" } else { "LIVE" }
+$invocationMode = if ($DryRun) { "DRY RUN -- claude will plan but not write/dispatch/commit/restart" } else { "LIVE" }
 Write-RunLog "mode: $invocationMode"
 
 if ($DryRun) {
-    $promptText = $promptText + "`n`n## DRY RUN OVERRIDE`n`nThis is a DRY RUN. After Step 4 (dispatch), do NOT commit, do NOT restart. Just log what you would have done. Set action to 'dry_run' in the YAML output."
+    $dryOverride = "`n`n## DRY RUN OVERRIDE -- STRICT`n`n" +
+                   "You are in DRY RUN mode. DO NOT do any of the following:`n" +
+                   "- DO NOT write any files to tasks/specs/ (no spec, no plan, no result)`n" +
+                   "- DO NOT invoke cross-agent.py (no Codex dispatch)`n" +
+                   "- DO NOT run pytest (no verification)`n" +
+                   "- DO NOT commit anything (no git add, no git commit)`n" +
+                   "- DO NOT restart any process (no taskkill, no main.py launch, no cc_brain launch)`n`n" +
+                   "DO the following:`n" +
+                   "- Step 1: Observe (read brain reports, query SQLite, check git log)`n" +
+                   "- Step 2: Diagnose (pick the single highest-leverage issue from the priority list)`n" +
+                   "- Step 3: Decide (state which spec slug you would dispatch and to which repo)`n`n" +
+                   "End your response with the YAML summary block, but with status='dry_run' and action='would_dispatch' or 'no_action'."
+    $promptText = $promptText + $dryOverride
 }
 
 # Build the claude command. We use --print for headless mode.
-# --max-turns bounds runtime. --output-format text keeps parsing simple.
-# Token tracking: claude --print emits a final summary line with token use.
+# --max-turns bounds runtime. The LLM still has full tool access in print mode.
 $ClaudeCmd = "claude"
 $ClaudeArgs = @(
     "--print"
@@ -175,13 +256,13 @@ try {
     $state.total_runs += 1
     Save-State $state
     Set-Content -Path $RunSummary -Value "## Run $Ts`n`nFailed to invoke claude: $_`n"
-    Update-Orch-Doc "- $Ts UTC — **error** (claude invoke failed: $_)"
+    Update-Orch-Doc "- $Ts UTC -- **error** (claude invoke failed: $_)"
     exit 1
 }
-$claudeDur = (New-TimeSpan -Start $claudeStart -End (Get-Date)).TotalSeconds
+$claudeDur = [math]::Round((New-TimeSpan -Start $claudeStart -End (Get-Date)).TotalSeconds, 1)
 
 # Save raw claude output to run log
-Add-Content -Path $RunLog -Value "`n=== claude output (exit=$exitCode, ${claudeDur}s) ===`n"
+Add-Content -Path $RunLog -Value "`n=== claude output (exit=$exitCode, dur=$($claudeDur)s) ===`n"
 Add-Content -Path $RunLog -Value ($output -join "`n")
 
 # ============================================================
@@ -189,7 +270,8 @@ Add-Content -Path $RunLog -Value ($output -join "`n")
 # ============================================================
 
 # Parse the YAML summary block from the output
-$yamlMatch = [regex]::Match(($output -join "`n"), '(?ms)---\s*loop_run_summary:(.*?)---')
+$outputJoined = $output -join "`n"
+$yamlMatch = [regex]::Match($outputJoined, '(?ms)---\s*loop_run_summary:(.*?)---')
 $parsedAction = "unknown"
 $parsedStatus = "unknown"
 $parsedSpecSlug = $null
@@ -210,20 +292,23 @@ if ($yamlMatch.Success) {
 
 # Check for escalation
 if ((Test-Path $EscalFile) -or $parsedStatus -eq "escalated") {
-    Write-RunLog "ESCALATED — incrementing consecutive_failures"
+    Write-RunLog "ESCALATED -- incrementing consecutive_failures"
     $state.consecutive_failures += 1
 } else {
     $state.consecutive_failures = 0
 }
 
 # Update state
+# Only update spec/commit tracking on REAL completed dispatches.
+# Dry runs and skipped/escalated/no_action runs don't change persistent dispatch state.
 $state.last_run_ts = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
-$state.last_run_action = "$parsedStatus`:$parsedAction"
-if ($parsedSpecSlug -and $parsedSpecSlug -ne "null") {
+$state.last_run_action = "$($parsedStatus):$($parsedAction)"
+$isRealDispatch = ($parsedStatus -eq "completed") -and ($parsedAction -eq "spec_dispatched")
+if ($isRealDispatch -and $parsedSpecSlug -and $parsedSpecSlug -ne "null") {
     $state.last_spec_slug = $parsedSpecSlug
     $state.total_specs_dispatched += 1
 }
-if ($parsedCommit -and $parsedCommit -ne "null") {
+if ($isRealDispatch -and $parsedCommit -and $parsedCommit -ne "null") {
     $state.last_commit_hash = $parsedCommit
 }
 $state.total_runs += 1
@@ -231,10 +316,13 @@ $state.total_runs += 1
 Save-State $state
 
 # Append to orchestrator continuation prompt
-$entryParts = @("- $Ts UTC — **$parsedStatus**")
+$entryParts = @("- $Ts UTC -- **$parsedStatus**")
 if ($parsedAction -ne "none" -and $parsedAction -ne "unknown") { $entryParts += "action=$parsedAction" }
 if ($parsedSpecSlug) { $entryParts += "spec=$parsedSpecSlug" }
-if ($parsedCommit) { $entryParts += "commit=$($parsedCommit.Substring(0, [Math]::Min(7, $parsedCommit.Length)))" }
+if ($parsedCommit) {
+    $shortHash = $parsedCommit.Substring(0, [Math]::Min(7, $parsedCommit.Length))
+    $entryParts += "commit=$shortHash"
+}
 if ($parsedRestart -ne "none" -and $parsedRestart -ne "unknown") { $entryParts += "restarted=$parsedRestart" }
 Update-Orch-Doc ($entryParts -join " ")
 
@@ -247,12 +335,12 @@ $summaryLines = @(
     "- spec_slug: $parsedSpecSlug"
     "- commit: $parsedCommit"
     "- restarted: $parsedRestart"
-    "- duration: ${claudeDur}s"
+    "- duration: $($claudeDur)s"
     "- consecutive_failures: $($state.consecutive_failures)"
     ""
     "See full claude output in $RunLog"
 )
 Set-Content -Path $RunSummary -Value ($summaryLines -join "`n")
 
-Write-RunLog "=== dev_loop end (status=$parsedStatus, dur=${claudeDur}s) ==="
+Write-RunLog "=== dev_loop end (status=$parsedStatus, dur=$($claudeDur)s) ==="
 exit 0
