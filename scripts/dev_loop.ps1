@@ -235,12 +235,14 @@ if ($DryRun) {
 }
 
 # Build the claude command. We use --print for headless mode.
-# --max-turns bounds runtime. The LLM still has full tool access in print mode.
+# --max-turns bounds runtime. bypassPermissions is safe here because the
+# wrapper's pre-flight gates + the prompt's hard rules enforce all safety
+# constraints (no push, no env edits, no restart if uptime <1h, etc.).
 $ClaudeCmd = "claude"
 $ClaudeArgs = @(
     "--print"
     "--max-turns", "60"
-    "--permission-mode", "acceptEdits"
+    "--permission-mode", "bypassPermissions"
 )
 
 # Execute
