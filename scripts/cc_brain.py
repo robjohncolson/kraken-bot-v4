@@ -122,6 +122,8 @@ TOP_PAIRS = [
 ]
 PERMISSION_BLOCKED_CATEGORY = "permission_blocked"
 PERMISSION_BLOCKED_ERROR = "EAccount:Invalid permissions"
+INSUFFICIENT_QUOTE_CATEGORY = "insufficient_quote_inventory"
+QUOTE_SUBSTITUTION_MIN_SCORE = 0.50
 
 
 def _limit_buy_price(price: float, pair: str) -> float:
@@ -707,6 +709,7 @@ def evaluate_portfolio(
 
 
 QUOTE_CURRENCIES = frozenset(("USD", "USDT", "USDC"))  # can't sell these as dust
+USD_EQUIVALENT_QUOTES = QUOTE_CURRENCIES | frozenset(("DAI", "PYUSD"))
 # Non-USD fiat currencies. Held as leftover balances from conversions
 # but not actively traded; excluded from exit scoring and rotation
 # evaluation. Stability scoring still applies (currency-agnostic).
@@ -1029,11 +1032,27 @@ def get_pairs_with_open_orders() -> set[str]:
     return pairs
 
 
-def load_permission_blocked() -> set[str]:
-    """Return pairs that previously failed with Kraken permission errors."""
-    blocked = fetch(
-        f"/api/memory?category={PERMISSION_BLOCKED_CATEGORY}&hours=999999&limit=1000"
-    )
+def get_available_exchange_balances() -> dict[str, float] | None:
+    """Return available Kraken balances keyed by normalized asset symbol."""
+    balances = fetch("/api/exchange-balances")
+    if "error" in balances or "balances" not in balances:
+        return None
+
+    available: dict[str, float] = {}
+    for balance in balances["balances"]:
+        asset = _ALIASES.get(str(balance.get("asset", "")), str(balance.get("asset", "")))
+        try:
+            qty = float(balance.get("available", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if qty <= 0:
+            continue
+        available[asset] = available.get(asset, 0.0) + qty
+    return available
+
+
+def _load_pairs_from_memory_category(category: str) -> set[str]:
+    blocked = fetch(f"/api/memory?category={category}&hours=999999&limit=1000")
     if "error" in blocked:
         return set()
 
@@ -1053,10 +1072,24 @@ def load_permission_blocked() -> set[str]:
     return blocked_pairs
 
 
-def filter_permission_blocked_orders(
-    orders_to_place: list[dict], blocked_pairs: set[str], log_fn,
+def load_permission_blocked() -> set[str]:
+    """Return pairs that previously failed with Kraken permission errors."""
+    return _load_pairs_from_memory_category(PERMISSION_BLOCKED_CATEGORY)
+
+
+def load_insufficient_quote_inventory_blocked() -> set[str]:
+    """Return pairs blocked after quote-inventory failures."""
+    return _load_pairs_from_memory_category(INSUFFICIENT_QUOTE_CATEGORY)
+
+
+def load_memory_blocked_pairs() -> set[str]:
+    """Return pairs that should be skipped due to persisted memory blocks."""
+    return load_permission_blocked() | load_insufficient_quote_inventory_blocked()
+
+
+def _filter_blocked_orders(
+    orders_to_place: list[dict], blocked_pairs: set[str], log_fn, label: str,
 ) -> list[dict]:
-    """Drop orders whose pair is known to be permission-blocked."""
     if not blocked_pairs:
         return orders_to_place
 
@@ -1073,9 +1106,25 @@ def filter_permission_blocked_orders(
     ]
     log_fn(
         f"  Filtered {len(orders_to_place) - len(filtered_orders)} "
-        f"permission-blocked order(s): {filtered_pairs}"
+        f"{label} order(s): {filtered_pairs}"
     )
     return filtered_orders
+
+
+def filter_permission_blocked_orders(
+    orders_to_place: list[dict], blocked_pairs: set[str], log_fn,
+) -> list[dict]:
+    """Drop orders whose pair is known to be permission-blocked."""
+    return _filter_blocked_orders(
+        orders_to_place, blocked_pairs, log_fn, "permission-blocked",
+    )
+
+
+def filter_blocked_orders(
+    orders_to_place: list[dict], blocked_pairs: set[str], log_fn,
+) -> list[dict]:
+    """Drop orders whose pair is blocked by persisted memory."""
+    return _filter_blocked_orders(orders_to_place, blocked_pairs, log_fn, "blocked")
 
 
 def persist_permission_blocked_memory(order: dict, error_text: str, log_fn) -> None:
@@ -1101,6 +1150,116 @@ def persist_permission_blocked_memory(order: dict, error_text: str, log_fn) -> N
         log_fn(f"  -> failed to persist permission block for {pair}: {result['error']}")
     else:
         log_fn(f"  -> persisted permission_blocked for {pair}")
+
+
+def persist_insufficient_quote_inventory_memory(
+    pair: str, base: str, quote: str, available: float, required: float, log_fn,
+) -> None:
+    """Persist a pair block when quote inventory is too small for a new entry."""
+    result = fetch("/api/memory", method="POST", data={
+        "category": INSUFFICIENT_QUOTE_CATEGORY,
+        "pair": pair,
+        "content": {
+            "base": base,
+            "quote": quote,
+            "available": round(available, 8),
+            "required": round(required, 8),
+        },
+        "importance": 0.7,
+    })
+    if "error" in result:
+        log_fn(f"  -> failed to persist insufficient_quote_inventory for {pair}: {result['error']}")
+    else:
+        log_fn(f"  -> persisted insufficient_quote_inventory for {pair}")
+
+
+def _quote_price_usd(quote: str, analyses: list[dict]) -> float | None:
+    if quote in USD_EQUIVALENT_QUOTES:
+        return 1.0
+
+    direct_pair = f"{quote}/USD"
+    inverse_pair = f"USD/{quote}"
+    for analysis in analyses:
+        pair = analysis.get("pair")
+        try:
+            price = float(analysis.get("price", 0) or 0)
+        except (TypeError, ValueError):
+            price = 0.0
+        if price <= 0:
+            continue
+        if pair == direct_pair:
+            return price
+        if pair == inverse_pair:
+            return 1.0 / price
+
+    for pair in (direct_pair, inverse_pair):
+        ohlcv = fetch(f"/api/ohlcv/{pair.replace('/', '%2F')}?interval=60&count=1")
+        bars = ohlcv.get("bars", [])
+        if not bars:
+            continue
+        try:
+            close = float(bars[-1]["close"])
+        except (KeyError, TypeError, ValueError, IndexError):
+            continue
+        if close <= 0:
+            continue
+        if pair == direct_pair:
+            return close
+        return 1.0 / close
+    return None
+
+
+def resolve_entry_analysis_for_quote_inventory(
+    entry_analysis: dict,
+    analyses: list[dict],
+    entry_size_usd: float,
+    available_balances: dict[str, float] | None,
+    log_fn,
+) -> dict | None:
+    """Swap or skip entries whose quote inventory is too small."""
+    pair = str(entry_analysis.get("pair", ""))
+    if "/" not in pair or available_balances is None:
+        return entry_analysis
+
+    base, quote = pair.split("/", 1)
+    if quote == "USD":
+        return entry_analysis
+
+    quote_price_usd = _quote_price_usd(quote, analyses)
+    if quote_price_usd is None or quote_price_usd <= 0:
+        return entry_analysis
+
+    required_quote = entry_size_usd / quote_price_usd
+    available_quote = available_balances.get(quote, 0.0)
+    if available_quote + 1e-9 >= required_quote:
+        return entry_analysis
+
+    usd_pair = f"{base}/USD"
+    alt_analysis = next((a for a in analyses if a.get("pair") == usd_pair), None)
+    if alt_analysis:
+        try:
+            alt_price = float(alt_analysis.get("price", 0) or 0)
+            alt_score = float(alt_analysis.get("_score", 0) or 0)
+        except (TypeError, ValueError):
+            alt_price = 0.0
+            alt_score = 0.0
+        alt_qty = entry_size_usd / alt_price if alt_price > 0 else 0.0
+        alt_ok, _ = _meets_order_minimums(usd_pair, alt_qty, alt_price)
+        if alt_price > 0 and alt_ok and alt_score >= QUOTE_SUBSTITUTION_MIN_SCORE:
+            log_fn(
+                f"  QUOTE_SUBSTITUTE: {pair} -> {usd_pair} "
+                f"need {required_quote:.6f} {quote}, have {available_quote:.6f}"
+            )
+            return alt_analysis
+
+    log_fn(
+        f"  INSUFFICIENT_QUOTE: {pair} need {required_quote:.6f} {quote} "
+        f"have {available_quote:.6f}"
+    )
+    persist_insufficient_quote_inventory_memory(
+        pair, base, quote, available_quote, required_quote, log_fn,
+    )
+    return None
 
 
 def check_exits(
@@ -1206,6 +1365,52 @@ def sweep_dust(dust_positions: list[dict], dry_run: bool, log_fn) -> list[dict]:
     return results
 
 
+def _split_postmortem_outcomes(outcomes: list[dict]) -> tuple[list[dict], list[dict]]:
+    recent_trades: list[dict] = []
+    anomaly_rows: list[dict] = []
+    for outcome in outcomes:
+        if outcome.get("anomaly_flag"):
+            anomaly_rows.append(outcome)
+            continue
+        recent_trades.append(outcome)
+    return recent_trades, anomaly_rows
+
+
+def run_postmortem_step(analyses: list[dict], log_fn) -> list[dict]:
+    outcomes = fetch("/api/trade-outcomes?lookback_days=7")
+    if "error" in outcomes:
+        log_fn("Trade outcomes unavailable")
+        recent_trades: list[dict] = []
+        anomaly_rows: list[dict] = []
+    else:
+        recent_trades, anomaly_rows = _split_postmortem_outcomes(
+            outcomes.get("outcomes", []) or []
+        )
+        wins = sum(1 for trade in recent_trades if float(trade.get("net_pnl", 0) or 0) > 0)
+        total_pnl = sum(float(trade.get("net_pnl", 0) or 0) for trade in recent_trades)
+        log_fn(
+            f"Last 7 days: {len(recent_trades)} trades, {wins} wins, P&L=${total_pnl:.4f}"
+        )
+        if anomaly_rows:
+            log_fn(f"Anomalies (excluded from stats): {len(anomaly_rows)} rows")
+            for trade in anomaly_rows:
+                pair = trade.get("pair", "?")
+                pnl = float(trade.get("net_pnl", 0) or 0)
+                flag = trade.get("anomaly_flag")
+                log_fn(
+                    f"  ANOMALY: {pair} net_pnl=${pnl:.4f} "
+                    f"(anomaly_flag={flag})"
+                )
+
+    losers = [trade for trade in recent_trades if float(trade.get("net_pnl", 0) or 0) < 0]
+    if losers:
+        immediate_postmortem(losers, log_fn)
+
+    deep_postmortem(log_fn)
+    self_tune(recent_trades, analyses, log_fn)
+    return recent_trades
+
+
 def run_brain(dry_run: bool = False) -> str:
     """Execute one full CC brain cycle. Returns a summary report."""
     now = datetime.now(timezone.utc)
@@ -1243,6 +1448,7 @@ def run_brain(dry_run: bool = False) -> str:
         balances = fetch("/api/balances")
         cash_usd = float(balances.get("cash_usd", 0))
         portfolio_value = cash_usd
+    available_balances = get_available_exchange_balances()
 
     max_position_value = portfolio_value * MAX_POSITION_PCT
     dust_threshold = portfolio_value * DUST_THRESHOLD_PCT
@@ -1347,26 +1553,7 @@ def run_brain(dry_run: bool = False) -> str:
 
     # === Step 4: Post-mortem ===
     log("\n--- Step 4: Post-mortem ---")
-    outcomes = fetch("/api/trade-outcomes?lookback_days=7")
-    if "error" not in outcomes:
-        recent_trades = outcomes.get("outcomes", [])
-        wins = sum(1 for t in recent_trades if float(t.get("net_pnl", 0)) > 0)
-        total_pnl = sum(float(t.get("net_pnl", 0)) for t in recent_trades)
-        log(f"Last 7 days: {len(recent_trades)} trades, {wins} wins, P&L=${total_pnl:.4f}")
-    else:
-        log("Trade outcomes unavailable")
-        recent_trades = []
-
-    # 4a: Immediate post-mortem on losing trades
-    losers = [t for t in recent_trades if float(t.get("net_pnl", 0)) < 0]
-    if losers:
-        immediate_postmortem(losers, log)
-
-    # 4b: Deep post-mortem (every 72h) — aggregate patterns, write report
-    deep_postmortem(log)
-
-    # 4c: Self-tune parameters based on post-mortem patterns
-    self_tune(recent_trades, analyses, log)
+    recent_trades = run_postmortem_step(analyses, log)
 
     # === Step 5: Decide ===
     log("\n--- Step 5: Decide ---")
@@ -1390,10 +1577,14 @@ def run_brain(dry_run: bool = False) -> str:
     pending_pairs = get_pairs_with_pending_orders() | get_pairs_with_open_orders()
     if pending_pairs:
         log(f"  Pending orders blocking re-proposal: {sorted(pending_pairs)}")
+    blocked_pairs = load_memory_blocked_pairs()
 
     # 5a: Evaluate rotations — should any held position rotate to something better?
     proposals = evaluate_portfolio(open_positions, analyses, stabilities, all_discovered)
-    proposals = [p for p in proposals if p["pair"] not in pending_pairs]
+    proposals = [
+        p for p in proposals
+        if p["pair"] not in pending_pairs and p["pair"] not in blocked_pairs
+    ]
     if proposals:
         best_rot = proposals[0]
         log(f"ROTATION: {best_rot['from_asset']} -> {best_rot['to_asset']} via {best_rot['pair']} "
@@ -1420,7 +1611,7 @@ def run_brain(dry_run: bool = False) -> str:
     # 5b: Deploy idle USD into best entry (if no rotation was found)
     if not orders_to_place:
         scored = [(a, a["_score"], a["_breakdown"]) for a in analyses
-                  if a["pair"] not in pending_pairs]
+                  if a["pair"] not in pending_pairs and a["pair"] not in blocked_pairs]
         filtered_scored = []
         for a, s, bd in scored:
             price = float(a.get("price", 0) or 0)
@@ -1439,14 +1630,26 @@ def run_brain(dry_run: bool = False) -> str:
                     f"shadow best hold = USD (top3m={shadow_best_score:.3f}). Sitting out.")
             else:
                 best, score, bd = scored[0]
-                bd_str = " ".join(f"{k}={v:+.2f}" for k, v in bd.items() if isinstance(v, (int, float)))
-                log(f"ENTRY from USD: {best['pair']} score={score:.2f} [{bd_str}]")
-                qty = round(max_position_value / best["price"], 6)
-                limit_price = _limit_buy_price(best["price"], best["pair"])
-                orders_to_place.append({
-                    "pair": best["pair"], "side": "buy", "order_type": "limit",
-                    "quantity": str(qty), "limit_price": str(limit_price),
-                })
+                selected = resolve_entry_analysis_for_quote_inventory(
+                    best, analyses, max_position_value, available_balances, log,
+                )
+                if selected is None:
+                    top_reason = "insufficient quote inventory"
+                else:
+                    selected_score = float(selected.get("_score", score) or 0)
+                    selected_bd = selected.get("_breakdown", bd)
+                    selected_price = float(selected["price"])
+                    bd_str = " ".join(
+                        f"{k}={v:+.2f}" for k, v in selected_bd.items()
+                        if isinstance(v, (int, float))
+                    )
+                    log(f"ENTRY from USD: {selected['pair']} score={selected_score:.2f} [{bd_str}]")
+                    qty = round(max_position_value / selected_price, 6)
+                    limit_price = _limit_buy_price(selected_price, selected["pair"])
+                    orders_to_place.append({
+                        "pair": selected["pair"], "side": "buy", "order_type": "limit",
+                        "quantity": str(qty), "limit_price": str(limit_price),
+                    })
         else:
             top_reason = "no USD" if cash_usd < max_position_value else (
                 f"best score={scored[0][1]:.2f}" if scored else "no data")
@@ -1454,7 +1657,10 @@ def run_brain(dry_run: bool = False) -> str:
 
     # 5c: Check exits — should any held position be sold?
     if not orders_to_place:
-        exit_orders = check_exits(holdings, analyses, stabilities)
+        exit_orders = [
+            order for order in check_exits(holdings, analyses, stabilities)
+            if order["pair"] not in blocked_pairs
+        ]
         if exit_orders:
             ex = exit_orders[0]
             log(f"EXIT: {ex['asset']} via {ex['pair']} — hold_score={ex['hold_score']:.2f} "
@@ -1466,8 +1672,7 @@ def run_brain(dry_run: bool = False) -> str:
                 "limit_price": str(limit_price),
             })
 
-    blocked_pairs = load_permission_blocked()
-    orders_to_place = filter_permission_blocked_orders(orders_to_place, blocked_pairs, log)
+    orders_to_place = filter_blocked_orders(orders_to_place, blocked_pairs, log)
 
     # 5d: SHADOW — unified currency-agnostic hold scoring. Now PROMOTED to
     # actively veto entries (see 5b), but we still log the full verdict here
