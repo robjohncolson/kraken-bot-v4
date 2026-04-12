@@ -49,7 +49,7 @@ from core.types import (
 )
 from collections import deque
 
-from exchange.executor import KrakenExecutor
+from exchange.executor import CancelOrderNotFoundError, KrakenExecutor
 from exchange.models import KrakenTrade
 from exchange.pair_metadata import PairMetadataCache
 from grid.sizing import set_pair_metadata_cache
@@ -577,6 +577,7 @@ class SchedulerRuntime:
         await self._persist_state_changes(state, new_state)
         await self._maybe_poll_beliefs(now)
         await self._handle_effects(effects)
+        await self._reap_stale_cc_orders(now)
         await self._maybe_plan_conditional_rotation(now)
         await self._maybe_run_rotation_planner(now)
         self._write_heartbeat()
@@ -1016,6 +1017,106 @@ class SchedulerRuntime:
         if memory_id:
             self._last_recon_anomaly_content = frozen_content
             self._last_recon_anomaly_ts = now
+
+    async def _reap_stale_cc_orders(self, now: datetime) -> None:
+        try:
+            rows = self._conn.execute(
+                "SELECT order_id, pair, side, base_qty, limit_price, created_at "
+                "FROM orders WHERE kind = 'cc_api' AND status = 'open'"
+            ).fetchall()
+        except sqlite3.Error as exc:
+            logger.warning(
+                "Failed to read open CC API orders for stale-order reaping: %s",
+                exc,
+            )
+            return
+
+        normalized_now = _normalize_timestamp(now)
+        for row in rows:
+            order_id = str(row["order_id"])
+            pair = str(row["pair"])
+            created_at = _parse_persisted_timestamp(row["created_at"])
+            if created_at is None:
+                logger.warning(
+                    "Skipping stale CC order %s; invalid created_at=%r",
+                    order_id,
+                    row["created_at"],
+                )
+                continue
+
+            age_minutes = max(
+                0.0,
+                (normalized_now - created_at).total_seconds() / 60.0,
+            )
+            if age_minutes < self._settings.cc_order_max_age_minutes:
+                continue
+
+            try:
+                self._executor.execute_cancel(order_id)
+            except CancelOrderNotFoundError:
+                logger.info(
+                    "Stale CC order %s was not found on Kraken; marking it cancelled locally",
+                    order_id,
+                )
+            except (ExchangeError, SafeModeBlockedError) as exc:
+                logger.error(
+                    "Failed to cancel stale CC order %s on %s: %s",
+                    order_id,
+                    pair,
+                    exc,
+                )
+                continue
+
+            try:
+                self._writer.cancel_order(order_id)
+            except Exception:
+                logger.warning(
+                    "Failed to mark stale CC order %s as cancelled locally",
+                    order_id,
+                    exc_info=True,
+                )
+                continue
+
+            content = {
+                "order_id": order_id,
+                "age_minutes": int(age_minutes),
+                "limit_price": (
+                    "" if row["limit_price"] is None else str(row["limit_price"])
+                ),
+                "side": "" if row["side"] is None else str(row["side"]),
+                "base_qty": "0" if row["base_qty"] is None else str(row["base_qty"]),
+            }
+            self._cc_memory._write(
+                "stale_order_cancelled",
+                content,
+                pair=pair,
+                importance=0.6,
+            )
+
+            async with self._state_lock:
+                remaining_pending = tuple(
+                    pending
+                    for pending in self._state.bot_state.pending_orders
+                    if not (
+                        pending.kind == "cc_api"
+                        and pending.exchange_order_id == order_id
+                    )
+                )
+                if len(remaining_pending) != len(self._state.bot_state.pending_orders):
+                    self._state = replace(
+                        self._state,
+                        bot_state=replace(
+                            self._state.bot_state,
+                            pending_orders=remaining_pending,
+                        ),
+                    )
+
+            logger.info(
+                "Reaper cancelled stale CC order %s on %s (age=%.0fm)",
+                order_id,
+                pair,
+                age_minutes,
+            )
 
     async def _execute_place_order(self, effect: PlaceOrder) -> None:
         try:
@@ -3169,6 +3270,20 @@ def _belief_age_seconds(timestamps: Iterable[datetime], now: datetime) -> float:
 
 def _render_timestamp(value: datetime) -> str:
     return _normalize_timestamp(value).isoformat().replace("+00:00", "Z")
+
+
+def _parse_persisted_timestamp(value: str | None) -> datetime | None:
+    if value is None:
+        return None
+    raw_value = value.strip()
+    if not raw_value:
+        return None
+    try:
+        return _normalize_timestamp(
+            datetime.fromisoformat(raw_value.replace("Z", "+00:00"))
+        )
+    except ValueError:
+        return None
 
 
 def _normalize_timestamp(value: datetime) -> datetime:

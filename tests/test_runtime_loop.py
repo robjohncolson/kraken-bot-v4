@@ -28,7 +28,9 @@ from core.types import (
     RotationNode,
     RotationNodeStatus,
     RotationTreeState,
+    ZERO_DECIMAL,
 )
+from exchange.executor import CancelOrderNotFoundError
 from exchange.models import KrakenOrder, KrakenState, KrakenTrade
 from exchange.websocket import ConnectionState, FillConfirmed, PriceTick
 from guardian import PriceSnapshot
@@ -144,13 +146,20 @@ def _position(pair: str = "DOGE/USD") -> Position:
     )
 
 
-def _runtime(*, settings: Settings | None = None) -> SchedulerRuntime:
+def _runtime(
+    *,
+    settings: Settings | None = None,
+    conn: sqlite3.Connection | None = None,
+    executor: FakeExecutor | None = None,
+) -> SchedulerRuntime:
+    runtime_conn = _memory_db() if conn is None else conn
+    runtime_executor = FakeExecutor(KrakenState()) if executor is None else executor
     return SchedulerRuntime(
         settings=_settings() if settings is None else settings,
-        executor=FakeExecutor(KrakenState()),
-        conn=_memory_db(),
+        executor=runtime_executor,
+        conn=runtime_conn,
         initial_state=build_initial_scheduler_state(
-            kraken_state=KrakenState(),
+            kraken_state=runtime_executor.kraken_state,
             recorded_state=RecordedState(),
             report=ReconciliationReport(),
             now=NOW,
@@ -163,6 +172,41 @@ def _runtime(*, settings: Settings | None = None) -> SchedulerRuntime:
         heartbeat_writer=lambda snapshot: None,
         utc_now=lambda: NOW,
     )
+
+
+def _sqlite_timestamp(value: datetime) -> str:
+    return value.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _insert_open_order(
+    conn: sqlite3.Connection,
+    *,
+    order_id: str,
+    created_at: datetime,
+    kind: str = "cc_api",
+    pair: str = "PEPE/USD",
+    side: str = "sell",
+    base_qty: Decimal = Decimal("10348231.25"),
+    limit_price: Decimal | None = Decimal("0.000003512"),
+) -> None:
+    writer = SqliteWriter(conn)
+    writer.upsert_order(
+        order_id,
+        pair,
+        f"kbv4-cc-{order_id}",
+        kind=kind,
+        side=side,
+        base_qty=base_qty,
+        filled_qty=ZERO_DECIMAL,
+        quote_qty=ZERO_DECIMAL,
+        limit_price=limit_price,
+        exchange_order_id=order_id,
+    )
+    conn.execute(
+        "UPDATE orders SET created_at = ? WHERE order_id = ?",
+        (_sqlite_timestamp(created_at), order_id),
+    )
+    conn.commit()
 
 
 def _reconciliation_report_with_untracked_assets(
@@ -633,6 +677,189 @@ def test_execute_cancel_order_resolves_client_order_id_and_persists_cancelled_st
 
         assert executor.cancel_calls == ["EX-1"]
         assert reader.fetch_open_orders() == ()
+
+    asyncio.run(scenario())
+
+
+def test_stale_cc_order_cancelled_after_threshold() -> None:
+    async def scenario() -> None:
+        conn = _memory_db()
+        _insert_open_order(
+            conn,
+            order_id="EX-STALE-1",
+            created_at=NOW - timedelta(minutes=20),
+        )
+        executor = FakeExecutor(KrakenState())
+        runtime = _runtime(
+            settings=_settings(CC_ORDER_MAX_AGE_MINUTES="15"),
+            conn=conn,
+            executor=executor,
+        )
+
+        await runtime._reap_stale_cc_orders(NOW)
+
+        assert executor.cancel_calls == ["EX-STALE-1"]
+        row = conn.execute(
+            "SELECT status FROM orders WHERE order_id = ?",
+            ("EX-STALE-1",),
+        ).fetchone()
+        assert row is not None
+        assert row["status"] == "cancelled"
+
+        memory_row = conn.execute(
+            "SELECT category, pair, content, importance FROM cc_memory ORDER BY id"
+        ).fetchone()
+        assert memory_row is not None
+        assert memory_row["category"] == "stale_order_cancelled"
+        assert memory_row["pair"] == "PEPE/USD"
+        assert memory_row["importance"] == 0.6
+        assert json.loads(memory_row["content"]) == {
+            "order_id": "EX-STALE-1",
+            "age_minutes": 20,
+            "limit_price": "0.000003512",
+            "side": "sell",
+            "base_qty": "10348231.25",
+        }
+
+    asyncio.run(scenario())
+
+
+def test_reaper_skips_fresh_cc_order() -> None:
+    async def scenario() -> None:
+        conn = _memory_db()
+        _insert_open_order(
+            conn,
+            order_id="EX-FRESH-1",
+            created_at=NOW - timedelta(minutes=5),
+        )
+        executor = FakeExecutor(KrakenState())
+        runtime = _runtime(
+            settings=_settings(CC_ORDER_MAX_AGE_MINUTES="15"),
+            conn=conn,
+            executor=executor,
+        )
+
+        await runtime._reap_stale_cc_orders(NOW)
+
+        assert executor.cancel_calls == []
+        row = conn.execute(
+            "SELECT status FROM orders WHERE order_id = ?",
+            ("EX-FRESH-1",),
+        ).fetchone()
+        assert row is not None
+        assert row["status"] == "open"
+        memory_count = conn.execute(
+            "SELECT COUNT(*) AS count FROM cc_memory WHERE category = ?",
+            ("stale_order_cancelled",),
+        ).fetchone()
+        assert memory_count is not None
+        assert memory_count["count"] == 0
+
+    asyncio.run(scenario())
+
+
+def test_reaper_skips_rotation_entry_orders() -> None:
+    async def scenario() -> None:
+        conn = _memory_db()
+        _insert_open_order(
+            conn,
+            order_id="EX-ROT-1",
+            created_at=NOW - timedelta(minutes=20),
+            kind="rotation_entry",
+            pair="DOGE/USD",
+            side="buy",
+            base_qty=Decimal("125"),
+            limit_price=Decimal("0.1234"),
+        )
+        executor = FakeExecutor(KrakenState())
+        runtime = _runtime(
+            settings=_settings(CC_ORDER_MAX_AGE_MINUTES="15"),
+            conn=conn,
+            executor=executor,
+        )
+
+        await runtime._reap_stale_cc_orders(NOW)
+
+        assert executor.cancel_calls == []
+        row = conn.execute(
+            "SELECT status FROM orders WHERE order_id = ?",
+            ("EX-ROT-1",),
+        ).fetchone()
+        assert row is not None
+        assert row["status"] == "open"
+
+    asyncio.run(scenario())
+
+
+def test_reaper_handles_already_filled_order() -> None:
+    async def scenario() -> None:
+        conn = _memory_db()
+        _insert_open_order(
+            conn,
+            order_id="EX-GONE-1",
+            created_at=NOW - timedelta(minutes=20),
+        )
+
+        class NotFoundCancelExecutor(FakeExecutor):
+            def execute_cancel(self, order_id: str) -> int:
+                self.cancel_calls.append(order_id)
+                raise CancelOrderNotFoundError(order_id)
+
+        executor = NotFoundCancelExecutor(KrakenState())
+        runtime = _runtime(
+            settings=_settings(CC_ORDER_MAX_AGE_MINUTES="15"),
+            conn=conn,
+            executor=executor,
+        )
+
+        await runtime._reap_stale_cc_orders(NOW)
+
+        assert executor.cancel_calls == ["EX-GONE-1"]
+        row = conn.execute(
+            "SELECT status FROM orders WHERE order_id = ?",
+            ("EX-GONE-1",),
+        ).fetchone()
+        assert row is not None
+        assert row["status"] == "cancelled"
+
+    asyncio.run(scenario())
+
+
+def test_reaper_writes_stale_order_memory() -> None:
+    async def scenario() -> None:
+        conn = _memory_db()
+        _insert_open_order(
+            conn,
+            order_id="EX-MEM-1",
+            created_at=NOW - timedelta(minutes=20),
+        )
+        _insert_open_order(
+            conn,
+            order_id="EX-MEM-2",
+            created_at=NOW - timedelta(minutes=25),
+            pair="DOGE/USD",
+            side="buy",
+            base_qty=Decimal("125"),
+            limit_price=Decimal("0.1234"),
+        )
+        executor = FakeExecutor(KrakenState())
+        runtime = _runtime(
+            settings=_settings(CC_ORDER_MAX_AGE_MINUTES="15"),
+            conn=conn,
+            executor=executor,
+        )
+
+        await runtime._reap_stale_cc_orders(NOW)
+
+        rows = conn.execute(
+            "SELECT category, pair, content FROM cc_memory ORDER BY id"
+        ).fetchall()
+        assert len(rows) == 2
+        assert [row["category"] for row in rows] == [
+            "stale_order_cancelled",
+            "stale_order_cancelled",
+        ]
+        assert [row["pair"] for row in rows] == ["PEPE/USD", "DOGE/USD"]
 
     asyncio.run(scenario())
 

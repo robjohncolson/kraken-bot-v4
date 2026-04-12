@@ -57,6 +57,7 @@ DEFAULT_SCANNER_MAX_SPREAD_PCT = 2.0
 DEFAULT_ENABLE_CONDITIONAL_TREE = False
 DEFAULT_ENABLE_ROTATION_TREE = False
 DEFAULT_CC_BRAIN_MODE = False
+DEFAULT_CC_ORDER_MAX_AGE_MINUTES = 15
 DEFAULT_EXIT_LIMIT_OFFSET_PCT = 0.1
 DEFAULT_ROTATION_MAX_CHILDREN_PER_PARENT = 3
 DEFAULT_ROTATION_MIN_CONFIDENCE = 0.65
@@ -134,6 +135,7 @@ class Settings:
     enable_conditional_tree: bool
     enable_rotation_tree: bool
     cc_brain_mode: bool
+    cc_order_max_age_minutes: int
     exit_limit_offset_pct: float
     pair_metadata_refresh_hours: int
     rotation_max_children_per_parent: int
@@ -310,6 +312,11 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
             env,
             "CC_BRAIN_MODE",
             DEFAULT_CC_BRAIN_MODE,
+        ),
+        cc_order_max_age_minutes=_read_int(
+            env,
+            "CC_ORDER_MAX_AGE_MINUTES",
+            DEFAULT_CC_ORDER_MAX_AGE_MINUTES,
         ),
         exit_limit_offset_pct=_read_float(
             env,
