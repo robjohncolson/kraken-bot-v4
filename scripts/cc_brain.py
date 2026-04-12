@@ -60,6 +60,30 @@ def _price_decimals(price: float, pair: str | None = None) -> int:
     return 6          # PEPE ($0.0000036)
 
 
+def _floor_qty(qty: float, pair: str | None = None) -> str:
+    """Floor-round a SELL quantity to the pair's lot_decimals.
+
+    Kraken rejects sells whose volume exceeds actual available balance,
+    even by 1e-7. Round-nearest can tip over the edge; floor cannot.
+    Returns a string suitable for the Kraken volume field.
+    """
+    import math
+
+    decimals = 6  # fallback
+    if pair:
+        try:
+            pairs = _fetch_kraken_pairs()
+            info = pairs.get(pair)
+            if info and info.get("lot_decimals") is not None:
+                decimals = int(info["lot_decimals"])
+        except Exception:
+            pass
+    factor = 10 ** decimals
+    floored = math.floor(qty * factor) / factor
+    # Format without trailing zeros but preserve precision.
+    return f"{floored:.{decimals}f}".rstrip("0").rstrip(".") or "0"
+
+
 # Strategy parameters
 MAX_POSITION_PCT = 0.04      # 4% of portfolio per position
 DUST_THRESHOLD_PCT = 0.01    # 1% of portfolio — below this is dust
@@ -990,7 +1014,7 @@ def sweep_dust(dust_positions: list[dict], dry_run: bool, log_fn) -> list[dict]:
             continue
         order = {
             "pair": pair, "side": "sell", "order_type": "limit",
-            "quantity": str(d["qty"]), "limit_price": str(limit_price),
+            "quantity": _floor_qty(d["qty"], pair), "limit_price": str(limit_price),
         }
         result = fetch("/api/orders", method="POST", data=order)
         if "error" in result:
@@ -1212,7 +1236,9 @@ def run_brain(dry_run: bool = False) -> str:
             limit_price = round(price * (1.002 if best_rot["side"] == "buy" else 0.998), _price_decimals(price, best_rot["pair"]))
             orders_to_place.append({
                 "pair": best_rot["pair"], "side": best_rot["side"], "order_type": "limit",
-                "quantity": str(qty), "limit_price": str(limit_price),
+                "quantity": (_floor_qty(float(qty), best_rot["pair"])
+                             if best_rot["side"] == "sell" else str(qty)),
+                "limit_price": str(limit_price),
             })
     else:
         log("  No rotation opportunities above threshold.")
@@ -1252,7 +1278,8 @@ def run_brain(dry_run: bool = False) -> str:
             limit_price = round(ex["price"] * 0.998, _price_decimals(ex["price"], ex["pair"]))
             orders_to_place.append({
                 "pair": ex["pair"], "side": "sell", "order_type": "limit",
-                "quantity": str(round(ex["qty"], 6)), "limit_price": str(limit_price),
+                "quantity": _floor_qty(ex["qty"], ex["pair"]),
+                "limit_price": str(limit_price),
             })
 
     # 5d: SHADOW — unified currency-agnostic hold scoring. Now PROMOTED to
