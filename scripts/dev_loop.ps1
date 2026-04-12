@@ -761,7 +761,7 @@ if ((Test-Path $EscalFile) -or $parsedStatus -eq "escalated" -or $challengeEscal
 $state.cumulative_token_input = ([long]$state.cumulative_token_input) + $parsedInputTokens
 $state.cumulative_token_output = ([long]$state.cumulative_token_output) + $parsedOutputTokens
 $state.cumulative_cost_usd = ([double]$state.cumulative_cost_usd) + $parsedCostUsd
-Write-RunLog ("usage: input={0} (uncached={1} cache_create={2} cache_read={3}) output={4} cumulative_input={5} cumulative_output={6} cost=${7} cumulative_cost=${8}" -f $parsedInputTokens, $uncachedInput, $cacheCreate, $cacheRead, $parsedOutputTokens, $state.cumulative_token_input, $state.cumulative_token_output, $parsedCostUsd.ToString('F2'), ([double]$state.cumulative_cost_usd).ToString('F2'))
+Write-RunLog ("usage: input={0} (uncached={1} cache_create={2} cache_read={3}) output={4} cumulative_input={5} cumulative_output={6} cost={7} cumulative_cost={8}" -f $parsedInputTokens, $uncachedInput, $cacheCreate, $cacheRead, $parsedOutputTokens, $state.cumulative_token_input, $state.cumulative_token_output, ('$' + $parsedCostUsd.ToString('F2')), ('$' + ([double]$state.cumulative_cost_usd).ToString('F2')))
 
 # Update state
 # Only update spec/commit tracking on REAL completed dispatches.
