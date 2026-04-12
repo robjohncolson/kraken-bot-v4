@@ -133,18 +133,16 @@ C:/Python313/python.exe -u scripts/cc_brain.py --loop > "state/scheduled-logs/cc
 
 After restart, sleep 5s and curl `/api/health` to confirm bot is alive.
 
-### Step 7 -- Document and update state
+### Step 7 -- Document
 
-ALWAYS at the end of every run, regardless of action:
+DO NOT touch `CONTINUATION_PROMPT_cc_orchestrator.md` or `state/dev-loop/state.json` directly. The PowerShell wrapper handles both.
 
-1. **Update `CONTINUATION_PROMPT_cc_orchestrator.md`**:
-   - Top section: latest snapshot (current spec count, last action, loop health)
-   - Append a new entry to the chronological log at the bottom with: timestamp, action taken, spec number/slug if any, commit hash if any, outcome
-2. **Update `state/dev-loop/state.json`**:
-   - `last_run_ts`, `last_run_action`, `last_spec_slug`, `last_commit_hash`, `consecutive_failures`, `total_runs`, `total_specs_dispatched`
-3. **Write `state/dev-loop/runs/<ts>.summary.md`** with a one-paragraph summary of what happened
+Instead:
+- Return your full reasoning in the response body (the wrapper saves it to the run log)
+- Make sure the YAML summary block at the end is well-formed (the wrapper parses it)
+- If you discovered something the wrapper can't capture (e.g. a hypothesis worth tracking across runs), include it in the response body and the user will see it in the run log
 
-Use UTC ISO timestamps everywhere.
+Use UTC ISO timestamps in any prose.
 
 ## Output format (structured)
 

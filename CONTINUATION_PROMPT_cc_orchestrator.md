@@ -97,16 +97,22 @@ pwsh -File scripts/register_dev_loop_task.ps1
 
 This registers `KrakenBot-CcOrchestrator` to fire every 6 hours offset from the brain cycle (which fires every 2h).
 
-## Current state
+## Current state (snapshot at activation)
 
-- **Loop status**: not yet activated. Files exist but task is not registered.
-- **Total runs**: 0
-- **Total specs dispatched by loop**: 0
-- **Last action**: init
-- **Last commit (manual session 4)**: `b498d48` — docs(continuation): session 4 — specs 11/12/13 landed
-- **Bot version at activation**: 688 tests passing, specs 1-13 all live, master branch
+For live state, read `state/dev-loop/state.json` and the most recent file in `state/dev-loop/runs/`. The wrapper updates state.json on every fire; the run log file has the full claude reasoning trace.
+
+- **Loop status**: bring-up complete, scheduler registration pending
+- **Total runs at handoff**: 2 (1 dry, 1 live no-action)
+- **Bot version at activation**: 688 tests passing, specs 1-13 all live, master at `96f4a31`
 
 ## Run log
 
-(Each run appends one line below. Format: `- <UTC ts> — **<status>** action=<...> spec=<...> commit=<sha> restarted=<...>`)
+Each run appends one line below. Format: `- <UTC ts> -- **<status>** action=<...> spec=<...> commit=<sha> restarted=<...>`. The wrapper owns this section — claude is told NOT to write here directly.
 
+### Bring-up (2026-04-12)
+
+- 20260412_182308 UTC -- **dry_run** action=would_dispatch (proposed spec=14 seed-restricted-fiat-pair-blacklist) — bring-up dry run, identified historical AUD/USD recurring pattern from pre-restart cycles
+- 20260412_182639 UTC -- **error** (claude refused: curl tool not allowed under acceptEdits permission mode) — fixed by switching wrapper to bypassPermissions
+- 20260412_182741 UTC -- **no_action** — first successful live fire (222s wall-clock). Correctly deferred: AUD/USD pattern no longer present after spec 12 went live, USDT phantom already fixed by spec 11, recon warning is benign held-fiat accounting. Run log: `state/dev-loop/runs/20260412_182741.log`
+
+### Scheduled fires
