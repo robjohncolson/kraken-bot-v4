@@ -24,7 +24,8 @@
         "web/routes.py",
         "scripts/cc_brain.py",
         "main.py"
-      ]
+      ],
+      "depends_on": ["01-floor-round"]
     },
     {
       "name": "03-fiat-filter",
@@ -33,7 +34,7 @@
       "owned_paths": [
         "scripts/cc_brain.py"
       ],
-      "depends_on": ["01-floor-round"]
+      "depends_on": ["02-open-orders"]
     },
     {
       "name": "04-extended-veto",
