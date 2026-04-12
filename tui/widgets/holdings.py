@@ -6,15 +6,12 @@ from textual.widgets import DataTable
 
 from tui.theme import HEALTHY, MUTED, UNHEALTHY, WARNING
 
-_COLUMNS = ("Asset", "Qty", "Price", "USD Value", "%Port", "Stability")
-
-# Fiat assets that don't have stability scores
-_FIAT_ASSETS = {"USD", "EUR", "GBP", "CAD", "AUD", "JPY", "CHF"}
+_COLUMNS = ("Asset", "Qty", "Price", "USD Value", "%Port", "Stability", "Shadow")
 
 
 def _stability_text(stability: float | None, asset: str) -> Text:
     """Color-coded stability display."""
-    if asset.upper() in _FIAT_ASSETS or stability is None:
+    if stability is None:
         return Text("-", style=MUTED)
     if stability > 0.7:
         style = HEALTHY
@@ -23,6 +20,30 @@ def _stability_text(stability: float | None, asset: str) -> Text:
     else:
         style = UNHEALTHY
     return Text(f"{stability:.2f}", style=style)
+
+
+def _shadow_text(shadow: dict | None) -> Text:
+    """Color-coded shadow top3_mean display.
+
+    Eligible (n >= 3): score colored by range.
+    Insufficient (n >= 1 but < 3): muted "n=X".
+    No data: muted "-".
+    """
+    if not shadow:
+        return Text("-", style=MUTED)
+    if not shadow.get("eligible"):
+        n = shadow.get("n", 0)
+        return Text(f"n={n}" if n else "-", style=MUTED)
+    top3m = shadow.get("top3m")
+    if top3m is None:
+        return Text("-", style=MUTED)
+    if top3m > 0.65:
+        style = HEALTHY
+    elif top3m >= 0.45:
+        style = WARNING
+    else:
+        style = UNHEALTHY
+    return Text(f"{top3m:.2f}", style=style)
 
 
 class HoldingsTable(DataTable):
@@ -48,7 +69,7 @@ class HoldingsTable(DataTable):
     ) -> None:
         self.clear()
         if not holdings:
-            self.add_row("\u2014", "", "", "", "", "")
+            self.add_row("\u2014", "", "", "", "", "", "")
             self.border_subtitle = ""
             return
 
@@ -89,6 +110,7 @@ class HoldingsTable(DataTable):
                 f"${usd_val:,.2f}",
                 f"{pct:.1f}%",
                 _stability_text(stability, asset),
+                _shadow_text(h.get("shadow")),
             )
 
         n = len(sorted_holdings)

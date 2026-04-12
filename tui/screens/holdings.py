@@ -78,6 +78,48 @@ def _parse_portfolio_value(path: str) -> str:
     return m.group(1).replace(",", "") if m else "0"
 
 
+def _parse_shadow_scores_from_report(path: str) -> dict[str, dict]:
+    """Parse per-held shadow verdicts from the brain report.
+
+    Lines like:
+      HELD USD: shadow top3m=0.550 (n=15)     -> {"top3m": 0.55, "n": 15, "eligible": True}
+      HELD ALGO: shadow n=1 (insufficient data) -> {"n": 1, "eligible": False}
+      HELD EUR: no shadow signal                 -> {"n": 0, "eligible": False}
+    Returns {asset: {top3m?, n, eligible}}.
+    """
+    shadow: dict[str, dict] = {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            content = f.read()
+    except (OSError, IOError):
+        return shadow
+
+    eligible_re = re.compile(
+        r"HELD\s+(\S+):\s+shadow\s+top3m=([\d.]+)\s+\(n=(\d+)\)"
+    )
+    insufficient_re = re.compile(
+        r"HELD\s+(\S+):\s+shadow\s+n=(\d+)\s+\(insufficient"
+    )
+    nosignal_re = re.compile(
+        r"HELD\s+(\S+):\s+no shadow signal"
+    )
+
+    for m in eligible_re.finditer(content):
+        shadow[m.group(1)] = {
+            "top3m": float(m.group(2)),
+            "n": int(m.group(3)),
+            "eligible": True,
+        }
+    for m in insufficient_re.finditer(content):
+        if m.group(1) not in shadow:
+            shadow[m.group(1)] = {"n": int(m.group(2)), "eligible": False}
+    for m in nosignal_re.finditer(content):
+        if m.group(1) not in shadow:
+            shadow[m.group(1)] = {"n": 0, "eligible": False}
+
+    return shadow
+
+
 class HoldingsScreen(Screen):
     """Full-page holdings table."""
 
@@ -109,6 +151,11 @@ class HoldingsScreen(Screen):
                 pv = _parse_portfolio_value(report_path)
                 if pv and pv != "0":
                     portfolio_value = pv
+                shadow = _parse_shadow_scores_from_report(report_path)
+                for h in holdings:
+                    s = shadow.get(h["asset"])
+                    if s is not None:
+                        h["shadow"] = s
 
             self.query_one("#hd-table", HoldingsTable).refresh_content(
                 holdings, portfolio_value,
