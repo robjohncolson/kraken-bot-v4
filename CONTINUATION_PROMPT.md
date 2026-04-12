@@ -99,28 +99,31 @@ Specs + plans live in `tasks/specs/`. Part 1 manifest: `dispatch/kraken-bot-hard
 - 09-usdt-investigation: **MERGED** (`7ee738a`) — root cause identified (class A accounting bug in runtime_loop.py). NO code fix applied because the actual bug is in `runtime_loop.py` which wasn't in owned paths. Result file at `tasks/specs/09-usdt-loss-investigation.result.md`.
 - 03/07/08/10: blocked by 02 failure; deferred to part 2.
 
-**Part 2 in flight 2026-04-12 ~16:00 UTC.** Sequential chain (max_parallel=1):
+**Part 2 COMPLETED 2026-04-12 ~16:42 UTC.** All 5 remaining agents merged to master via the runner's cc-merge branch. Master HEAD advanced to `28d0650` (+5 merge commits from the runner). Bot restarted to pick up the new `/api/open-orders` route. **12/12 verification checks pass** via `scripts/verify_hardening_batch.py`.
 
-```
-Batch 1: 02-open-orders            (retry with expanded owned_paths)
-Batch 2: 07-ordermin-precheck      (depends on 02)
-Batch 3: 03-fiat-filter            (depends on 07)
-Batch 4: 08-maker-fee              (depends on 03) — CRITICAL for P&L
-Batch 5: 10-self-tune-fix          (depends on 08)
-```
+| Spec | Status | Commit |
+|------|--------|--------|
+| 01 floor-round-exit-qty | **LIVE** | `446ba44` |
+| 02 open-orders-tracking | **LIVE** | `757c662` (+ agent `ea6c8b1`) |
+| 03 fiat-filter-check-exits | **LIVE** | `415a5e7` (+ agent `9bbb4af`) |
+| 04 extended-shadow-veto | **DROPPED** | — |
+| 05 backfill-6h-analysis | **MERGED** (stale-result) | `f18172e` |
+| 06 backfill-fidelity | **LIVE** | `ec0c5fa` (+ agent `b9b08a4`) |
+| 07 ordermin-precheck | **LIVE** | `642455b` (+ agent `8ed523b`) |
+| 08 maker-fee | **LIVE** | `0d4603a` (+ agent `010fe7d`) |
+| 09 usdt-loss-investigation | **DIAGNOSIS ONLY** (fix in spec 11) | `43c0d8a` (+ agent `7ee738a`) |
+| 10 self-tune-rule-fix | **LIVE** | `28d0650` (+ agent `00ffef4`) |
 
-| Spec | Status | Notes |
-|------|--------|-------|
-| 01 floor-round-exit-qty | **MERGED** (`446ba44`) — verified against real balances |
-| 02 open-orders-tracking | **in part 2** — expanded owned_paths include `exchange/models.py` + `exchange/parsers.py` |
-| 03 fiat-filter-check-exits | **in part 2** |
-| 04 extended-shadow-veto | **DROPPED** — not supported by current evidence |
-| 05 backfill-6h-analysis | **MERGED** (`f18172e`) — but result was skewed by the backfill bug (fixed in 06) |
-| 06 backfill-fidelity | **MERGED** (`b9b08a4`) |
-| 07 ordermin-precheck | **in part 2** |
-| 08 maker-fee | **in part 2** — critical |
-| 09 usdt-loss-investigation | **MERGED** (`7ee738a`) — diagnosis only, code fix requires follow-up spec (see below) |
-| 10 self-tune-rule-fix | **in part 2** |
+### What actually changed in the bot (net effect)
+
+1. **Fee reduction**: limit-order buffer is now 10 bps (0.10%) instead of 20 bps (0.20%). On liquid pairs this should land as maker fills (0.16% per side) instead of taker (0.25%). Expected improvement: ~20% reduction in per-trade fee rate.
+2. **Ordermin/costmin blocking**: entries and rotations that would be rejected by Kraken for minimum-size violations are now filtered at the scoring step. Eliminates the RAVE-class wasted cycles.
+3. **Floor-round sell qty**: CRV/COMP/etc will no longer hit EOrder:Insufficient funds on off-by-epsilon rounding.
+4. **Open-orders visibility**: `/api/open-orders` returns live exchange state. `cc_brain` unions it with the memory-based pending blocklist. Stale orders get cancelled authoritatively.
+5. **Fiat filter**: AUD/CAD/EUR/GBP/CHF/JPY etc. are no longer proposed for exit. The Massachusetts-regulated `EAccount:Invalid permissions:AUD/USD` loop is broken.
+6. **Self-tune fix**: the backwards MAX_POSITION_PCT rule is replaced with a correct ENTRY_THRESHOLD tightener. Position size stays where it is.
+7. **Backfill fidelity**: `scripts/backfill_shadow.py` now correctly filters out dry-run cycles and failed orders. Re-running with the fix should materially change the cumulative-edge numbers from the previous run.
+8. **USDT phantom loss diagnosed**: no code fix yet; follow-up spec 11 targets the actual bug in `runtime_loop.py`. Until that lands, the `trade_outcomes.id=1` row stays as a $15.85 phantom that the self-tune ignores (now that rule 3 is fixed anyway).
 
 **Key insight from 09 diagnosis** (impacts everything else):
 The "−$14.58 / 7 days" loss is largely a **phantom** caused by a `runtime_loop.py` bug that stored USDT base quantity in the `exit_proceeds` column instead of USD proceeds. The row `trade_outcomes.id=1` computed `net_pnl = 21.11138898 − 36.9612 = −$15.85` by subtracting unlike units (USDT base qty − USD cost). The actual fills were at parity ($0.99965). **Real underlying P&L is approximately +$1.27, not −$14.58.** This dramatically changes the picture: the bot's signals aren't losing money, a reporting bug is.
