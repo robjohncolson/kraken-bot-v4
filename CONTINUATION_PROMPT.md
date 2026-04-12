@@ -91,34 +91,52 @@ Bot (always-on, deterministic body)
 
 ### Hardening batch status (dispatched via `../Agent/runner/parallel-codex-runner.py`)
 
-Specs + plans live in `tasks/specs/`. Manifest at `dispatch/kraken-bot-hardening.manifest.json`. Dispatch prompts at `../Agent/dispatch/prompts/kraken-bot-hardening/`.
+Specs + plans live in `tasks/specs/`. Part 1 manifest: `dispatch/kraken-bot-hardening.manifest.json`. Part 2 manifest: `dispatch/kraken-bot-hardening-part2.manifest.json`.
 
-**Session 3 expanded batch in flight as of 2026-04-12 ~15:33 UTC.** Dependency chain after expansion:
+**Part 1 completed 2026-04-12 ~16:00 UTC.** Results:
+- 02-open-orders: FAILED — orphaned worktree dir from attempt 1. Deferred to part 2.
+- 06-backfill-fidelity: **MERGED** (`b9b08a4`) — filter now correctly drops dry-runs + failed orders from comparisons.
+- 09-usdt-investigation: **MERGED** (`7ee738a`) — root cause identified (class A accounting bug in runtime_loop.py). NO code fix applied because the actual bug is in `runtime_loop.py` which wasn't in owned paths. Result file at `tasks/specs/09-usdt-loss-investigation.result.md`.
+- 03/07/08/10: blocked by 02 failure; deferred to part 2.
+
+**Part 2 in flight 2026-04-12 ~16:00 UTC.** Sequential chain (max_parallel=1):
 
 ```
-Batch 1 (parallel): 02-open-orders, 06-backfill-fidelity, 09-usdt-investigation
-Batch 2:            07-ordermin-precheck     (depends on 02)
-Batch 3:            03-fiat-filter           (depends on 07)
-Batch 4:            08-maker-fee             (depends on 03)
-Batch 5:            10-self-tune-fix         (depends on 08)
+Batch 1: 02-open-orders            (retry with expanded owned_paths)
+Batch 2: 07-ordermin-precheck      (depends on 02)
+Batch 3: 03-fiat-filter            (depends on 07)
+Batch 4: 08-maker-fee              (depends on 03) — CRITICAL for P&L
+Batch 5: 10-self-tune-fix          (depends on 08)
 ```
 
 | Spec | Status | Notes |
 |------|--------|-------|
-| 01 floor-round-exit-qty | **MERGED** (commit `446ba44`) | Verified |
-| 02 open-orders-tracking | **FAILED (attempt 2)** — orphaned worktree dir from attempt 1 blocked worktree creation. Cleaned (`rm -rf state/parallel-worktrees/02-open-orders`). Needs manual retry after current batch drains. |
-| 03 fiat-filter-check-exits | BLOCKED (waits on 07 → 02) |
-| 04 extended-shadow-veto | **DROPPED from batch** — corrected 6h backfill + investigation findings do not support extending veto beyond USD-only. Reconsider after more real filled-trade data accumulates. |
-| 05 backfill-6h-analysis | **MERGED** (commit `f18172e`) — BUT its result was skewed by the backfill script bug. Spec 06 fixes the script; rerun backfill after 06 lands. |
-| 06 backfill-fidelity | **RUNNING in current batch** |
-| 07 ordermin-precheck | BLOCKED (waits on 02) |
-| 08 maker-fee | BLOCKED (waits on 03) — **CRITICAL for P&L** |
-| 09 usdt-loss-investigation | **RUNNING in current batch** |
-| 10 self-tune-rule-fix | BLOCKED (waits on 08) |
+| 01 floor-round-exit-qty | **MERGED** (`446ba44`) — verified against real balances |
+| 02 open-orders-tracking | **in part 2** — expanded owned_paths include `exchange/models.py` + `exchange/parsers.py` |
+| 03 fiat-filter-check-exits | **in part 2** |
+| 04 extended-shadow-veto | **DROPPED** — not supported by current evidence |
+| 05 backfill-6h-analysis | **MERGED** (`f18172e`) — but result was skewed by the backfill bug (fixed in 06) |
+| 06 backfill-fidelity | **MERGED** (`b9b08a4`) |
+| 07 ordermin-precheck | **in part 2** |
+| 08 maker-fee | **in part 2** — critical |
+| 09 usdt-loss-investigation | **MERGED** (`7ee738a`) — diagnosis only, code fix requires follow-up spec (see below) |
+| 10 self-tune-rule-fix | **in part 2** |
 
-**Pre-built validation:** `scripts/verify_hardening_batch.py` (committed in `62bf0a8`) runs smoke-tests for every spec's acceptance criteria. Invoke after the batch merges to master.
+**Key insight from 09 diagnosis** (impacts everything else):
+The "−$14.58 / 7 days" loss is largely a **phantom** caused by a `runtime_loop.py` bug that stored USDT base quantity in the `exit_proceeds` column instead of USD proceeds. The row `trade_outcomes.id=1` computed `net_pnl = 21.11138898 − 36.9612 = −$15.85` by subtracting unlike units (USDT base qty − USD cost). The actual fills were at parity ($0.99965). **Real underlying P&L is approximately +$1.27, not −$14.58.** This dramatically changes the picture: the bot's signals aren't losing money, a reporting bug is.
 
-**Known runner quirk:** after a failed dispatch, orphaned worktree directories remain at `state/parallel-worktrees/<agent>/` and block subsequent retries. Manual cleanup (`rm -rf`) is required before re-dispatching. The git branch `codex/<agent>` survives and can be force-reset via the runner's `git worktree add --force -B` call — only the directory collision needs manual resolution.
+**Pre-built post-batch validation:** `scripts/verify_hardening_batch.py` runs smoke-tests for every spec's acceptance criteria. `scripts/hardening_retry_helper.sh` inspects worktree/branch state for recovery sequences.
+
+**Known runner quirks observed this session:**
+1. Orphaned worktree dirs from failed runs block retries. Manual `rm -rf state/parallel-worktrees/<agent>` required.
+2. Codex's sandbox can't write `.git/worktrees/<name>/index.lock` for its own commit attempts. The runner itself commits successfully from outside the sandbox. No action required.
+3. The runner's merge pass is gated on full batch success. Partial successes (06, 09) were not auto-merged; manual merge required.
+
+### Follow-up specs (NOT in current batches)
+
+- **11 — runtime_loop root-exit unit mixing fix**: the actual code fix for the USDT phantom loss. Targets `runtime_loop.py:_settle_rotation_fills()` and `_handle_root_expiry()`. Writes `exit_proceeds` in USD consistently.
+- **12 — permissions-aware pair blacklist**: when Kraken returns `EAccount:Invalid permissions` (e.g. AUD/USD trading restricted for US:MA), cache the pair as untradeable in memory. Observed on every recent scheduled cycle for AUD/USD.
+- **13 — stale worktree cleanup in parallel-runner**: upstream fix in the Agent repo for the orphaned-worktree quirk.
 
 ### CC REST Toolkit
 
