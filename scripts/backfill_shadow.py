@@ -33,7 +33,28 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from scripts.cc_brain import _fetch_kraken_pairs, compute_unified_holds, score_entry  # noqa: E402
 
-_REPORTS_DIR = Path(__file__).resolve().parent.parent / "state" / "cc-reviews"
+
+def _resolve_reports_dir() -> Path:
+    """Find the active review corpus.
+
+    Worktrees in this repo live under state/parallel-worktrees/, but the live
+    review corpus is written to the main repo root's state/cc-reviews.
+    """
+    repo_root = Path(__file__).resolve().parent.parent
+    candidates = [repo_root / "state" / "cc-reviews"]
+    candidates.extend(parent / "state" / "cc-reviews" for parent in repo_root.parents)
+
+    seen: set[Path] = set()
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        if candidate.is_dir():
+            return candidate
+    return candidates[0]
+
+
+_REPORTS_DIR = _resolve_reports_dir()
 _KRAKEN_OHLC = "https://api.kraken.com/0/public/OHLC"
 
 # Regex: parses one analyzed-pair line from the Step 3 Analyze section.
@@ -49,6 +70,8 @@ _ANALYSIS_LINE = re.compile(
 _ENTRY_LINE = re.compile(r"ENTRY\s+from\s+\S+:\s+(\S+)\s+score=([\d.]+)")
 _ROTATION_LINE = re.compile(r"ROTATION:\s+(\S+)\s+->\s+(\S+)\s+via\s+(\S+)")
 _EXIT_LINE = re.compile(r"EXIT:\s+(\S+)\s+via\s+(\S+)")
+_PLACED_LINE = re.compile(r"^\s*PLACED:\s+(\S+)\s+txid=(\S+)", re.MULTILINE)
+_FAILED_LINE = re.compile(r"^\s*FAILED:\s+(\S+)\s+(?:\u2014|-)\s+(.*)$", re.MULTILINE)
 
 _REGIME_MAP = {"T": "trending", "V": "volatile", "R": "ranging", "?": "unknown"}
 _DIR_MAP = {"bull": "bullish", "bear": "bearish", "neut": "neutral", "unkn": "unknown"}
@@ -118,9 +141,11 @@ def _reconstruct_analysis(m: re.Match) -> dict:
     }
 
 
-def _parse_report(path: Path) -> tuple[list[dict], dict]:
-    """Return (analyses, live_decision) for a single report file."""
+def _parse_report(path: Path) -> tuple[list[dict], dict, str]:
+    """Return (analyses, live_decision, mode) for a single report file."""
     text = path.read_text(encoding="utf-8", errors="replace")
+    mode_match = re.search(r"Mode:\s+(LIVE|DRY RUN)", text)
+    mode = mode_match.group(1) if mode_match else "UNKNOWN"
 
     # Isolate the Step 3 Analyze section
     step3_m = re.search(r"--- Step 3: Analyze ---\n(.*?)(?=\n--- Step 4)", text, re.DOTALL)
@@ -148,7 +173,36 @@ def _parse_report(path: Path) -> tuple[list[dict], dict]:
         elif xm:
             live = {"type": "exit", "asset": xm.group(1), "pair": xm.group(2)}
 
-    return analyses, live
+    return analyses, live, mode
+
+
+def _parse_act_outcome(text: str) -> dict[str, str]:
+    """Return the real Step 6 action status for this cycle."""
+    step6_m = re.search(r"--- Step 6: Act ---\n(.*?)(?=\n--- Step 7|\Z)", text, re.DOTALL)
+    if not step6_m:
+        return {"status": "none"}
+
+    block = step6_m.group(1)
+    if "DRY RUN" in block or "WOULD:" in block:
+        return {"status": "dry_run"}
+
+    placed_match = _PLACED_LINE.search(block)
+    if placed_match:
+        return {
+            "status": "placed",
+            "pair": placed_match.group(1),
+            "txid": placed_match.group(2),
+        }
+
+    failed_match = _FAILED_LINE.search(block)
+    if failed_match:
+        return {
+            "status": "failed",
+            "pair": failed_match.group(1),
+            "error": failed_match.group(2),
+        }
+
+    return {"status": "none"}
 
 
 def _cycle_timestamp(report_path: Path) -> int:
@@ -213,6 +267,17 @@ def _score_self_check(analyses: list[dict], expected_scores: dict[str, float]) -
     return hits, total
 
 
+def _print_filter_report(reports_scanned: int, filter_counts: Counter) -> None:
+    print("=== Report filter ===")
+    print(f"  Reports scanned:       {reports_scanned}")
+    print(f"  No-analyses cycles:    {filter_counts.get('no_analyses', 0)}")
+    print(f"  Dry-run cycles:        {filter_counts.get('dry_run', 0)} (dropped)")
+    print(f"  Failed-order cycles:   {filter_counts.get('failed_order', 0)} (dropped)")
+    print(f"  No-action cycles:      {filter_counts.get('no_action', 0)} (dropped)")
+    print(f"  Filled-order cycles:   {filter_counts.get('filled', 0)} (kept for analysis)")
+    print()
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--limit", type=int, default=None,
@@ -236,10 +301,12 @@ def main() -> None:
 
     cycles: list[dict] = []
     recon_hits, recon_total = 0, 0
+    filter_counts = Counter()
 
     for path in reports:
-        analyses, live = _parse_report(path)
+        analyses, live, mode = _parse_report(path)
         if not analyses:
+            filter_counts["no_analyses"] += 1
             continue
 
         # Verify reconstruction fidelity: does score_entry on the rebuilt
@@ -253,6 +320,18 @@ def main() -> None:
         hits, total = _score_self_check(analyses, expected)
         recon_hits += hits
         recon_total += total
+
+        act = _parse_act_outcome(text)
+        if mode == "DRY RUN" or act["status"] == "dry_run":
+            filter_counts["dry_run"] += 1
+            continue
+        if act["status"] == "failed":
+            filter_counts["failed_order"] += 1
+            continue
+        if act["status"] != "placed":
+            filter_counts["no_action"] += 1
+            continue
+        filter_counts["filled"] += 1
 
         unified = compute_unified_holds(analyses)
         eligible = sorted(
@@ -275,8 +354,10 @@ def main() -> None:
             print(f"{path.name}: live={live.get('type')}:{live.get('asset', '-')} "
                   f"shadow={shadow_best}  n_eligible={len(eligible)}")
 
+    _print_filter_report(len(reports), filter_counts)
+
     if not cycles:
-        print("No cycles with parseable analyses.")
+        print("No filled cycles with parseable analyses.")
         return
 
     # === Reconstruction sanity ===
