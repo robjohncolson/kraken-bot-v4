@@ -866,6 +866,30 @@ def check_pending_orders(log_fn, dry_run: bool) -> None:
                 log_fn(f"  Cancelled stale order {txid} ({age_hours:.1f}h old)")
 
 
+def get_pairs_with_pending_orders() -> set[str]:
+    """Return pair names that still have an unfilled brain-placed order.
+
+    Used to prevent the decision step from re-proposing a trade we already
+    have in flight. Filters on STALE_ORDER_HOURS: anything older than that
+    will be cancelled by check_pending_orders, so we don't consider it blocking.
+    """
+    pending = fetch(f"/api/memory?category=pending_order&hours={STALE_ORDER_HOURS}")
+    if "error" in pending:
+        return set()
+    now_ts = time.time()
+    pairs: set[str] = set()
+    cutoff_s = STALE_ORDER_HOURS * 3600
+    for mem in pending.get("memories", []):
+        content = mem.get("content", {})
+        placed_ts = content.get("placed_ts", 0)
+        if not placed_ts or (now_ts - placed_ts) >= cutoff_s:
+            continue
+        pair = content.get("pair")
+        if pair:
+            pairs.add(pair)
+    return pairs
+
+
 def check_exits(
     holdings: list[dict], analyses: list[dict], stabilities: dict[str, float],
 ) -> list[dict]:
@@ -1131,8 +1155,29 @@ def run_brain(dry_run: bool = False) -> str:
     log("\n--- Step 5: Decide ---")
     orders_to_place: list[dict] = []
 
+    # Pre-compute unified shadow verdict so both the entry veto (5b) and the
+    # shadow log block (5d) can share one result. Shadow has been promoted
+    # to an active veto: when it says "hold USD" with eligibility, new
+    # cash-to-crypto entries are blocked.
+    unified = compute_unified_holds(analyses)
+    eligible = sorted(
+        [(a, v) for a, v in unified.items() if v["eligible"]],
+        key=lambda x: -x[1]["top3_mean"],
+    )
+    shadow_wants_cash = bool(eligible and eligible[0][0] == "USD")
+    shadow_best_score = eligible[0][1]["top3_mean"] if eligible else 0.0
+
+    # Pending-order blocklist: don't re-propose a trade that already has an
+    # unfilled order in flight. Fixes the duplicate-entry pattern where the
+    # bot kept re-buying the same pair across consecutive cycles while the
+    # initial limit order was still waiting to fill.
+    pending_pairs = get_pairs_with_pending_orders()
+    if pending_pairs:
+        log(f"  Pending orders blocking re-proposal: {sorted(pending_pairs)}")
+
     # 5a: Evaluate rotations — should any held position rotate to something better?
     proposals = evaluate_portfolio(open_positions, analyses, stabilities, all_discovered)
+    proposals = [p for p in proposals if p["pair"] not in pending_pairs]
     if proposals:
         best_rot = proposals[0]
         log(f"ROTATION: {best_rot['from_asset']} -> {best_rot['to_asset']} via {best_rot['pair']} "
@@ -1154,18 +1199,24 @@ def run_brain(dry_run: bool = False) -> str:
 
     # 5b: Deploy idle USD into best entry (if no rotation was found)
     if not orders_to_place:
-        scored = [(a, a["_score"], a["_breakdown"]) for a in analyses]
+        scored = [(a, a["_score"], a["_breakdown"]) for a in analyses
+                  if a["pair"] not in pending_pairs]
         scored.sort(key=lambda x: -x[1])
         if scored and scored[0][1] > ENTRY_THRESHOLD and cash_usd >= max_position_value:
-            best, score, bd = scored[0]
-            bd_str = " ".join(f"{k}={v:+.2f}" for k, v in bd.items() if isinstance(v, (int, float)))
-            log(f"ENTRY from USD: {best['pair']} score={score:.2f} [{bd_str}]")
-            qty = round(max_position_value / best["price"], 6)
-            limit_price = round(best["price"] * 1.002, _price_decimals(best["price"]))
-            orders_to_place.append({
-                "pair": best["pair"], "side": "buy", "order_type": "limit",
-                "quantity": str(qty), "limit_price": str(limit_price),
-            })
+            if shadow_wants_cash:
+                best, score, _ = scored[0]
+                log(f"  [SHADOW VETO] Entry {best['pair']} score={score:.2f} blocked: "
+                    f"shadow best hold = USD (top3m={shadow_best_score:.3f}). Sitting out.")
+            else:
+                best, score, bd = scored[0]
+                bd_str = " ".join(f"{k}={v:+.2f}" for k, v in bd.items() if isinstance(v, (int, float)))
+                log(f"ENTRY from USD: {best['pair']} score={score:.2f} [{bd_str}]")
+                qty = round(max_position_value / best["price"], 6)
+                limit_price = round(best["price"] * 1.002, _price_decimals(best["price"]))
+                orders_to_place.append({
+                    "pair": best["pair"], "side": "buy", "order_type": "limit",
+                    "quantity": str(qty), "limit_price": str(limit_price),
+                })
         else:
             top_reason = "no USD" if cash_usd < max_position_value else (
                 f"best score={scored[0][1]:.2f}" if scored else "no data")
@@ -1184,12 +1235,10 @@ def run_brain(dry_run: bool = False) -> str:
                 "quantity": str(round(ex["qty"], 6)), "limit_price": str(limit_price),
             })
 
-    # 5d: SHADOW — unified currency-agnostic hold scoring (observation only).
-    # Evaluates every asset (including USD/USDT/USDC) via bidirectional pair
-    # analysis. Does NOT affect order placement; logs only for comparison.
-    unified = compute_unified_holds(analyses)
-    eligible = [(a, v) for a, v in unified.items() if v["eligible"]]
-    eligible.sort(key=lambda x: -x[1]["top3_mean"])
+    # 5d: SHADOW — unified currency-agnostic hold scoring. Now PROMOTED to
+    # actively veto entries (see 5b), but we still log the full verdict here
+    # for continued analysis. unified/eligible were computed at the top of
+    # Step 5 so the veto and the log share one result.
     log("\n[SHADOW] Unified hold_scores (currency-agnostic, top-3 mean):")
     if not eligible:
         log(f"  No eligible assets (need n >= {UNIFIED_HOLD_MIN_N} surviving pairs)")
