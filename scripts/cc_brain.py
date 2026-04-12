@@ -113,11 +113,25 @@ ENTRY_THRESHOLD = 0.6        # Must exceed this to place an order
 MIN_RSI_OVERSOLD = 35        # RSI below this = oversold (potential buy)
 MAX_RSI_OVERBOUGHT = 70      # RSI above this = overbought (potential sell)
 TARGET_MONTHLY_PCT = 1.0     # 1% monthly target
+ENTRY_PRICE_BUFFER_BPS = 10  # 0.10% above mid for buys
+EXIT_PRICE_BUFFER_BPS = 10   # 0.10% below mid for sells
 TOP_PAIRS = [
     "SOL/USD", "BTC/USD", "ETH/USD", "AVAX/USD", "LINK/USD",
     "AAVE/USD", "DOT/USD", "ATOM/USD", "ADA/USD", "MATIC/USD",
     "CRV/USD", "UNI/USD", "DOGE/USD", "NEAR/USD", "FTM/USD",
 ]
+
+
+def _limit_buy_price(price: float, pair: str) -> float:
+    """Buy limit price = mid + ENTRY_PRICE_BUFFER_BPS bps."""
+    buffered = price * (1 + ENTRY_PRICE_BUFFER_BPS / 10000)
+    return round(buffered, _price_decimals(price, pair))
+
+
+def _limit_sell_price(price: float, pair: str) -> float:
+    """Sell limit price = mid - EXIT_PRICE_BUFFER_BPS bps."""
+    buffered = price * (1 - EXIT_PRICE_BUFFER_BPS / 10000)
+    return round(buffered, _price_decimals(price, pair))
 
 
 # Symbol aliases: Kraken wsname → standard
@@ -1088,7 +1102,7 @@ def sweep_dust(dust_positions: list[dict], dry_run: bool, log_fn) -> list[dict]:
             continue
         price = float(bars[-1]["close"])
         # Limit sell slightly below market to ensure fill while paying maker fees
-        limit_price = round(price * 0.998, _price_decimals(price, pair))
+        limit_price = _limit_sell_price(price, pair)
         if dry_run:
             log_fn(f"  WOULD SELL dust: {d['asset']} qty={d['qty']:.6f} (~${d['usd_value']:.2f}) via {pair} @ {limit_price}")
             results.append({"asset": d["asset"], "action": "dry_run"})
@@ -1313,7 +1327,9 @@ def run_brain(dry_run: bool = False) -> str:
             pos_for_rot = next((p for p in open_positions if p["asset"] == best_rot["from_asset"]), None)
             rot_value = min(max_position_value, float(pos_for_rot["quantity_total"]) * price) if pos_for_rot else max_position_value
             qty = round(rot_value / price, 6)
-            limit_price = round(price * (1.002 if best_rot["side"] == "buy" else 0.998), _price_decimals(price, best_rot["pair"]))
+            limit_price = (_limit_buy_price(price, best_rot["pair"])
+                           if best_rot["side"] == "buy"
+                           else _limit_sell_price(price, best_rot["pair"]))
             orders_to_place.append({
                 "pair": best_rot["pair"], "side": best_rot["side"], "order_type": "limit",
                 "quantity": (_floor_qty(float(qty), best_rot["pair"])
@@ -1348,7 +1364,7 @@ def run_brain(dry_run: bool = False) -> str:
                 bd_str = " ".join(f"{k}={v:+.2f}" for k, v in bd.items() if isinstance(v, (int, float)))
                 log(f"ENTRY from USD: {best['pair']} score={score:.2f} [{bd_str}]")
                 qty = round(max_position_value / best["price"], 6)
-                limit_price = round(best["price"] * 1.002, _price_decimals(best["price"], best["pair"]))
+                limit_price = _limit_buy_price(best["price"], best["pair"])
                 orders_to_place.append({
                     "pair": best["pair"], "side": "buy", "order_type": "limit",
                     "quantity": str(qty), "limit_price": str(limit_price),
@@ -1365,7 +1381,7 @@ def run_brain(dry_run: bool = False) -> str:
             ex = exit_orders[0]
             log(f"EXIT: {ex['asset']} via {ex['pair']} — hold_score={ex['hold_score']:.2f} "
                 f"(${ex['value_usd']:.2f}, reason={ex['reason']})")
-            limit_price = round(ex["price"] * 0.998, _price_decimals(ex["price"], ex["pair"]))
+            limit_price = _limit_sell_price(ex["price"], ex["pair"])
             orders_to_place.append({
                 "pair": ex["pair"], "side": "sell", "order_type": "limit",
                 "quantity": _floor_qty(ex["qty"], ex["pair"]),
