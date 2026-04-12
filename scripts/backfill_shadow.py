@@ -21,15 +21,20 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import sys
+import time
+import urllib.request
 from collections import Counter
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from scripts.cc_brain import compute_unified_holds, score_entry  # noqa: E402
+from scripts.cc_brain import _fetch_kraken_pairs, compute_unified_holds, score_entry  # noqa: E402
 
 _REPORTS_DIR = Path(__file__).resolve().parent.parent / "state" / "cc-reviews"
+_KRAKEN_OHLC = "https://api.kraken.com/0/public/OHLC"
 
 # Regex: parses one analyzed-pair line from the Step 3 Analyze section.
 # Example:
@@ -146,6 +151,54 @@ def _parse_report(path: Path) -> tuple[list[dict], dict]:
     return analyses, live
 
 
+def _cycle_timestamp(report_path: Path) -> int:
+    """Parse UTC Unix timestamp from a brain report filename."""
+    stem = report_path.stem  # "brain_2026-04-12_0221"
+    _, date, timestr = stem.split("_", 2)
+    dt = datetime.strptime(f"{date}_{timestr}", "%Y-%m-%d_%H%M").replace(tzinfo=timezone.utc)
+    return int(dt.timestamp())
+
+
+def _pair_to_kraken_key(pair: str, pair_index: dict[str, str]) -> str | None:
+    """Map a normalized pair like 'BTC/USD' to the Kraken API key (e.g. 'XXBTZUSD')."""
+    key = pair_index.get(pair)
+    if key:
+        return key
+    # Fallback: try alias-reverse (BTC -> XBT) and simple concatenation
+    alt = pair.replace("BTC/", "XBT/").replace("/BTC", "/XBT")
+    return pair_index.get(alt)
+
+
+def _fetch_forward_return(kraken_key: str, cycle_ts: int, window_h: int) -> float | None:
+    """Fetch hourly OHLC starting at cycle_ts and return (close[window_h] / close[0]) - 1.
+
+    Returns None if Kraken has insufficient bars for the requested window.
+    """
+    try:
+        url = f"{_KRAKEN_OHLC}?pair={kraken_key}&interval=60&since={cycle_ts - 3600}"
+        with urllib.request.urlopen(url, timeout=15) as r:
+            body = json.load(r)
+    except Exception:
+        return None
+    result = body.get("result", {})
+    # Kraken returns {<key>: [bars], "last": ts}. Key differs from our request.
+    bars = None
+    for k, v in result.items():
+        if isinstance(v, list) and v:
+            bars = v
+            break
+    if not bars or len(bars) < window_h + 1:
+        return None
+    try:
+        entry_close = float(bars[0][4])
+        exit_close = float(bars[window_h][4])
+    except (IndexError, ValueError):
+        return None
+    if entry_close <= 0:
+        return None
+    return (exit_close / entry_close) - 1.0
+
+
 def _score_self_check(analyses: list[dict], expected_scores: dict[str, float]) -> tuple[int, int]:
     """Sanity: confirm reconstructed score_entry matches the report's logged score."""
     hits, total = 0, 0
@@ -166,6 +219,10 @@ def main() -> None:
                     help="Only process the N most recent reports")
     ap.add_argument("--verbose", action="store_true",
                     help="Print per-cycle details")
+    ap.add_argument("--forward-hours", type=int, default=2,
+                    help="Forward-return evaluation window in hours (default 2)")
+    ap.add_argument("--no-forward", action="store_true",
+                    help="Skip forward-return analysis (faster)")
     args = ap.parse_args()
 
     reports = sorted(_REPORTS_DIR.glob("brain_*.md"))
@@ -284,6 +341,95 @@ def main() -> None:
     for asset, n in asset_seen.most_common(15):
         pct = 100 * n / len(cycles)
         print(f"  {asset:10s} {n:3d}/{len(cycles):3d}  ({pct:.0f}%)")
+
+    # === Forward-return comparison ===
+    if args.no_forward:
+        return
+    print(f"\n=== Forward-return comparison ({args.forward_hours}h window) ===")
+    # Build pair index: "BTC/USD" -> Kraken key like "XXBTZUSD"
+    try:
+        kraken_pairs = _fetch_kraken_pairs()
+    except Exception as e:
+        print(f"  Unable to fetch Kraken pairs: {e}")
+        return
+    pair_index = {norm: info["key"] for norm, info in kraken_pairs.items()}
+
+    now_ts = int(time.time())
+    min_age_s = (args.forward_hours + 1) * 3600  # +1h buffer for bar alignment
+
+    evaluable: list[dict] = []
+    for c in cycles:
+        ts = _cycle_timestamp(Path(_REPORTS_DIR) / c["file"])
+        if now_ts - ts < min_age_s:
+            continue  # too recent — forward window not yet available
+
+        live = c["live"]
+        shadow_asset = c["shadow_best"]
+        if live.get("type") not in ("entry", "rotation") or not shadow_asset:
+            continue
+
+        # Live pair (what it bought into)
+        live_pair = live.get("pair")
+        if not live_pair:
+            continue
+        live_key = _pair_to_kraken_key(live_pair, pair_index)
+        if not live_key:
+            continue
+        live_ret = _fetch_forward_return(live_key, ts, args.forward_hours)
+        if live_ret is None:
+            continue
+
+        # Shadow pick's pair (against USD)
+        if shadow_asset == "USD":
+            shadow_ret = 0.0  # holding cash = zero return
+            shadow_pair = "USD"
+        else:
+            shadow_pair = f"{shadow_asset}/USD"
+            shadow_key = _pair_to_kraken_key(shadow_pair, pair_index)
+            if not shadow_key:
+                continue
+            shadow_ret = _fetch_forward_return(shadow_key, ts, args.forward_hours)
+            if shadow_ret is None:
+                continue
+
+        evaluable.append({
+            "file": c["file"],
+            "ts": ts,
+            "live_pair": live_pair,
+            "live_ret": live_ret,
+            "shadow_pair": shadow_pair,
+            "shadow_ret": shadow_ret,
+            "diff": live_ret - shadow_ret,  # positive = live better
+        })
+
+    if not evaluable:
+        print("  No cycles old enough for the forward window. "
+              "Let more time pass and re-run.")
+        return
+
+    print(f"  {len(evaluable)}/{len(cycles)} cycles had sufficient forward data\n")
+    print(f"  {'cycle':20s} {'live':14s} {'live%':>8s} {'shadow':10s} {'shad%':>8s} {'diff':>8s}  verdict")
+    print("  " + "-" * 85)
+    for e in sorted(evaluable, key=lambda x: x["ts"]):
+        verdict = "LIVE" if e["diff"] > 0.001 else ("SHADOW" if e["diff"] < -0.001 else "tie")
+        dt = datetime.fromtimestamp(e["ts"], tz=timezone.utc).strftime("%m-%d %H:%M")
+        print(f"  {dt:20s} {e['live_pair']:14s} {e['live_ret']*100:+7.2f}% "
+              f"{e['shadow_pair']:10s} {e['shadow_ret']*100:+7.2f}% "
+              f"{e['diff']*100:+7.2f}%  {verdict}")
+
+    live_wins = sum(1 for e in evaluable if e["diff"] > 0.001)
+    shadow_wins = sum(1 for e in evaluable if e["diff"] < -0.001)
+    ties = len(evaluable) - live_wins - shadow_wins
+    live_total = sum(e["live_ret"] for e in evaluable)
+    shadow_total = sum(e["shadow_ret"] for e in evaluable)
+    avg_diff = sum(e["diff"] for e in evaluable) / len(evaluable)
+
+    print("\n  === Tally ===")
+    print(f"  Live won:    {live_wins} ({100*live_wins/len(evaluable):.0f}%)")
+    print(f"  Shadow won:  {shadow_wins} ({100*shadow_wins/len(evaluable):.0f}%)")
+    print(f"  Ties:        {ties}")
+    print(f"  Cumulative: live {live_total*100:+.2f}%, shadow {shadow_total*100:+.2f}%")
+    print(f"  Avg per-cycle edge: {avg_diff*100:+.3f}% (positive = live better)")
 
 
 if __name__ == "__main__":
