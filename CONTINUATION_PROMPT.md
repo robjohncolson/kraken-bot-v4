@@ -1,9 +1,16 @@
 # Continuation Prompt — kraken-bot-v4
 
-## Architecture
+## Architecture (3 layers)
 
 ```
-CC Brain (scripts/cc_brain.py) — runs every 2h or on-demand
+Layer 3: CC Orchestrator (NEW in session 4)
+  Windows Task Scheduler "KrakenBot-CcOrchestrator" fires every 6h
+  scripts/dev_loop.ps1 -> claude --print -p (scripts/dev_loop_prompt.md)
+  Observes layers 1+2, picks the highest-leverage issue, dispatches Codex
+  via cross-agent.py, verifies, commits, restarts. Max 1 spec/run.
+  See CONTINUATION_PROMPT_cc_orchestrator.md for full details.
+
+Layer 2: CC-Brain (scripts/cc_brain.py --loop)
   ├── Reads temporal memory (what happened last time)
   ├── Observes portfolio (balances, positions)
   ├── Analyzes pairs:
@@ -15,11 +22,11 @@ CC Brain (scripts/cc_brain.py) — runs every 2h or on-demand
   ├── Writes memories (decisions, regime, snapshots)
   └── Generates review report
 
-Bot (always-on, deterministic body)
+Layer 1: Bot (main.py, always-on, deterministic body)
   ├── WebSocket price streaming
   ├── TP/SL/trailing stop monitoring
   ├── Fill settlement + reconciliation
-  └── REST API for CC to read/write
+  └── REST API at http://0.0.0.0:58392 for CC to read/write
 ```
 
 - **Control split**: Bot = dumb body. CC = brain. `CC_BRAIN_MODE=true` disables bot's autonomous planner.
@@ -76,7 +83,83 @@ Bot (always-on, deterministic body)
    - Loud `RunnerError` with manual cleanup hint on persistent failure.
    - +4 tests in `runner/test_parallel_runner_cleanup.py`.
 
-**Bot/brain restart**: required for cc_brain.py changes to take effect (PID 12776 still running pre-spec-12 code) and for runtime_loop.py changes (main.py PID 25914 still running pre-spec-11 code).
+**Bot/brain restarted**: main.py (PID 24624) and cc_brain.py --loop (PID 27516) both running with the new code. Bot health verified.
+
+### Session 4 part 2 — Layer 3 CC Orchestrator activated
+
+After landing 11/12/13, built and activated the autonomous dev loop. This is the layer ABOVE cc_brain that does what we've been doing manually all session: observe, diagnose, spec, dispatch Codex, verify, commit, restart.
+
+| Component | Path / status |
+|-----------|---------------|
+| Wrapper | `scripts/dev_loop.ps1` (pre/post-flight gates + invokes claude headless) |
+| Prompt | `scripts/dev_loop_prompt.md` (the 6-step procedure + hard rules) |
+| Registration | `scripts/register_dev_loop_task.ps1` |
+| State | `state/dev-loop/state.json` (gitignored, auto-created) |
+| Per-run logs | `state/dev-loop/runs/<ts>.log` and `.summary.md` |
+| Run log | `CONTINUATION_PROMPT_cc_orchestrator.md` (chronological, wrapper-owned) |
+| Scheduled task | `KrakenBot-CcOrchestrator` — **Ready** state, fires every 6h starting `2026-04-12 15:15 PT` |
+
+**Hard rules baked into the loop**:
+1. MAX 1 spec dispatched per run
+2. NEVER push to remote (local commits only)
+3. NEVER edit code itself — always dispatch to Codex via `../Agent/runner/cross-agent.py`
+4. NEVER modify env / `.env` / `CC_BRAIN_MODE`
+5. NEVER restart `main.py` if `/api/health` uptime < 3600s
+6. NEVER dispatch with the same slug as the previous run
+7. NEVER dispatch if previous spec is "unsettled" (1+ brain cycle since commit AND no new permission_blocked / stuck_dust / reconciliation_anomaly)
+8. NEVER touch `tasks/lessons.md` or `CLAUDE.md`
+9. ALWAYS update CONTINUATION_PROMPT_cc_orchestrator.md (the wrapper does this)
+10. If anything risky/unclear → write `state/dev-loop/escalate.md` and exit
+
+**Pre-flight gates** (deterministic, in PowerShell):
+- kill switch (`state/dev-loop/disabled`)
+- escalation file (`state/dev-loop/escalate.md`)
+- 3+ consecutive failures auto-disable
+- Bot health unreachable
+- Bot uptime < 1h
+- Last commit < 30 min old
+- Unstaged user changes (modified files only, untracked is OK)
+- Daily token budget > 320k input
+- Previous spec not settled (deterministic SQLite query)
+
+**Bring-up runs validated end-to-end**:
+- `dry_run` (Force) — identified historical AUD/USD recurring pattern from pre-restart cycles, parsed YAML output cleanly
+- `error` — claude refused curl in `acceptEdits` permission mode → fixed by switching to `bypassPermissions`
+- `no_action` (live, 222s) — first successful real fire. Correctly deferred: USDT phantom already fixed by spec 11, recon warning is benign held-fiat accounting, AUD/USD pattern no longer present after spec 12 went live
+
+**Manual controls**:
+```powershell
+# Disable next run (soft kill)
+New-Item state/dev-loop/disabled -ItemType File -Force
+
+# Manual fire
+powershell -File scripts/dev_loop.ps1                # gated
+powershell -File scripts/dev_loop.ps1 -DryRun -Force # observe-only test
+powershell -File scripts/dev_loop.ps1 -Force         # bypass uptime/commit gates
+
+# Unregister entirely
+powershell -File scripts/register_dev_loop_task.ps1 -Unregister
+```
+
+**Open follow-ups** (orchestrator may pick up on these in scheduled fires):
+1. Token tracking — wrapper has the budget gate but doesn't yet parse claude's token output
+2. Weekly review — separate prompt + 7d cadence, after 6h tactical loop is stable
+3. `untracked_assets=4-5` reconciliation warning — claude noticed but correctly deferred (benign held-fiat noise, not state drift). Worth a manual look.
+4. Bot's CRV/USD `EOrder:Insufficient funds` on a sell — single occurrence in last 7d, watch for repeat
+
+### Session 4 commit chain
+
+| Commit | Purpose |
+|--------|---------|
+| `1eacda6` | Spec 11: runtime_loop root-exit unit fix |
+| `5f98704` | Spec 12: permissions-aware pair blacklist |
+| `d54efa2` | Spec 13: docs only (kbv4 side) |
+| `81b7515` (Agent) | Spec 13: parallel runner stale worktree cleanup |
+| `b498d48` | docs(continuation): session 4 specs landed |
+| `9cc3bbe` | Layer 3: CC Orchestrator scaffolding |
+| `96f4a31` | dev_loop wrapper: encoding + state mutation fixes |
+| `51a9654` | dev_loop: prompt + doc cleanup after first live fire |
+| `d3fd4ab` | dev_loop: strip non-ASCII from register script |
 
 ## Earlier state (session 3)
 
