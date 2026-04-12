@@ -120,6 +120,8 @@ TOP_PAIRS = [
     "AAVE/USD", "DOT/USD", "ATOM/USD", "ADA/USD", "MATIC/USD",
     "CRV/USD", "UNI/USD", "DOGE/USD", "NEAR/USD", "FTM/USD",
 ]
+PERMISSION_BLOCKED_CATEGORY = "permission_blocked"
+PERMISSION_BLOCKED_ERROR = "EAccount:Invalid permissions"
 
 
 def _limit_buy_price(price: float, pair: str) -> float:
@@ -1027,6 +1029,80 @@ def get_pairs_with_open_orders() -> set[str]:
     return pairs
 
 
+def load_permission_blocked() -> set[str]:
+    """Return pairs that previously failed with Kraken permission errors."""
+    blocked = fetch(
+        f"/api/memory?category={PERMISSION_BLOCKED_CATEGORY}&hours=999999&limit=1000"
+    )
+    if "error" in blocked:
+        return set()
+
+    blocked_pairs: set[str] = set()
+    for memory in blocked.get("memories", []):
+        pair = memory.get("pair")
+        content = memory.get("content", {})
+        if isinstance(content, str):
+            try:
+                content = json.loads(content)
+            except Exception:
+                content = {}
+        if isinstance(content, dict):
+            pair = content.get("pair") or pair
+        if pair:
+            blocked_pairs.add(pair)
+    return blocked_pairs
+
+
+def filter_permission_blocked_orders(
+    orders_to_place: list[dict], blocked_pairs: set[str], log_fn,
+) -> list[dict]:
+    """Drop orders whose pair is known to be permission-blocked."""
+    if not blocked_pairs:
+        return orders_to_place
+
+    filtered_pairs = sorted({
+        order.get("pair")
+        for order in orders_to_place
+        if order.get("pair") in blocked_pairs
+    })
+    if not filtered_pairs:
+        return orders_to_place
+
+    filtered_orders = [
+        order for order in orders_to_place if order.get("pair") not in blocked_pairs
+    ]
+    log_fn(
+        f"  Filtered {len(orders_to_place) - len(filtered_orders)} "
+        f"permission-blocked order(s): {filtered_pairs}"
+    )
+    return filtered_orders
+
+
+def persist_permission_blocked_memory(order: dict, error_text: str, log_fn) -> None:
+    """Persist a pair blacklist entry when Kraken rejects it by permission."""
+    if PERMISSION_BLOCKED_ERROR not in error_text:
+        return
+
+    pair = order.get("pair")
+    if not pair:
+        return
+
+    result = fetch("/api/memory", method="POST", data={
+        "category": PERMISSION_BLOCKED_CATEGORY,
+        "pair": pair,
+        "content": {
+            "pair": pair,
+            "error_text": error_text,
+            "first_blocked_ts": datetime.now(timezone.utc).isoformat(),
+        },
+        "importance": 0.9,
+    })
+    if "error" in result:
+        log_fn(f"  -> failed to persist permission block for {pair}: {result['error']}")
+    else:
+        log_fn(f"  -> persisted permission_blocked for {pair}")
+
+
 def check_exits(
     holdings: list[dict], analyses: list[dict], stabilities: dict[str, float],
 ) -> list[dict]:
@@ -1390,6 +1466,9 @@ def run_brain(dry_run: bool = False) -> str:
                 "limit_price": str(limit_price),
             })
 
+    blocked_pairs = load_permission_blocked()
+    orders_to_place = filter_permission_blocked_orders(orders_to_place, blocked_pairs, log)
+
     # 5d: SHADOW — unified currency-agnostic hold scoring. Now PROMOTED to
     # actively veto entries (see 5b), but we still log the full verdict here
     # for continued analysis. unified/eligible were computed at the top of
@@ -1467,7 +1546,9 @@ def run_brain(dry_run: bool = False) -> str:
         for order in orders_to_place:
             result = fetch("/api/orders", method="POST", data=order)
             if "error" in result:
-                log(f"  FAILED: {order['pair']} — {result['error']}")
+                error_text = str(result.get("error", "unknown error"))
+                log(f"  FAILED: {order['pair']} — {error_text}")
+                persist_permission_blocked_memory(order, error_text, log)
             else:
                 txid = result.get("txid", "?")
                 log(f"  PLACED: {order['pair']} txid={txid}")
