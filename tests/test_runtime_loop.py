@@ -2085,5 +2085,181 @@ def test_15m_gate_disabled() -> None:
     asyncio.run(scenario())
 
 
+def test_tree_value_excludes_orphan_roots() -> None:
+    runtime = _runtime()
+    live_root = RotationNode(
+        node_id="root-ada",
+        parent_node_id=None,
+        depth=0,
+        asset="ADA",
+        quantity_total=Decimal("100"),
+        quantity_free=Decimal("100"),
+        status=RotationNodeStatus.OPEN,
+    )
+    orphan_root = RotationNode(
+        node_id="root-sol",
+        parent_node_id=None,
+        depth=0,
+        asset="SOL",
+        quantity_total=Decimal("50"),
+        quantity_free=Decimal("50"),
+        status=RotationNodeStatus.OPEN,
+    )
+    runtime._rotation_tree = RotationTreeState(
+        nodes=(live_root, orphan_root),
+        root_node_ids=(live_root.node_id, orphan_root.node_id),
+    )
+    runtime._root_usd_prices = {
+        "USD": Decimal("1"),
+        "ADA": Decimal("1"),
+        "SOL": Decimal("2"),
+    }
+    runtime._state = replace(
+        runtime.state,
+        bot_state=replace(
+            runtime.state.bot_state,
+            balances=(Balance(asset="ADA", available=Decimal("100")),),
+            portfolio=Portfolio(total_value_usd=Decimal("100")),
+        ),
+        current_prices={
+            "ADA/USD": PriceSnapshot(price=Decimal("1")),
+            "SOL/USD": PriceSnapshot(price=Decimal("2")),
+        },
+    )
+
+    dashboard = runtime._build_dashboard_state(runtime.state)
+
+    nodes = {node.node_id: node for node in runtime._rotation_tree.nodes}
+    assert dashboard.rotation_tree.total_portfolio_value_usd == "100.00"
+    assert nodes["root-ada"].status == RotationNodeStatus.OPEN
+    assert nodes["root-sol"].status == RotationNodeStatus.CLOSED
+
+
+def test_orphan_root_prune_writes_memory() -> None:
+    conn = _memory_db()
+    runtime = _runtime(conn=conn)
+    orphan_root = RotationNode(
+        node_id="root-sol",
+        parent_node_id=None,
+        depth=0,
+        asset="SOL",
+        quantity_total=Decimal("50"),
+        quantity_free=Decimal("50"),
+        status=RotationNodeStatus.OPEN,
+    )
+    runtime._rotation_tree = RotationTreeState(
+        nodes=(orphan_root,),
+        root_node_ids=(orphan_root.node_id,),
+    )
+    runtime._root_usd_prices = {"USD": Decimal("1"), "SOL": Decimal("2")}
+    runtime._state = replace(
+        runtime.state,
+        bot_state=replace(
+            runtime.state.bot_state,
+            balances=(),
+            portfolio=Portfolio(total_value_usd=ZERO_DECIMAL),
+        ),
+        current_prices={"SOL/USD": PriceSnapshot(price=Decimal("2"))},
+    )
+
+    runtime._build_dashboard_state(runtime.state)
+    runtime._build_dashboard_state(runtime.state)
+
+    rows = conn.execute(
+        "SELECT category, pair, content, importance FROM cc_memory ORDER BY id"
+    ).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["category"] == "orphan_root_pruned"
+    assert rows[0]["pair"] == "SOL/USD"
+    assert rows[0]["importance"] == 0.5
+    assert json.loads(rows[0]["content"]) == {
+        "node_id": "root-sol",
+        "asset": "SOL",
+        "quantity_total": "50",
+        "wallet_balance": "0",
+        "wallet_value_usd": "0",
+        "minimum_quantity": "0",
+        "reason": "no matching wallet balance",
+    }
+
+
+def test_rotation_tree_drift_warning_threshold() -> None:
+    conn = _memory_db()
+    runtime = _runtime(conn=conn)
+    root = RotationNode(
+        node_id="root-ada",
+        parent_node_id=None,
+        depth=0,
+        asset="ADA",
+        quantity_total=Decimal("100"),
+        quantity_free=Decimal("100"),
+        status=RotationNodeStatus.OPEN,
+    )
+    runtime._rotation_tree = RotationTreeState(
+        nodes=(root,),
+        root_node_ids=(root.node_id,),
+    )
+    runtime._root_usd_prices = {"USD": Decimal("1"), "ADA": Decimal("1")}
+
+    with patch("runtime_loop.logger.warning") as warning_mock:
+        runtime._state = replace(
+            runtime.state,
+            bot_state=replace(
+                runtime.state.bot_state,
+                balances=(Balance(asset="ADA", available=Decimal("100")),),
+                portfolio=Portfolio(total_value_usd=Decimal("100.40")),
+            ),
+            current_prices={"ADA/USD": PriceSnapshot(price=Decimal("1"))},
+        )
+        runtime._build_dashboard_state(runtime.state)
+
+        drift_count = conn.execute(
+            "SELECT COUNT(*) AS count FROM cc_memory WHERE category = ?",
+            ("rotation_tree_drift",),
+        ).fetchone()
+        assert drift_count is not None
+        assert drift_count["count"] == 0
+
+        runtime._state = replace(
+            runtime.state,
+            bot_state=replace(
+                runtime.state.bot_state,
+                balances=(Balance(asset="ADA", available=Decimal("100")),),
+                portfolio=Portfolio(total_value_usd=Decimal("103.00")),
+            ),
+            current_prices={"ADA/USD": PriceSnapshot(price=Decimal("1"))},
+        )
+        runtime._build_dashboard_state(runtime.state)
+
+    rows = conn.execute(
+        "SELECT category, pair, content, importance "
+        "FROM cc_memory WHERE category = ? ORDER BY id",
+        ("rotation_tree_drift",),
+    ).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["category"] == "rotation_tree_drift"
+    assert rows[0]["pair"] is None
+    assert rows[0]["importance"] == 0.7
+
+    content = json.loads(rows[0]["content"])
+    assert content["tree_value_usd"] == "100.00"
+    assert content["portfolio_total_value_usd"] == "103.00"
+    assert content["delta_usd"] == "-3.00"
+    assert content["roots"] == [
+        {
+            "node_id": "root-ada",
+            "asset": "ADA",
+            "status": "open",
+            "quantity_total": "100",
+            "price_usd": "1",
+            "value_usd": "100",
+        }
+    ]
+    assert any(
+        call.args and call.args[0] == "rotation_tree_drift: %s"
+        for call in warning_mock.call_args_list
+    )
+
+
 async def _noop_publish(*, event: str, data, event_id: str | None = None) -> None:
     del event, data, event_id

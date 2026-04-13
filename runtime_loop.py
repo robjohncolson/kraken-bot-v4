@@ -115,6 +115,8 @@ DEFAULT_GUARDIAN_INTERVAL_SEC = 120
 ROTATION_ENTRY_MAX_RETRIES = 3
 ROTATION_PAIR_COOLDOWN_SEC = 1800  # 30 min cooldown after cancel
 RECONCILIATION_ANOMALY_DEDUPE_WINDOW = timedelta(minutes=5)
+ROTATION_TREE_DRIFT_TOLERANCE_RATIO = Decimal("0.005")
+ROTATION_TREE_ORPHAN_MIN_VALUE_USD = Decimal("1.00")
 
 SsePublisher = Callable[..., Awaitable[None]]
 HeartbeatWriter = Callable[[HeartbeatSnapshot], None]
@@ -1050,6 +1052,183 @@ class SchedulerRuntime:
         if memory_id:
             self._last_recon_anomaly_content = frozen_content
             self._last_recon_anomaly_ts = now
+
+    def _wallet_balance(self, balances: tuple, asset: str) -> Decimal:
+        total = ZERO_DECIMAL
+        for balance in balances:
+            if balance.asset == asset:
+                total += balance.available + balance.held
+        return total
+
+    def _root_minimum_quantity(self, asset: str) -> Decimal:
+        lot_decimals = self._pair_metadata.lot_decimals(f"{asset}/USD")
+        if lot_decimals is None:
+            return ZERO_DECIMAL
+        return Decimal("1").scaleb(-lot_decimals)
+
+    def _root_has_live_descendants(self, node_id: str) -> bool:
+        if self._rotation_tree is None:
+            return False
+        pending = [node_id]
+        while pending:
+            parent_id = pending.pop()
+            for node in self._rotation_tree.nodes:
+                if node.parent_node_id != parent_id:
+                    continue
+                if node.status in _LIVE_ROTATION_TREE_STATUSES:
+                    return True
+                pending.append(node.node_id)
+        return False
+
+    def _wallet_value_usd(
+        self,
+        *,
+        asset: str,
+        wallet_balance: Decimal,
+        current_prices: dict | object,
+    ) -> Decimal | None:
+        if wallet_balance <= ZERO_DECIMAL:
+            return ZERO_DECIMAL
+        price = _root_usd_price(
+            asset,
+            current_prices,
+            cached_root_prices=self._root_usd_prices,
+        )
+        if price is None or price <= ZERO_DECIMAL:
+            return None
+        return wallet_balance * price
+
+    def _prune_orphan_roots(
+        self,
+        state: SchedulerState,
+    ) -> tuple[dict[str, object], ...]:
+        if self._rotation_tree is None:
+            return ()
+
+        normalized_now = _normalize_timestamp(self._utc_now())
+        pruned_roots: list[dict[str, object]] = []
+        updated_tree = self._rotation_tree
+        for node in self._rotation_tree.nodes:
+            if node.depth != 0 or node.status not in _LIVE_ROTATION_TREE_STATUSES:
+                continue
+            if self._root_has_live_descendants(node.node_id):
+                continue
+
+            wallet_balance = self._wallet_balance(state.bot_state.balances, node.asset)
+            minimum_quantity = self._root_minimum_quantity(node.asset)
+            wallet_value_usd = self._wallet_value_usd(
+                asset=node.asset,
+                wallet_balance=wallet_balance,
+                current_prices=state.current_prices,
+            )
+            no_wallet_balance = wallet_balance <= ZERO_DECIMAL
+            below_quantity_threshold = (
+                minimum_quantity > ZERO_DECIMAL and wallet_balance <= minimum_quantity
+            )
+            below_value_threshold = (
+                wallet_value_usd is not None
+                and wallet_value_usd < ROTATION_TREE_ORPHAN_MIN_VALUE_USD
+            )
+            if wallet_value_usd is None and wallet_balance > ZERO_DECIMAL:
+                if not below_quantity_threshold:
+                    continue
+            elif not (
+                no_wallet_balance
+                or below_quantity_threshold
+                or below_value_threshold
+            ):
+                continue
+
+            updated_tree = update_node(
+                updated_tree,
+                node.node_id,
+                status=RotationNodeStatus.CLOSED,
+                closed_at=normalized_now,
+                exit_reason="orphan_root_pruned",
+            )
+            content = {
+                "node_id": node.node_id,
+                "asset": node.asset,
+                "quantity_total": str(node.quantity_total),
+                "wallet_balance": str(wallet_balance),
+                "wallet_value_usd": (
+                    None if wallet_value_usd is None else str(wallet_value_usd)
+                ),
+                "minimum_quantity": str(minimum_quantity),
+                "reason": "no matching wallet balance",
+            }
+            self._cc_memory._write(
+                "orphan_root_pruned",
+                content,
+                pair=f"{node.asset}/USD",
+                importance=0.5,
+            )
+            logger.warning(
+                "Pruned orphan root %s (%s): wallet_balance=%s wallet_value_usd=%s",
+                node.node_id,
+                node.asset,
+                wallet_balance,
+                wallet_value_usd,
+            )
+            pruned_roots.append(content)
+
+        if not pruned_roots:
+            return ()
+
+        self._rotation_tree = updated_tree
+        try:
+            self._writer.save_rotation_tree(self._rotation_tree)
+        except Exception:
+            logger.warning(
+                "Failed to persist pruned orphan roots to rotation_tree storage",
+                exc_info=True,
+            )
+        return tuple(pruned_roots)
+
+    def _record_rotation_tree_drift(
+        self,
+        *,
+        state: SchedulerState,
+        tree_value: RotationTreeValueResult,
+        pruned_roots: tuple[dict[str, object], ...],
+    ) -> None:
+        portfolio_total_value_usd = state.bot_state.portfolio.total_value_usd
+        tolerance_usd = max(
+            ROTATION_TREE_ORPHAN_MIN_VALUE_USD,
+            portfolio_total_value_usd * ROTATION_TREE_DRIFT_TOLERANCE_RATIO,
+        )
+        delta_usd = tree_value.total_usd - portfolio_total_value_usd
+        if abs(delta_usd) <= tolerance_usd:
+            return
+
+        roots = [
+            {
+                "node_id": root.node_id,
+                "asset": root.asset,
+                "status": root.status.value,
+                "quantity_total": str(root.quantity_total),
+                "price_usd": None if root.price_usd is None else str(root.price_usd),
+                "value_usd": None if root.value_usd is None else str(root.value_usd),
+            }
+            for root in tree_value.roots
+        ]
+        content = {
+            "tree_value_usd": tree_value.rendered_total_usd,
+            "tree_total_usd_exact": str(tree_value.total_usd),
+            "portfolio_total_value_usd": str(portfolio_total_value_usd),
+            "delta_usd": str(delta_usd),
+            "tolerance_usd": str(tolerance_usd),
+            "has_missing_prices": tree_value.has_missing_prices,
+            "roots": roots,
+            "pruned_roots": list(pruned_roots),
+        }
+        logger.warning("rotation_tree_drift: %s", json.dumps(content, sort_keys=True))
+        self._cc_memory._write(
+            "rotation_tree_drift",
+            content,
+            pair=None,
+            importance=0.7,
+        )
 
     async def _reap_stale_cc_orders(self, now: datetime) -> None:
         try:
@@ -2884,10 +3063,16 @@ class SchedulerRuntime:
         return HeartbeatStatus.HEALTHY
 
     def _build_dashboard_state(self, state: SchedulerState) -> DashboardState:
-        # Compute rotation tree total value in USD
-        tree_value = _compute_rotation_tree_value(
+        pruned_roots = self._prune_orphan_roots(state)
+        tree_value = _compute_rotation_tree_value_details(
             self._rotation_tree,
             state.current_prices,
+            cached_root_prices=self._root_usd_prices,
+        )
+        self._record_rotation_tree_drift(
+            state=state,
+            tree_value=tree_value,
+            pruned_roots=pruned_roots,
         )
         # Merge trading beliefs with display-only beliefs (low-confidence)
         all_beliefs = _build_belief_entries(
@@ -2910,7 +3095,7 @@ class SchedulerRuntime:
             ),
             rotation_tree=_build_rotation_tree_snapshot(
                 self._rotation_tree,
-                tree_value_usd=tree_value,
+                tree_value_usd=tree_value.rendered_total_usd,
                 current_prices=state.current_prices,
                 cached_root_prices=self._root_usd_prices,
             ),
@@ -3096,55 +3281,164 @@ def _apply_exit_offset(
 
 _price_cache: dict[str, tuple[float, Decimal]] = {}  # pair → (monotonic_expiry, price)
 _PRICE_CACHE_TTL = 300  # 5 minutes
+_LIVE_ROTATION_TREE_STATUSES: frozenset[RotationNodeStatus] = frozenset(
+    {
+        RotationNodeStatus.PLANNED,
+        RotationNodeStatus.OPEN,
+        RotationNodeStatus.CLOSING,
+        RotationNodeStatus.EXPIRED,
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class RotationTreeRootValue:
+    node_id: str
+    asset: str
+    status: RotationNodeStatus
+    quantity_total: Decimal
+    value_usd: Decimal | None
+    price_usd: Decimal | None
+
+
+@dataclass(frozen=True, slots=True)
+class RotationTreeValueResult:
+    rendered_total_usd: str
+    total_usd: Decimal
+    has_missing_prices: bool
+    roots: tuple[RotationTreeRootValue, ...] = ()
+
+
+def _root_usd_price(
+    asset: str,
+    current_prices: dict | object,
+    *,
+    cached_root_prices: dict[str, Decimal] | None = None,
+) -> Decimal | None:
+    if asset in _STABLECOIN_ROOTS:
+        return Decimal("1")
+
+    pair_key = f"{asset}/USD"
+    inverse_pair_key = f"USD/{asset}"
+    if isinstance(current_prices, dict):
+        snap = current_prices.get(pair_key)
+        if snap is not None:
+            price = snap.price if hasattr(snap, "price") else snap
+            if price is not None and price > ZERO_DECIMAL:
+                return price
+        inverse_snap = current_prices.get(inverse_pair_key)
+        if inverse_snap is not None:
+            inverse_price = (
+                inverse_snap.price
+                if hasattr(inverse_snap, "price")
+                else inverse_snap
+            )
+            if inverse_price is not None and inverse_price > ZERO_DECIMAL:
+                return Decimal("1") / inverse_price
+
+    if cached_root_prices is not None:
+        cached_root_price = cached_root_prices.get(asset)
+        if cached_root_price is not None and cached_root_price > ZERO_DECIMAL:
+            return cached_root_price
+
+    now = _time.monotonic()
+    cached_price = _price_cache.get(pair_key)
+    if cached_price is not None and now < cached_price[0]:
+        return cached_price[1]
+
+    try:
+        from exchange.ohlcv import fetch_ohlcv
+
+        bars = fetch_ohlcv(pair_key, interval=60, count=1)
+        if not bars.empty:
+            price = Decimal(str(float(bars["close"].iloc[-1])))
+            _price_cache[pair_key] = (now + _PRICE_CACHE_TTL, price)
+            return price
+        inverse_bars = fetch_ohlcv(inverse_pair_key, interval=60, count=1)
+        if not inverse_bars.empty:
+            inverse_price = Decimal(str(float(inverse_bars["close"].iloc[-1])))
+            if inverse_price > ZERO_DECIMAL:
+                price = Decimal("1") / inverse_price
+                _price_cache[pair_key] = (now + _PRICE_CACHE_TTL, price)
+                return price
+    except Exception:
+        return None
+    return None
 
 
 def _compute_rotation_tree_value(
     tree: RotationTreeState | None,
     current_prices: dict,
-) -> str:
-    """Sum all rotation tree root assets in USD. Returns string, '~X' (partial), or 'N/A'."""
+) -> RotationTreeValueResult:
+    return _compute_rotation_tree_value_details(
+        tree,
+        current_prices,
+        cached_root_prices=None,
+    )
+
+
+def _compute_rotation_tree_value_details(
+    tree: RotationTreeState | None,
+    current_prices: dict,
+    *,
+    cached_root_prices: dict[str, Decimal] | None = None,
+) -> RotationTreeValueResult:
+    """Sum live rotation tree roots in USD and preserve per-root valuation details."""
     if tree is None:
-        return "0"
+        return RotationTreeValueResult(
+            rendered_total_usd="0",
+            total_usd=ZERO_DECIMAL,
+            has_missing_prices=False,
+        )
     total = ZERO_DECIMAL
     has_missing = False
-    now = _time.monotonic()
+    roots: list[RotationTreeRootValue] = []
     for node in tree.nodes:
-        if node.depth != 0:
+        if node.depth != 0 or node.status not in _LIVE_ROTATION_TREE_STATUSES:
             continue
-        asset = node.asset
-        if asset in ("USD", "USDC"):
-            total += node.quantity_total
-            continue
-        # Look up ASSET/USD price from current_prices (WebSocket)
-        pair_key = f"{asset}/USD"
-        snap = current_prices.get(pair_key)
-        if snap is not None:
-            price = snap.price if hasattr(snap, "price") else snap
-            total += node.quantity_total * price
-            continue
-        # Check cache before REST fallback
-        cached = _price_cache.get(pair_key)
-        if cached is not None and now < cached[0]:
-            total += node.quantity_total * cached[1]
-            continue
-        # REST fallback (cached for 5 min to avoid blocking every cycle)
-        try:
-            from exchange.ohlcv import fetch_ohlcv
-
-            bars = fetch_ohlcv(pair_key, interval=60, count=1)
-            if not bars.empty:
-                price = Decimal(str(float(bars["close"].iloc[-1])))
-                _price_cache[pair_key] = (now + _PRICE_CACHE_TTL, price)
-                total += node.quantity_total * price
-            else:
-                has_missing = True
-        except Exception:
+        price = _root_usd_price(
+            node.asset,
+            current_prices,
+            cached_root_prices=cached_root_prices,
+        )
+        if price is None or price <= ZERO_DECIMAL:
             has_missing = True
+            roots.append(
+                RotationTreeRootValue(
+                    node_id=node.node_id,
+                    asset=node.asset,
+                    status=node.status,
+                    quantity_total=node.quantity_total,
+                    value_usd=None,
+                    price_usd=None,
+                )
+            )
+            continue
+        value_usd = node.quantity_total * price
+        total += value_usd
+        roots.append(
+            RotationTreeRootValue(
+                node_id=node.node_id,
+                asset=node.asset,
+                status=node.status,
+                quantity_total=node.quantity_total,
+                value_usd=value_usd,
+                price_usd=price,
+            )
+        )
     if has_missing:
         if total == ZERO_DECIMAL:
-            return "N/A"
-        return f"~{round(total, 2)}"  # Prefix ~ to signal incomplete valuation
-    return str(round(total, 2))
+            rendered_total = "N/A"
+        else:
+            rendered_total = f"~{round(total, 2)}"
+    else:
+        rendered_total = str(round(total, 2))
+    return RotationTreeValueResult(
+        rendered_total_usd=rendered_total,
+        total_usd=total,
+        has_missing_prices=has_missing,
+        roots=tuple(roots),
+    )
 
 
 # USD-pegged roots: P&L shows children aggregate (deployed capital is not a loss)
