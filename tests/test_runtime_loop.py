@@ -7,7 +7,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import pandas as pd
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from core.config import Settings, load_settings
 from core.types import (
@@ -17,6 +17,7 @@ from core.types import (
     BeliefSource,
     BotState,
     CancelOrder,
+    LogEvent,
     MarketRegime,
     OrderSide,
     OrderType,
@@ -33,7 +34,7 @@ from core.types import (
 from exchange.executor import CancelOrderNotFoundError
 from exchange.models import KrakenOrder, KrakenState, KrakenTrade
 from exchange.websocket import ConnectionState, FillConfirmed, PriceTick
-from guardian import PriceSnapshot
+from guardian import MissingCurrentPriceError, PriceSnapshot
 from persistence.sqlite import SqliteReader, SqliteWriter, ensure_schema
 from runtime_loop import SchedulerRuntime, build_initial_scheduler_state
 from scheduler import ReconciliationDiscrepancy, SchedulerConfig
@@ -559,6 +560,110 @@ def test_run_once_seeds_candidate_price_subscribes_pair_and_enqueues_rotation_be
     asyncio.run(scenario())
 
 
+def test_run_once_reaper_runs_before_scheduler() -> None:
+    async def scenario() -> None:
+        runtime = _runtime()
+        runtime._state = replace(
+            runtime.state,
+            last_reconcile_at=NOW,
+            last_guardian_check_at=NOW,
+        )
+        call_order: list[str] = []
+
+        async def remember(name: str) -> None:
+            call_order.append(name)
+
+        async def ensure_websocket_connected() -> None:
+            await remember("websocket")
+
+        async def ensure_subscriptions() -> None:
+            await remember("subscriptions")
+
+        async def reap_stale_orders(_now: datetime) -> None:
+            await remember("reaper")
+
+        class StubScheduler:
+            def run_cycle(self, state):
+                call_order.append("scheduler")
+                return state, ()
+
+        runtime._ensure_websocket_connected = AsyncMock(
+            side_effect=ensure_websocket_connected
+        )
+        runtime._ensure_subscriptions = AsyncMock(side_effect=ensure_subscriptions)
+        runtime._reap_stale_cc_orders = AsyncMock(side_effect=reap_stale_orders)
+        runtime._maybe_bind_tree_to_position = AsyncMock(return_value=None)
+        runtime._persist_state_changes = AsyncMock(return_value=None)
+        runtime._maybe_poll_beliefs = AsyncMock(return_value=None)
+        runtime._handle_effects = AsyncMock(return_value=None)
+        runtime._maybe_plan_conditional_rotation = AsyncMock(return_value=None)
+        runtime._maybe_run_rotation_planner = AsyncMock(return_value=None)
+        runtime._scheduler = StubScheduler()
+
+        await runtime.run_once()
+
+        assert call_order[:4] == [
+            "websocket",
+            "subscriptions",
+            "reaper",
+            "scheduler",
+        ]
+
+    asyncio.run(scenario())
+
+
+def test_run_once_recovers_from_missing_price() -> None:
+    async def scenario() -> None:
+        runtime = _runtime()
+        runtime._state = replace(
+            runtime.state,
+            last_reconcile_at=NOW,
+            last_guardian_check_at=NOW,
+        )
+        recovered_effects = (LogEvent(message="recovered"),)
+
+        class MissingPriceOnceScheduler:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def run_cycle(self, state):
+                self.calls += 1
+                if self.calls == 1:
+                    raise MissingCurrentPriceError("TRU/USD")
+                seeded = state.current_prices.get("TRU/USD")
+                assert isinstance(seeded, PriceSnapshot)
+                assert seeded.price == Decimal("0.052")
+                return state, recovered_effects
+
+        scheduler = MissingPriceOnceScheduler()
+        runtime._ensure_websocket_connected = AsyncMock(return_value=None)
+        runtime._ensure_subscriptions = AsyncMock(return_value=None)
+        runtime._reap_stale_cc_orders = AsyncMock(return_value=None)
+        runtime._maybe_bind_tree_to_position = AsyncMock(return_value=None)
+        runtime._persist_state_changes = AsyncMock(return_value=None)
+        runtime._maybe_poll_beliefs = AsyncMock(return_value=None)
+        runtime._handle_effects = AsyncMock(return_value=None)
+        runtime._maybe_plan_conditional_rotation = AsyncMock(return_value=None)
+        runtime._maybe_run_rotation_planner = AsyncMock(return_value=None)
+        runtime._scheduler = scheduler
+
+        with patch(
+            "exchange.ohlcv.fetch_ohlcv",
+            return_value=_bars_with_closes([0.052]),
+        ) as fetch_ohlcv:
+            effects = await runtime.run_once()
+
+        assert effects == recovered_effects
+        assert scheduler.calls == 2
+        assert fetch_ohlcv.call_count == 1
+        seeded = runtime.state.current_prices.get("TRU/USD")
+        assert isinstance(seeded, PriceSnapshot)
+        assert seeded.price == Decimal("0.052")
+        assert runtime._last_runtime_error is None
+
+    asyncio.run(scenario())
+
+
 def test_apply_exit_offset_long_sell_goes_below_trigger() -> None:
     from runtime_loop import _apply_exit_offset
 
@@ -681,7 +786,7 @@ def test_execute_cancel_order_resolves_client_order_id_and_persists_cancelled_st
     asyncio.run(scenario())
 
 
-def test_stale_cc_order_cancelled_after_threshold() -> None:
+def test_reaper_writes_stale_order_cancelled_memory() -> None:
     async def scenario() -> None:
         conn = _memory_db()
         _insert_open_order(
@@ -707,9 +812,10 @@ def test_stale_cc_order_cancelled_after_threshold() -> None:
         assert row["status"] == "cancelled"
 
         memory_row = conn.execute(
-            "SELECT category, pair, content, importance FROM cc_memory ORDER BY id"
+            "SELECT timestamp, category, pair, content, importance FROM cc_memory ORDER BY id"
         ).fetchone()
         assert memory_row is not None
+        assert memory_row["timestamp"] == NOW.isoformat()
         assert memory_row["category"] == "stale_order_cancelled"
         assert memory_row["pair"] == "PEPE/USD"
         assert memory_row["importance"] == 0.6

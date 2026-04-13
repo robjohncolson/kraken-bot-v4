@@ -59,7 +59,7 @@ from exchange.websocket import (
     KrakenWebSocketV2,
     PriceTick,
 )
-from guardian import PriceSnapshot
+from guardian import MissingCurrentPriceError, PriceSnapshot
 from healing.heartbeat import HeartbeatSnapshot, HeartbeatStatus, write_heartbeat
 from persistence.cc_memory import CCMemory
 from persistence.sqlite import SqliteReader, SqliteWriter
@@ -574,11 +574,32 @@ class SchedulerRuntime:
                     kraken_state=state.kraken_state,
                     source="periodic",
                 )
+            await self._ensure_websocket_connected()
+            await self._ensure_subscriptions()
+            await self._reap_stale_cc_orders(now)
+
+            missing_price_exc: MissingCurrentPriceError | None = None
             async with self._state_lock:
                 state = replace(self._state, now=now)
-                new_state, effects = self._scheduler.run_cycle(state)
-                self._state = new_state
-                self._conditional_tree_state = _conditional_tree_state(new_state)
+                try:
+                    new_state, effects = self._scheduler.run_cycle(state)
+                except MissingCurrentPriceError as exc:
+                    missing_price_exc = exc
+                else:
+                    self._state = new_state
+                    self._conditional_tree_state = _conditional_tree_state(new_state)
+
+            if missing_price_exc is not None:
+                logger.warning(
+                    "Cycle missing price for %s -- attempting REST fetch + retry",
+                    missing_price_exc.pair,
+                )
+                await self._seed_current_price_from_rest(missing_price_exc.pair)
+                async with self._state_lock:
+                    state = replace(self._state, now=now)
+                    new_state, effects = self._scheduler.run_cycle(state)
+                    self._state = new_state
+                    self._conditional_tree_state = _conditional_tree_state(new_state)
             self._last_runtime_error = None
         except (ExchangeError, KrakenBotError) as exc:
             self._last_runtime_error = str(exc)
@@ -586,13 +607,10 @@ class SchedulerRuntime:
             self._write_heartbeat()
             return ()
 
-        await self._ensure_websocket_connected()
-        await self._ensure_subscriptions()
         await self._maybe_bind_tree_to_position()
         await self._persist_state_changes(state, new_state)
         await self._maybe_poll_beliefs(now)
         await self._handle_effects(effects)
-        await self._reap_stale_cc_orders(now)
         await self._maybe_plan_conditional_rotation(now)
         await self._maybe_run_rotation_planner(now)
         self._write_heartbeat()
@@ -1101,12 +1119,26 @@ class SchedulerRuntime:
                 "side": "" if row["side"] is None else str(row["side"]),
                 "base_qty": "0" if row["base_qty"] is None else str(row["base_qty"]),
             }
-            self._cc_memory._write(
-                "stale_order_cancelled",
-                content,
-                pair=pair,
-                importance=0.6,
-            )
+            try:
+                self._conn.execute(
+                    "INSERT INTO cc_memory (timestamp, category, pair, content, importance) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (
+                        normalized_now.isoformat(),
+                        "stale_order_cancelled",
+                        pair,
+                        json.dumps(content, sort_keys=True, separators=(",", ":")),
+                        0.6,
+                    ),
+                )
+                self._conn.commit()
+            except sqlite3.Error as exc:
+                logger.warning(
+                    "Failed to record stale-order cancellation memory for %s on %s: %s",
+                    order_id,
+                    pair,
+                    exc,
+                )
 
             async with self._state_lock:
                 remaining_pending = tuple(
@@ -2663,6 +2695,61 @@ class SchedulerRuntime:
                 belief_timestamp=observed_at,
             )
             self._state = replace(self._state, current_prices=current_prices)
+
+    async def _seed_current_price_from_rest(self, pair: str) -> bool:
+        async with self._state_lock:
+            if pair in self._state.current_prices:
+                return True
+
+        try:
+            from exchange.ohlcv import fetch_ohlcv
+
+            bars = fetch_ohlcv(pair, interval=60, count=1)
+        except Exception:
+            logger.warning(
+                "REST price fetch failed while recovering missing pair %s",
+                pair,
+                exc_info=True,
+            )
+            return False
+
+        if bars.empty:
+            logger.warning(
+                "REST price fetch returned no bars while recovering missing pair %s",
+                pair,
+            )
+            return False
+
+        try:
+            last_close = Decimal(str(float(bars["close"].iloc[-1])))
+        except (ArithmeticError, TypeError, ValueError):
+            logger.warning(
+                "REST price fetch returned invalid close while recovering missing pair %s",
+                pair,
+                exc_info=True,
+            )
+            return False
+
+        if not last_close.is_finite() or last_close <= ZERO_DECIMAL:
+            logger.warning(
+                "REST price fetch returned non-positive close while recovering missing pair %s: %s",
+                pair,
+                last_close,
+            )
+            return False
+
+        async with self._state_lock:
+            current_prices = dict(self._state.current_prices)
+            if pair in current_prices:
+                return True
+            current_prices[pair] = PriceSnapshot(
+                price=last_close,
+                belief_timestamp=self._belief_timestamps.get(pair),
+            )
+            self._state = replace(self._state, current_prices=current_prices)
+
+        logger.info("REST price retry seeded %s at %s", pair, last_close)
+        return True
 
     async def _subscribe_candidate_pair(self, pair: str) -> None:
         if self._websocket.state is not ConnectionState.CONNECTED:
