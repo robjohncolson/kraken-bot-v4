@@ -116,6 +116,32 @@ Performance impact of spec 22: per-run input dropped from ~300k to ~120k tokens 
 
 Cumulative cost so far across the bring-up runs: ~$1.50 (Max sub covers it, but the wrapper now tracks it for capacity planning).
 
+### 2026-04-13T00:30Z -- specs 25-28 landed + crisis recovered
+
+**Major incident + recovery**: Spec 27 (stale-order reaper) deployment at 00:06 UTC triggered a startup race deadlock. CC API order on TRU/USD had filled between bot restarts. Startup recovery created the TRU position from balances, but TRU/USD wasn't in current_prices because the WebSocket hadn't subscribed yet. First cycle raised MissingCurrentPriceError, was caught by the broad exception handler at runtime_loop.py:568, which aborted before reaching _ensure_subscriptions. Tight-loop deadlock for ~7 minutes. Reaper itself never ran (hooked AFTER the failing scheduler call).
+
+**Emergency unblock** (commit 66d72e4, edited inline because real-money emergency overrode the dispatch-only rule): seed REST-fetched prices into current_prices at startup so the first cycle has valid price data for every held asset.
+
+**Proper hardening** (spec 28, commit b038f65):
+1. _reap_stale_cc_orders moved BEFORE scheduler.run_cycle in run_once
+2. New defensive handler: catches MissingCurrentPriceError, attempts one-shot REST fetch + retry, falls through if still failing
+3. Spec 27's reaper now correctly writes cc_memory category='stale_order_cancelled' (was silently dropping)
+4. Emergency seed patch from 66d72e4 kept (belt + suspenders)
+
+After the emergency fix, spec 27's reaper successfully cancelled the stuck PEPE/USD order on the first recovered cycle. PEPE order status='cancelled' in SQLite, brain free to re-propose. Then specs 25/26/27/28 all landed cleanly.
+
+**Tests at end of session**: 705 passing (689 -> +16 across the session).
+
+**Specs in this batch**:
+| # | Slug | Notes |
+|---|------|-------|
+| 25 | aleo-usdt-quote-currency-substitution | Brain swaps USDT-quoted entries to USD-quoted alternatives when USDT inventory is insufficient. Writes insufficient_quote_inventory memory for cycle dedupe. |
+| 26 | postmortem-respect-anomaly-flag | Brain post-mortem now filters out anomaly_flag rows. Self-tune reads filtered P&L (~$1.26 instead of phantom -$14.59). |
+| 27 | bot-stale-cc-order-reaper | Bot reaps CC API orders open > 15 min. Cancels on Kraken + SQLite + memory write (memory write fixed by spec 28). |
+| 28 | startup-race-hardening | Reaper before scheduler + missing-price retry + reaper memory write fix. |
+
+**Specs landed in session 4 totals: 11 -> 28 (18 specs).** Bot has been restarted multiple times for code changes. Both scheduled tasks still registered.
+
 ### 2026-04-12T21:55Z -- spec 24 landed + bot restart
 
 Spec 24 (commit `a0c9750`): runtime_loop._handle_effects() now persists ReconciliationDiscrepancy events to cc_memory with category='reconciliation_anomaly', dedupe within 5min. Tests +3, full suite **693 passed** (up from 690).
