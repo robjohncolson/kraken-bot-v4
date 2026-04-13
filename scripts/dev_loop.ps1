@@ -30,7 +30,8 @@ $RunsDir    = Join-Path $StateDir "runs"
 $StateFile  = Join-Path $StateDir "state.json"
 $DisableFile= Join-Path $StateDir "disabled"
 $EscalFile  = Join-Path $StateDir "escalate.md"
-$OrchDoc    = Join-Path $RepoRoot "CONTINUATION_PROMPT_cc_orchestrator.md"
+$OrchDocRepoPath = "CONTINUATION_PROMPT_cc_orchestrator.md"
+$OrchDoc    = Join-Path $RepoRoot $OrchDocRepoPath
 
 $Ts = (Get-Date).ToUniversalTime().ToString("yyyyMMdd_HHmmss")
 $RunLog = Join-Path $RunsDir "$Ts.log"
@@ -285,6 +286,69 @@ function Update-Orch-Doc($entry) {
     Add-Content -Path $OrchDoc -Value "`n$entry"
 }
 
+function Get-GitStatusPath([string]$statusLine) {
+    if ([string]::IsNullOrWhiteSpace($statusLine) -or $statusLine.Length -lt 4) {
+        return $null
+    }
+
+    $path = $statusLine.Substring(3).Trim()
+    if ($path -match '\s+->\s+') {
+        $path = ($path -split '\s+->\s+', 2)[1].Trim()
+    }
+    if ($path.StartsWith('"') -and $path.EndsWith('"') -and $path.Length -ge 2) {
+        $path = $path.Substring(1, $path.Length - 2)
+    }
+
+    return $path.Replace('\', '/')
+}
+
+function Commit-Orch-DocAppend {
+    # Dry runs still append to the orchestrator doc for observability, but must never create git commits.
+    if ($DryRun) {
+        Write-RunLog "DRY RUN: skipping orchestrator doc auto-commit"
+        return
+    }
+
+    try {
+        $gitAddOutput = & git add -- $OrchDocRepoPath 2>&1
+        $gitAddExitCode = $LASTEXITCODE
+        foreach ($line in @($gitAddOutput)) {
+            if ($line) {
+                Write-RunLog "git add: $line"
+            }
+        }
+        if ($gitAddExitCode -ne 0) {
+            throw "git add failed with exit code $gitAddExitCode"
+        }
+
+        & git diff --cached --quiet -- $OrchDocRepoPath
+        $gitDiffExitCode = $LASTEXITCODE
+        if ($gitDiffExitCode -eq 0) {
+            Write-RunLog "orchestrator doc auto-commit skipped: no staged changes"
+            return
+        }
+        if ($gitDiffExitCode -ne 1) {
+            throw "git diff --cached --quiet failed with exit code $gitDiffExitCode"
+        }
+
+        $commitMessage = "docs(orchestrator): append run log $Ts"
+        $gitCommitOutput = & git commit -m $commitMessage --only -- $OrchDocRepoPath 2>&1
+        $gitCommitExitCode = $LASTEXITCODE
+        foreach ($line in @($gitCommitOutput)) {
+            if ($line) {
+                Write-RunLog "git commit: $line"
+            }
+        }
+        if ($gitCommitExitCode -ne 0) {
+            throw "git commit failed with exit code $gitCommitExitCode"
+        }
+
+        Write-RunLog "orchestrator doc auto-commit succeeded: $commitMessage"
+    } catch {
+        Write-RunLog "WARN: orchestrator doc auto-commit failed: $_"
+    }
+}
+
 function Get-RecentDispatchHistory {
     param(
         [int]$daysWindow = 7
@@ -535,10 +599,21 @@ if ($commitAgeMin -lt 30 -and -not $Force) {
 }
 
 # Check unstaged user changes
-$dirty = git status --porcelain | Where-Object { $_ -notmatch "^\?\?" }
-if ($dirty -and -not $Force) {
+$dirty = @(git status --porcelain | Where-Object { $_ -notmatch "^\?\?" })
+$dirtyUserChanges = @(
+    $dirty | ForEach-Object {
+        $path = Get-GitStatusPath $_
+        if ($path -and $path -ne $OrchDocRepoPath) {
+            [PSCustomObject]@{
+                line = $_
+                path = $path
+            }
+        }
+    }
+)
+if ($dirtyUserChanges.Count -gt 0 -and -not $Force) {
     Write-RunLog "unstaged user changes detected:"
-    $dirty | ForEach-Object { Write-RunLog "  $_" }
+    $dirtyUserChanges | ForEach-Object { Write-RunLog "  $($_.line)" }
     Exit-NoAction "unstaged user changes present (user is mid-edit)" $state
 }
 
@@ -909,6 +984,7 @@ if ($orchDocEntryOverride) {
 } else {
     Update-Orch-Doc ($entryParts -join " ")
 }
+Commit-Orch-DocAppend
 
 # Write the per-run summary
 $summaryLines = @(
