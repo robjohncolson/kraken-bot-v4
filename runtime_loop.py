@@ -366,6 +366,21 @@ class SchedulerRuntime:
                 for b in initial_state.kraken_state.balances
             }
             prices = _collect_root_prices(initial_state.current_prices, balances_dict)
+            # EMERGENCY UNBLOCK (post spec 27 outage 2026-04-13 00:06Z):
+            # Also propagate REST-fetched prices into current_prices so the very first
+            # cycle has price data for newly-acquired assets that the WebSocket has not
+            # yet subscribed to. Without this, scheduler.run_cycle raises
+            # MissingCurrentPriceError on rotation tree roots before _ensure_subscriptions
+            # has a chance to subscribe, deadlocking the bot.
+            seeded_prices = dict(initial_state.current_prices)
+            for asset, asset_price in prices.items():
+                if not asset_price or asset_price <= ZERO_DECIMAL:
+                    continue
+                pair_key = f"{asset}/USD"
+                if pair_key in seeded_prices:
+                    continue
+                seeded_prices[pair_key] = PriceSnapshot(price=asset_price)
+            initial_state = replace(initial_state, current_prices=seeded_prices)
             self._rotation_tree = self._rotation_planner.initialize_roots(
                 balances_dict,
                 prices_usd=prices,
