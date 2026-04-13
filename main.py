@@ -13,6 +13,34 @@ Startup sequence:
 
 from __future__ import annotations
 
+# --- Intel XPU DLL preload (must run before any torch import) ---
+# The system C:\Python313\Library\bin has stale Intel 2025.0.x DLLs;
+# torch 2.8.0+xpu needs 2025.1.x.  Preloading from user Library/bin
+# ensures the correct versions are in memory first.
+import ctypes as _ctypes
+import os as _os
+import sys as _sys
+
+if _sys.platform == "win32":
+    _user_dll = _os.path.join(
+        _os.environ.get("APPDATA", ""), "Python", "Library", "bin"
+    )
+    if _os.path.isdir(_user_dll):
+        _os.add_dll_directory(_user_dll)
+        for _dll in (
+            "tbb12.dll", "libircmd.dll", "libirngmd.dll", "libmmd.dll",
+            "libiomp5md.dll", "sycl8.dll", "ur_loader.dll",
+            "ur_adapter_level_zero.dll", "ur_adapter_opencl.dll",
+        ):
+            _p = _os.path.join(_user_dll, _dll)
+            if _os.path.exists(_p):
+                try:
+                    _ctypes.CDLL(_p)
+                except OSError:
+                    pass
+del _ctypes, _os, _sys
+# --- end DLL preload ---
+
 import asyncio
 import logging
 import sys
