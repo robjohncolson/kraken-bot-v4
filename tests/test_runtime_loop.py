@@ -2267,22 +2267,36 @@ def test_rotation_tree_drift_warning_threshold() -> None:
     )
 
 
-def _rotation_tree_drift_value(*, total_usd: str) -> RotationTreeValueResult:
+def _rotation_tree_drift_value(
+    *, total_usd: str, extra_root: bool = False
+) -> RotationTreeValueResult:
     total = Decimal(total_usd)
+    roots = [
+        RotationTreeRootValue(
+            node_id="root-ada",
+            asset="ADA",
+            status=RotationNodeStatus.OPEN,
+            quantity_total=Decimal("100"),
+            price_usd=Decimal("1"),
+            value_usd=total,
+        )
+    ]
+    if extra_root:
+        roots.append(
+            RotationTreeRootValue(
+                node_id="root-eth",
+                asset="ETH",
+                status=RotationNodeStatus.OPEN,
+                quantity_total=Decimal("1"),
+                price_usd=Decimal("3000"),
+                value_usd=Decimal("3000"),
+            )
+        )
     return RotationTreeValueResult(
         rendered_total_usd=f"{total:.2f}",
         total_usd=total,
         has_missing_prices=False,
-        roots=(
-            RotationTreeRootValue(
-                node_id="root-ada",
-                asset="ADA",
-                status=RotationNodeStatus.OPEN,
-                quantity_total=Decimal("100"),
-                price_usd=Decimal("1"),
-                value_usd=total,
-            ),
-        ),
+        roots=tuple(roots),
     )
 
 
@@ -2343,7 +2357,7 @@ def test_rotation_tree_drift_memory_rewritten_after_window() -> None:
     assert write_mock.call_count == 2
 
 
-def test_rotation_tree_drift_memory_rewritten_on_content_change() -> None:
+def test_rotation_tree_drift_memory_rewritten_on_structural_change() -> None:
     current_time = NOW
     runtime = _runtime()
     runtime._utc_now = lambda: current_time
@@ -2357,7 +2371,7 @@ def test_rotation_tree_drift_memory_rewritten_on_content_change() -> None:
         )
         runtime._record_rotation_tree_drift(
             state=state,
-            tree_value=_rotation_tree_drift_value(total_usd="110"),
+            tree_value=_rotation_tree_drift_value(total_usd="100", extra_root=True),
             pruned_roots=(),
         )
 
