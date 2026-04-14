@@ -1225,24 +1225,32 @@ class SchedulerRuntime:
             "roots": roots,
             "pruned_roots": list(pruned_roots),
         }
-        frozen_content = json.dumps(content, sort_keys=True)
+        signature = {
+            "tree_value_usd": tree_value.rendered_total_usd,
+            "portfolio_total_usd_rounded": str(portfolio_total_value_usd.quantize(Decimal("1"))),
+            "delta_rounded": str(delta_usd.quantize(Decimal("1"))),
+            "has_missing_prices": tree_value.has_missing_prices,
+            "root_ids": sorted(root.node_id for root in tree_value.roots),
+            "pruned_count": len(pruned_roots),
+        }
+        frozen_signature = json.dumps(signature, sort_keys=True)
         now = _normalize_timestamp(self._utc_now())
         if (
-            frozen_content == self._last_rotation_tree_drift_content
+            frozen_signature == self._last_rotation_tree_drift_content
             and self._last_rotation_tree_drift_ts is not None
             and now - self._last_rotation_tree_drift_ts
             < ROTATION_TREE_DRIFT_DEDUPE_WINDOW
         ):
             return
 
-        logger.warning("rotation_tree_drift: %s", frozen_content)
+        logger.warning("rotation_tree_drift: %s", json.dumps(content, sort_keys=True))
         self._cc_memory._write(
             "rotation_tree_drift",
             content,
             pair=None,
             importance=0.7,
         )
-        self._last_rotation_tree_drift_content = frozen_content
+        self._last_rotation_tree_drift_content = frozen_signature
         self._last_rotation_tree_drift_ts = now
 
     async def _reap_stale_cc_orders(self, now: datetime) -> None:
