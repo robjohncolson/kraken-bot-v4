@@ -1226,7 +1226,7 @@ class SchedulerRuntime:
             "pruned_roots": list(pruned_roots),
         }
         signature = {
-            "tree_value_usd": tree_value.rendered_total_usd,
+            "tree_total_usd_rounded": str(tree_value.total_usd.quantize(Decimal("1"))),
             "portfolio_total_usd_rounded": str(portfolio_total_value_usd.quantize(Decimal("1"))),
             "delta_rounded": str(delta_usd.quantize(Decimal("1"))),
             "has_missing_prices": tree_value.has_missing_prices,
