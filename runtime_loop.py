@@ -9,7 +9,7 @@ import time as _time
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, ROUND_DOWN
 from threading import Lock
 from typing import Protocol
 
@@ -1225,10 +1225,16 @@ class SchedulerRuntime:
             "roots": roots,
             "pruned_roots": list(pruned_roots),
         }
+        ten_bucket = Decimal("10")
         signature = {
-            "tree_total_usd_rounded": str(tree_value.total_usd.quantize(Decimal("1"))),
-            "portfolio_total_usd_rounded": str(portfolio_total_value_usd.quantize(Decimal("1"))),
-            "delta_rounded": str(delta_usd.quantize(Decimal("1"))),
+            "tree_total_bucket_10usd": str(
+                (tree_value.total_usd / ten_bucket).quantize(Decimal("1"), rounding=ROUND_DOWN)
+                * ten_bucket
+            ),
+            "portfolio_total_bucket_10usd": str(
+                (portfolio_total_value_usd / ten_bucket).quantize(Decimal("1"), rounding=ROUND_DOWN)
+                * ten_bucket
+            ),
             "has_missing_prices": tree_value.has_missing_prices,
             "root_ids": sorted(root.node_id for root in tree_value.roots),
             "pruned_count": len(pruned_roots),
