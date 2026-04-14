@@ -142,3 +142,7 @@ Each run appends one line below. Format: `- <UTC ts> -- **<status>** action=<...
 - 20260413_131502 UTC -- **skipped** (unstaged user changes present (user is mid-edit))
 
 - 20260413_191502 UTC -- **skipped** (unstaged user changes present (user is mid-edit))
+
+- 20260414_011502 UTC -- **skipped** (bot uptime < 1h (1192s))
+
+- 20260414_071502 UTC -- **completed** action=spec_dispatched spec=widen-recon-dedupe-windows commit=38764d9 restarted=main

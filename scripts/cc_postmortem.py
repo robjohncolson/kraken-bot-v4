@@ -240,6 +240,26 @@ def main() -> None:
     # Also print to stdout
     print(report)
 
+    # Premature-exit detector (best-effort, non-fatal)
+    try:
+        from analysis.premature_exit import detect_premature_exits
+        from persistence.cc_memory import CCMemory
+
+        outcomes = fetch_json("/api/trade-outcomes?lookback_days=30").get("outcomes", [])
+        db_path = Path(__file__).resolve().parents[1] / "data" / "bot.db"
+        result = detect_premature_exits(
+            lookback_days=30,
+            cc_memory=CCMemory(str(db_path)),
+            trade_outcomes=outcomes,
+        )
+        print(
+            f"[premature_exit] scanned={result['scanned']} "
+            f"flagged={result['flagged']} skipped={result['skipped']} "
+            f"errors={result['errors']}"
+        )
+    except Exception as exc:
+        print(f"[premature_exit] detector error (non-fatal): {exc}")
+
 
 if __name__ == "__main__":
     main()
