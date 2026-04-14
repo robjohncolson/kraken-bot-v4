@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
+from decimal import InvalidOperation
 from typing import Any, Protocol
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -255,6 +256,29 @@ def _encode_payload(payload: object) -> Any:
     return jsonable_encoder(payload)
 
 
+def _parse_rotation_tree_total(value: object) -> Decimal | None:
+    raw = str(value).strip()
+    if not raw:
+        return None
+    if raw.startswith("~"):
+        raw = raw[1:].strip()
+    if raw.upper() == "N/A":
+        return None
+    try:
+        return Decimal(raw).quantize(Decimal("0.01"))
+    except (InvalidOperation, ValueError):
+        return None
+
+
+def _wallet_total_from_dashboard_state(state: DashboardState) -> Decimal | None:
+    total = _parse_rotation_tree_total(state.rotation_tree.total_portfolio_value_usd)
+    if total is None:
+        return None
+    if not state.rotation_tree.nodes and state.portfolio.cash_usd > ZERO_DECIMAL:
+        return None
+    return total
+
+
 # ---------------------------------------------------------------------------
 # CC Command API — endpoints for Claude Code to read data and place orders
 # ---------------------------------------------------------------------------
@@ -286,7 +310,9 @@ def create_cc_router(
     from persistence.sqlite import SqliteReader, SqliteWriter
 
     _log = logging.getLogger(__name__)
+    _balances_log = logging.getLogger("web_routes")
     router = APIRouter(prefix="/api")
+    wallet_total_warning_emitted = False
     # Create a separate SQLite connection for the CC router thread pool
     # (the runtime's connection has check_same_thread=True by default)
     _cc_reader = None
@@ -653,10 +679,20 @@ def create_cc_router(
     async def get_balances(
         state: DashboardState = Depends(get_state_for_cc),
     ) -> dict[str, Any]:
+        nonlocal wallet_total_warning_emitted
         portfolio = state.portfolio
+        wallet_total = _wallet_total_from_dashboard_state(state)
+        if wallet_total is None:
+            wallet_total = portfolio.cash_usd if portfolio else ZERO_DECIMAL
+            if not wallet_total_warning_emitted:
+                _balances_log.warning(
+                    "balances endpoint: wallet total unavailable, returning cash only"
+                )
+                wallet_total_warning_emitted = True
         return {
             "cash_usd": str(portfolio.cash_usd) if portfolio else "0",
             "total_value_usd": str(portfolio.total_value_usd) if portfolio else "0",
+            "total_wallet_value_usd": str(wallet_total),
         }
 
     @router.get("/exchange-balances")

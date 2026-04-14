@@ -136,6 +136,31 @@ class Portfolio:
     directional_exposure: Decimal = ZERO_DECIMAL
     max_drawdown: Decimal = ZERO_DECIMAL
 
+    def __post_init__(self) -> None:
+        if self.total_value_usd != ZERO_DECIMAL:
+            return
+        if self.cash_usd == ZERO_DECIMAL and not self.positions:
+            return
+        object.__setattr__(
+            self,
+            "total_value_usd",
+            _default_portfolio_total_value_usd(self.cash_usd, self.positions),
+        )
+
+
+def _default_portfolio_total_value_usd(
+    cash_usd: UsdAmount,
+    positions: tuple[Position, ...],
+) -> UsdAmount:
+    total = cash_usd
+    for position in positions:
+        notional = position.quantity * position.entry_price
+        if position.side == PositionSide.SHORT:
+            total -= notional
+        else:
+            total += notional
+    return total
+
 
 @dataclass(frozen=True, slots=True)
 class Balance:
