@@ -1029,7 +1029,7 @@ def test_recon_discrepancy_persists_to_cc_memory() -> None:
     asyncio.run(scenario())
 
 
-def test_recon_discrepancy_dedupe_within_5min() -> None:
+def test_recon_discrepancy_dedupe_within_60min() -> None:
     async def scenario() -> None:
         conn = _memory_db()
         current_time = NOW
@@ -1059,6 +1059,7 @@ def test_recon_discrepancy_dedupe_within_5min() -> None:
         )
 
         await runtime._handle_effects((discrepancy,))
+        current_time = NOW + timedelta(minutes=59)
         await runtime._handle_effects((discrepancy,))
 
         row = conn.execute(
@@ -1101,7 +1102,7 @@ def test_recon_discrepancy_writes_again_after_dedupe_window() -> None:
         )
 
         await runtime._handle_effects((discrepancy,))
-        current_time = NOW + timedelta(minutes=6)
+        current_time = NOW + timedelta(minutes=61)
         await runtime._handle_effects((discrepancy,))
 
         row = conn.execute(
@@ -2325,6 +2326,7 @@ def test_rotation_tree_drift_memory_deduped_within_window() -> None:
             tree_value=tree_value,
             pruned_roots=(),
         )
+        current_time = NOW + timedelta(minutes=29)
         runtime._record_rotation_tree_drift(
             state=state,
             tree_value=tree_value,
@@ -2395,6 +2397,7 @@ def test_rotation_tree_drift_log_also_rate_limited(caplog) -> None:
             assert len(caplog.records) == 1
             caplog.clear()
 
+            current_time = NOW + timedelta(minutes=29)
             runtime._record_rotation_tree_drift(
                 state=state,
                 tree_value=tree_value,
