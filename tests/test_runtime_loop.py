@@ -36,7 +36,13 @@ from exchange.models import KrakenOrder, KrakenState, KrakenTrade
 from exchange.websocket import ConnectionState, FillConfirmed, PriceTick
 from guardian import MissingCurrentPriceError, PriceSnapshot
 from persistence.sqlite import SqliteReader, SqliteWriter, ensure_schema
-from runtime_loop import SchedulerRuntime, build_initial_scheduler_state
+from runtime_loop import (
+    ROTATION_TREE_DRIFT_DEDUPE_WINDOW,
+    RotationTreeRootValue,
+    RotationTreeValueResult,
+    SchedulerRuntime,
+    build_initial_scheduler_state,
+)
 from scheduler import ReconciliationDiscrepancy, SchedulerConfig
 from trading.conditional_tree import ConditionalTreeState
 from trading.reconciler import (
@@ -2259,6 +2265,129 @@ def test_rotation_tree_drift_warning_threshold() -> None:
         call.args and call.args[0] == "rotation_tree_drift: %s"
         for call in warning_mock.call_args_list
     )
+
+
+def _rotation_tree_drift_value(*, total_usd: str) -> RotationTreeValueResult:
+    total = Decimal(total_usd)
+    return RotationTreeValueResult(
+        rendered_total_usd=f"{total:.2f}",
+        total_usd=total,
+        has_missing_prices=False,
+        roots=(
+            RotationTreeRootValue(
+                node_id="root-ada",
+                asset="ADA",
+                status=RotationNodeStatus.OPEN,
+                quantity_total=Decimal("100"),
+                price_usd=Decimal("1"),
+                value_usd=total,
+            ),
+        ),
+    )
+
+
+def _rotation_tree_drift_state(
+    runtime: SchedulerRuntime, *, portfolio_total_usd: str
+):
+    return replace(
+        runtime.state,
+        bot_state=replace(
+            runtime.state.bot_state,
+            portfolio=Portfolio(total_value_usd=Decimal(portfolio_total_usd)),
+        ),
+    )
+
+
+def test_rotation_tree_drift_memory_deduped_within_window() -> None:
+    current_time = NOW
+    runtime = _runtime()
+    runtime._utc_now = lambda: current_time
+    state = _rotation_tree_drift_state(runtime, portfolio_total_usd="103.00")
+    tree_value = _rotation_tree_drift_value(total_usd="100")
+
+    with patch.object(runtime._cc_memory, "_write", return_value=1) as write_mock:
+        runtime._record_rotation_tree_drift(
+            state=state,
+            tree_value=tree_value,
+            pruned_roots=(),
+        )
+        runtime._record_rotation_tree_drift(
+            state=state,
+            tree_value=tree_value,
+            pruned_roots=(),
+        )
+
+    assert write_mock.call_count == 1
+
+
+def test_rotation_tree_drift_memory_rewritten_after_window() -> None:
+    current_time = NOW
+    runtime = _runtime()
+    runtime._utc_now = lambda: current_time
+    state = _rotation_tree_drift_state(runtime, portfolio_total_usd="103.00")
+    tree_value = _rotation_tree_drift_value(total_usd="100")
+
+    with patch.object(runtime._cc_memory, "_write", return_value=1) as write_mock:
+        runtime._record_rotation_tree_drift(
+            state=state,
+            tree_value=tree_value,
+            pruned_roots=(),
+        )
+        current_time = NOW + ROTATION_TREE_DRIFT_DEDUPE_WINDOW + timedelta(seconds=1)
+        runtime._record_rotation_tree_drift(
+            state=state,
+            tree_value=tree_value,
+            pruned_roots=(),
+        )
+
+    assert write_mock.call_count == 2
+
+
+def test_rotation_tree_drift_memory_rewritten_on_content_change() -> None:
+    current_time = NOW
+    runtime = _runtime()
+    runtime._utc_now = lambda: current_time
+    state = _rotation_tree_drift_state(runtime, portfolio_total_usd="103.00")
+
+    with patch.object(runtime._cc_memory, "_write", return_value=1) as write_mock:
+        runtime._record_rotation_tree_drift(
+            state=state,
+            tree_value=_rotation_tree_drift_value(total_usd="100"),
+            pruned_roots=(),
+        )
+        runtime._record_rotation_tree_drift(
+            state=state,
+            tree_value=_rotation_tree_drift_value(total_usd="110"),
+            pruned_roots=(),
+        )
+
+    assert write_mock.call_count == 2
+
+
+def test_rotation_tree_drift_log_also_rate_limited(caplog) -> None:
+    current_time = NOW
+    runtime = _runtime()
+    runtime._utc_now = lambda: current_time
+    state = _rotation_tree_drift_state(runtime, portfolio_total_usd="103.00")
+    tree_value = _rotation_tree_drift_value(total_usd="100")
+
+    with patch.object(runtime._cc_memory, "_write", return_value=1):
+        with caplog.at_level("WARNING", logger="runtime_loop"):
+            runtime._record_rotation_tree_drift(
+                state=state,
+                tree_value=tree_value,
+                pruned_roots=(),
+            )
+            assert len(caplog.records) == 1
+            caplog.clear()
+
+            runtime._record_rotation_tree_drift(
+                state=state,
+                tree_value=tree_value,
+                pruned_roots=(),
+            )
+
+    assert len(caplog.records) == 0
 
 
 async def _noop_publish(*, event: str, data, event_id: str | None = None) -> None:

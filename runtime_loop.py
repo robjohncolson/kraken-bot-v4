@@ -115,6 +115,7 @@ DEFAULT_GUARDIAN_INTERVAL_SEC = 120
 ROTATION_ENTRY_MAX_RETRIES = 3
 ROTATION_PAIR_COOLDOWN_SEC = 1800  # 30 min cooldown after cancel
 RECONCILIATION_ANOMALY_DEDUPE_WINDOW = timedelta(minutes=5)
+ROTATION_TREE_DRIFT_DEDUPE_WINDOW = timedelta(minutes=5)
 ROTATION_TREE_DRIFT_TOLERANCE_RATIO = Decimal("0.005")
 ROTATION_TREE_ORPHAN_MIN_VALUE_USD = Decimal("1.00")
 
@@ -479,6 +480,10 @@ class SchedulerRuntime:
         self._display_beliefs: dict[str, BeliefSnapshot] = {}
         # Rotation event log (capped ring buffer)
         self._rotation_events: deque[RotationEvent] = deque(maxlen=100)
+        self._last_recon_anomaly_content: str | None = None
+        self._last_recon_anomaly_ts: datetime | None = None
+        self._last_rotation_tree_drift_content: str | None = None
+        self._last_rotation_tree_drift_ts: datetime | None = None
         self._dashboard_store = DashboardStateStore(
             self._build_dashboard_state(self._state)
         )
@@ -490,8 +495,6 @@ class SchedulerRuntime:
         self._execution_feed_ready = False
         self._last_runtime_error: str | None = None
         self._last_belief_poll_at: datetime | None = None
-        self._last_recon_anomaly_content: str | None = None
-        self._last_recon_anomaly_ts: datetime | None = None
         self._belief_poll_interval_sec = (
             settings.belief_stale_hours * 3600 // 2
         )  # poll at half staleness
@@ -1222,13 +1225,25 @@ class SchedulerRuntime:
             "roots": roots,
             "pruned_roots": list(pruned_roots),
         }
-        logger.warning("rotation_tree_drift: %s", json.dumps(content, sort_keys=True))
+        frozen_content = json.dumps(content, sort_keys=True)
+        now = _normalize_timestamp(self._utc_now())
+        if (
+            frozen_content == self._last_rotation_tree_drift_content
+            and self._last_rotation_tree_drift_ts is not None
+            and now - self._last_rotation_tree_drift_ts
+            < ROTATION_TREE_DRIFT_DEDUPE_WINDOW
+        ):
+            return
+
+        logger.warning("rotation_tree_drift: %s", frozen_content)
         self._cc_memory._write(
             "rotation_tree_drift",
             content,
             pair=None,
             importance=0.7,
         )
+        self._last_rotation_tree_drift_content = frozen_content
+        self._last_rotation_tree_drift_ts = now
 
     async def _reap_stale_cc_orders(self, now: datetime) -> None:
         try:
