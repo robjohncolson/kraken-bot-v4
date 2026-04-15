@@ -40,6 +40,7 @@ C:\Python313\python.exe scripts/cc_brain.py         # one-shot brain cycle
 C:\Python313\python.exe scripts/cc_brain.py --loop  # brain daemon
 C:\Python313\python.exe scripts/cc_postmortem.py    # trade analysis (also runs premature-exit detector)
 C:\Python313\python.exe analysis/premature_exit.py --lookback-days 30 [--dry-run]
+C:\Python313\python.exe scripts/doge_snapshot.py [--log DOGE|USD|SPLIT --note STR] [--json] [--no-color]
 ```
 
 Key env vars in `.env`: `CC_BRAIN_MODE=true`, `BELIEF_MODEL=timesfm`,
@@ -100,7 +101,7 @@ Source of truth: `web/routes.py`.
 `decision`, `observation`, `portfolio_snapshot`, `regime`, `postmortem`,
 `param_change`, `shadow_verdict`, `permission_blocked`, `stuck_dust`,
 `reconciliation_anomaly`, `rotation_tree_drift`, `pending_order`,
-`premature_exit`.
+`premature_exit`, `doge_snapshot`.
 
 ## Open follow-ups (orchestrator-eligible)
 
@@ -117,6 +118,16 @@ Source of truth: `web/routes.py`.
    `stuck_dust` in the new format (category='stuck_dust', pair=asset) and
    that the 48h cooldown suppresses retries. If volume-min failures keep
    landing, consider a follow-up to consolidate dust via a different path.
+5. **DOGE snapshot dataset growth (spec 36)**: user is now journaling manual
+   DOGE/USD decisions via `scripts/doge_snapshot.py --log DOGE|USD|SPLIT`.
+   Each call writes a `doge_snapshot` cc_memory row with full indicator
+   inputs + the chosen state. Once >=30 rows accumulate with eventual
+   price outcomes available, propose a spec for a small supervised model
+   on (inputs, decision, outcome) -- user's stated long-term goal is
+   auto-research a neural net on their own labels. Until then: hands off,
+   no auto-decision suggestions, the helper is observation + journal only.
+   (One smoke-test row exists from commit time, filter it via
+   `note='spec 36 smoke test'`.)
 
 ## Trading philosophy
 
