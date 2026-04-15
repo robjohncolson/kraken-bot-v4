@@ -142,6 +142,10 @@ def _limit_sell_price(price: float, pair: str) -> float:
 _ALIASES = {"XBT": "BTC", "XDG": "DOGE"}
 # Assets to exclude from trading (stablecoins, fiat)
 _SKIP_BASES = frozenset(("USDT", "USDC", "DAI", "PYUSD", "EUR", "GBP", "AUD", "CAD", "CHF", "JPY"))
+# Fiat currencies: never sell these as untracked wallet dust
+_FIAT_ASSETS = frozenset(("USD", "GBP", "EUR", "AUD", "CAD", "CHF", "JPY"))
+# Minimum USD value for an untracked wallet balance to be swept
+_WALLET_DUST_MIN_USD = 0.50
 
 # Pair discovery cache
 _discovered_cache: dict = {}
@@ -1325,6 +1329,44 @@ def find_dust_positions(
     return dust
 
 
+def find_wallet_only_untracked(
+    holdings: list[dict],
+    open_root_assets: set[str],
+    min_value_usd: float = _WALLET_DUST_MIN_USD,
+    recently_stuck: set[str] | None = None,
+) -> list[dict]:
+    """Find wallet balances that are not in any open rotation node.
+
+    Returns a list of sweep-compatible dicts with keys: asset, qty, usd_value.
+
+    Skips:
+    - Fiat currencies (USD, GBP, EUR, AUD, CAD, CHF, JPY)
+    - Stablecoins (USDT, USDC, DAI, PYUSD) via _SKIP_BASES
+    - Assets already tracked in an open rotation root
+    - Balances below min_value_usd (default $0.50)
+    - Assets in recently_stuck (had a failed sweep attempt within the cooldown window)
+    """
+    results = []
+    for h in holdings:
+        asset = h["asset"]
+        if asset in _FIAT_ASSETS:
+            continue
+        if asset in _SKIP_BASES:
+            continue
+        if asset in open_root_assets:
+            continue
+        if recently_stuck and asset in recently_stuck:
+            continue
+        usd_val = float(h.get("value_usd", 0))
+        if usd_val < min_value_usd:
+            continue
+        qty = float(h.get("qty", 0))
+        if qty <= 0:
+            continue
+        results.append({"asset": asset, "qty": qty, "usd_value": usd_val})
+    return results
+
+
 def sweep_dust(dust_positions: list[dict], dry_run: bool, log_fn) -> list[dict]:
     """Attempt to sell dust positions via limit orders. Returns list of results."""
     results = []
@@ -1353,8 +1395,9 @@ def sweep_dust(dust_positions: list[dict], dry_run: bool, log_fn) -> list[dict]:
             log_fn(f"  DUST FAIL: {d['asset']} — {result['error']}")
             # Write memory so we know this dust is stuck
             fetch("/api/memory", method="POST", data={
-                "category": "observation",
-                "content": {"type": "stuck_dust", "asset": d["asset"],
+                "category": "stuck_dust",
+                "pair": d["asset"],
+                "content": {"asset": d["asset"],
                             "qty": d["qty"], "reason": result["error"]},
                 "importance": 0.3,
             })
@@ -1775,6 +1818,33 @@ def run_brain(dry_run: bool = False) -> str:
         sweep_dust(dust, dry_run, log)
     else:
         log("  No dust to sweep.")
+
+    # Wallet-only untracked sweep — sell crypto balances in the wallet but not in
+    # any open rotation node (e.g. FLOW, TRIA stranded after manual ops)
+    open_root_assets = {p["asset"] for p in open_positions}
+
+    # Build stuck_dust suppression set: skip assets that failed in the last 48h
+    recently_stuck: set[str] = set()
+    stuck_resp = fetch("/api/memory?category=stuck_dust&hours=48")
+    for mem in stuck_resp.get("memories", []):
+        # Primary: pair field stores the asset name (see sweep_dust write format)
+        asset_from_pair = mem.get("pair")
+        if asset_from_pair:
+            recently_stuck.add(asset_from_pair)
+        # Fallback: content.asset for any old-format rows
+        content = mem.get("content") or {}
+        asset_from_content = content.get("asset")
+        if asset_from_content:
+            recently_stuck.add(asset_from_content)
+    if recently_stuck:
+        log(f"  Stuck-dust suppression: {len(recently_stuck)} asset(s) cooling down (48h): {sorted(recently_stuck)}")
+
+    wallet_untracked = find_wallet_only_untracked(holdings, open_root_assets, recently_stuck=recently_stuck)
+    if wallet_untracked:
+        log(f"\n  Wallet untracked sweep: {len(wallet_untracked)} asset(s) not in rotation tree")
+        sweep_dust(wallet_untracked, dry_run, log)
+    else:
+        log("  No wallet-only untracked assets to sweep.")
 
     # === Step 7: Remember ===
     log("\n--- Step 7: Remember ---")

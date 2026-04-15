@@ -81,6 +81,8 @@ def _run_entry_cycle(
             f"/api/memory?category={cc_brain.INSUFFICIENT_QUOTE_CATEGORY}&hours=999999&limit=1000"
         ):
             return {"memories": insufficient_memories or []}
+        if endpoint == "/api/memory?category=stuck_dust&hours=48":
+            return {"memories": []}
         if endpoint == "/api/exchange-balances":
             return {"balances": exchange_balances, "count": len(exchange_balances)}
         if endpoint.startswith("/api/ohlcv/"):

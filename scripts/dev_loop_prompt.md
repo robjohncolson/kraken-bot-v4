@@ -63,6 +63,12 @@ Pick the **single highest-leverage issue** from this priority order. Stop at the
 3. **Stablecoin trade with `abs(net_pnl) > 5%`** in the last 7 days -- unit/accounting bug
 4. **New `cc_memory.category='permission_blocked'`** for a pair NOT already blocked -- needs blacklist update
 5. **Reconciliation discrepancy** logged >= 3 times in 24h -- state-machine drift
+   - If `untracked_asset_symbols` contains any non-fiat token (anything other than
+     USD/GBP/EUR/AUD/CAD/CHF/JPY), this is NOT benign -- it is real wallet drift
+     the bot cannot see. Treat as high-priority signal regardless of count.
+   - USD/GBP/EUR/AUD/CAD/CHF/JPY untracked symbols = potentially benign fiat hold.
+   - Non-fiat untracked symbols (crypto, stablecoins) = dispatch a sweep spec
+     even if the anomaly count is below 3.
 6. **Shadow vs live disagreement > 10 percentage points** over 24h on filled cycles -- strategy mis-tuning
 7. **New error pattern** in main_restart_*.log not seen in last 7 days -- diagnose
 8. **Agent repo runner failures** (parallel-runner-errors.log entries from last 24h) -- fix runner
