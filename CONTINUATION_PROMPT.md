@@ -112,8 +112,11 @@ Source of truth: `web/routes.py`.
    parse claude's token output yet.
 3. **Weekly review prompt**: separate cadence, only after the 6h tactical
    loop has been stable for a few days.
-4. **`untracked_assets` reconciliation noise**: orchestrator has been
-   correctly deferring as benign held-fiat accounting. Worth a manual look.
+4. **Spec 35 forward check**: next brain cycle should exercise the new
+   wallet-untracked sweep against FLOW/TRIA. Verify `cc_memory` populates
+   `stuck_dust` in the new format (category='stuck_dust', pair=asset) and
+   that the 48h cooldown suppresses retries. If volume-min failures keep
+   landing, consider a follow-up to consolidate dust via a different path.
 
 ## Trading philosophy
 
